@@ -1,0 +1,40 @@
+{
+  "schema": "surface-config/v1",
+  "environment": "saga-protocol",
+  "repo_path": "/Users/anthonyflores/code/saga-protocol",
+  "canonical": true,
+  "role": "SAGA / D32 long-running build protocol: rules, operator runbook, spine-relay, and mission-control tooling.",
+  "default_branch": "main",
+  "gh_repo": "tonyflo79/saga-protocol",
+  "cold_load": [
+    {
+      "claim_template": "HEAD is {value}",
+      "probe": {"kind": "git-head"}
+    },
+    {
+      "claim_template": "HEAD committed {value}",
+      "probe": {"kind": "git-head-time"}
+    },
+    {
+      "claim_template": "open PRs: {value}",
+      "probe": {"kind": "gh-pr-count"}
+    },
+    {
+      "claim_template": "spine-relay present (tools/spine-relay/spine_relay.py): {value}",
+      "probe": {"kind": "file-exists", "path": "tools/spine-relay/spine_relay.py"}
+    },
+    {
+      "claim_template": "mission-control tooling present (tools/mission-control): {value}",
+      "probe": {"kind": "file-exists", "path": "tools/mission-control"}
+    }
+  ],
+  "verification": [],
+  "decisions": [],
+  "next_lanes": [],
+  "do_not_read": [
+    {"entry": "runs/ -- bulk run bundles; regenerate, do not read", "source": "config", "as_of": "2026-07-23"}
+  ],
+  "pitfalls": [
+    {"entry": "Never merge or direct-push to a default branch -- merge is Anthony's.", "source": "operator-memory", "as_of": "2026-07-23"}
+  ]
+}

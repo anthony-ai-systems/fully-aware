@@ -1,0 +1,65 @@
+{
+  "schema": "surface-config/v1",
+  "environment": "marketing-os-main",
+  "repo_path": "/Users/anthonyflores/code/marketing-os-main",
+  "canonical": true,
+  "role": "Project-agnostic marketing generation OS; brand context loaded per-project via each project's Soul.md.",
+  "default_branch": "main",
+  "gh_repo": "tonyflo79/marketing-os-main",
+  "cold_load": [
+    {
+      "claim_template": "HEAD is {value}",
+      "probe": {"kind": "git-head"}
+    },
+    {
+      "claim_template": "HEAD committed {value}",
+      "probe": {"kind": "git-head-time"}
+    },
+    {
+      "claim_template": "open PRs: {value}",
+      "probe": {"kind": "gh-pr-count"}
+    },
+    {
+      "claim": "13 engine entry points resolve from the manifest Engine Master File Mapping (extractor, main-pipeline, vsl, behavioral-intelligence, page-builder, upsell, checkout, email, ads, advertorial, organic).",
+      "source": "~system/context-packs/FABLE-LOAD-PACK.md",
+      "as_of": "2026-07-02"
+    },
+    {
+      "claim": "Cold-load read order: this surface, then AGENT.md (routing/structure/pipeline flow), then ~system/PROTOCOL-MANIFEST.md (loading rules + engine master map), then the active run bundle NEXT_SESSION.json.",
+      "source": "~system/context-packs/FABLE-LOAD-PACK.md",
+      "as_of": "2026-07-02"
+    }
+  ],
+  "verification": [
+    {
+      "name": "check-protocol-manifest.py --strict",
+      "notes": "manifest path-token + profile-ref integrity; exit code is the baseline, not a gate.",
+      "probe": {
+        "kind": "script-exit-code",
+        "script": "_tools/check-protocol-manifest.py",
+        "args": ["--repo", ".", "--strict"],
+        "timeout": 120
+      }
+    }
+  ],
+  "decisions": [],
+  "next_lanes": [
+    {"entry": "P-10 -- Output persistence / recovery contract", "source": "_proposals/upgrade-execution-2026-07/EXECUTION-REPORT.md", "as_of": "2026-07-02"},
+    {"entry": "P-11 -- Real project canary suite", "source": "_proposals/upgrade-execution-2026-07/EXECUTION-REPORT.md", "as_of": "2026-07-02"},
+    {"entry": "P-12 -- os-verify.py unified verification command", "source": "_proposals/upgrade-execution-2026-07/EXECUTION-REPORT.md", "as_of": "2026-07-02"}
+  ],
+  "do_not_read": [
+    {"entry": "**/_deprecated/ -- name rule: deprecated subtrees, not execution entrypoints", "source": "~system/context-packs/FABLE-LOAD-PACK.md", "as_of": "2026-07-02"},
+    {"entry": "10-adaptive-vsl-pipeline/ -- ARCHIVED, not an execution entrypoint", "source": "~system/context-packs/FABLE-LOAD-PACK.md", "as_of": "2026-07-02"},
+    {"entry": "MASTER-PLAN.md -- staleness rule: last updated older than 30d vs origin/main", "source": "~system/context-packs/FABLE-LOAD-PACK.md", "as_of": "2026-07-02"},
+    {"entry": "_archive/ -- name rule: archived/legacy tree", "source": "~system/context-packs/FABLE-LOAD-PACK.md", "as_of": "2026-07-02"},
+    {"entry": "_legacy/ -- name rule: archived/legacy tree", "source": "~system/context-packs/FABLE-LOAD-PACK.md", "as_of": "2026-07-02"},
+    {"entry": "runs/ -- bulk: at/above the pinned 50MB do-not-read cutoff (per-run trace; regenerate, do not read)", "source": "~system/context-packs/FABLE-LOAD-PACK.md", "as_of": "2026-07-02"},
+    {"entry": "~outputs/ -- gitignore rule: project runtime, absent on disk", "source": "~system/context-packs/FABLE-LOAD-PACK.md", "as_of": "2026-07-02"}
+  ],
+  "pitfalls": [
+    {"entry": "Root NEXT_SESSION.json has historically been invalid JSON (Codex appended objects without array brackets); the M1 E-adapter salvages it, and a separate writer fix stops the append.", "source": "macro-seat-spec-2026-07-23.md SS1.3", "as_of": "2026-07-23"},
+    {"entry": "Never edit marketing-os on main directly; every scope gets its own branch plus a peer worktree.", "source": "operator-memory", "as_of": "2026-07-23"},
+    {"entry": "Commits into pg-main-tflo / PG-MUSCLE paths block em-dashes; ASCII hyphen only.", "source": "operator-memory", "as_of": "2026-07-23"}
+  ]
+}
