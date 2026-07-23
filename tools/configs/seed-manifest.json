@@ -8,7 +8,7 @@
     {
       "environment": "fully-aware",
       "repo_path": "/Users/anthonyflores/code/fully-aware",
-      "role": "Personal-infra 'fully aware' macro-seat layer: surface generator, next-session parser, boot-pack assembler.",
+      "role": "Personal-infra 'fully aware' layer: surface generator, next-session parser, boot-pack assembler.",
       "status": "canonical",
       "kind": "personal-infra",
       "owning_system": "fully-aware",
