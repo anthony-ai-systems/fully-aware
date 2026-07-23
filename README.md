@@ -1,6 +1,6 @@
-# Macro Seat
+# Fully Aware
 
-The Macro Seat is a personal orchestration data layer over all of Anthony's
+Fully Aware is a personal orchestration data layer over all of Anthony's
 environments. It is a standing, sessionless orchestration substrate: every
 environment exposes a uniform, provenance-tagged state surface, a unified
 next-session view normalizes divergent handoff schemas, and a boot-pack folds
@@ -14,7 +14,7 @@ Shareable / productizable repos (saga-protocol, saga-mission-control,
 marketing-os) **never import code from this repo**. Coupling is by data contract
 only: the published schemas `surface/v1` and `next-session/v2` (and, once it
 ships, the boot-pack schema). This keeps the shareable repos clean for sharing
-and productization while the Macro Seat keeps its own working folder.
+and productization while Fully Aware keeps its own working folder.
 
 ## Provenance
 

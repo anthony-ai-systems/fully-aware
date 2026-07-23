@@ -1,6 +1,6 @@
-# CLAUDE.md — Macro Seat session anchor
+# CLAUDE.md — Fully Aware session anchor
 
-This repo is the working folder for Macro Seat sessions (folder = activity). A
+This repo is the working folder for Fully Aware sessions (folder = activity). A
 fresh Fable macro session boots here regardless of the task's true cwd.
 
 ## Boot protocol

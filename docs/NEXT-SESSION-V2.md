@@ -1,6 +1,6 @@
 # `next-session/v2` — unified NEXT_SESSION schema
 
-Status: v2 (Macro Seat lane M1). Parser: [`next_session.py`](../tools/next_session.py).
+Status: v2 (Fully Aware lane M1). Parser: [`next_session.py`](../tools/next_session.py).
 
 The machine survey found **five** divergent NEXT_SESSION schemas across ~1,761
 files on this laptop. `next-session/v2` is the single shape every consumer
