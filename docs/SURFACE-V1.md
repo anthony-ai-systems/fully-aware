@@ -4,7 +4,7 @@ Macro Seat spec v1, Artifact 1 (`build-plans/macro-seat-spec-2026-07-23.md`
 SS1.1-1.2). One shared, committed, D30-class generator
 (`generate-surface.py`) emits a machine-generated, provenance-tagged JSON surface
 per canonical environment. The surface is the atomic unit the Artifact-3 boot-pack
-assembler folds -- one per repo -- into the Macro Seat's starting context.
+assembler folds -- one per repo -- into Fully Aware's starting context.
 
 The generator is committed and shared; the emitted `surface.json` is **local-only
 and gitignored** (ruling SS6.2). Never hand-edit a surface -- re-run the generator.
