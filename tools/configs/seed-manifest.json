@@ -1,0 +1,79 @@
+{
+  "schema": "seed-manifest/v1",
+  "provenance": "manual",
+  "maintained_by": "Anthony (hand-maintained seed; superseded by P21 repo-manifest.json when it ships)",
+  "as_of": "2026-07-23",
+  "note": "Hand-maintained topology seed for the M4 boot-pack assembler. P21's repo-manifest.json + launchagent-manifest.json do not exist yet; until they do the assembler reads this file, tagged provenance:manual. Canonical repos only -- worktree copies (e.g. the marketing-os-* worktrees, and the marketing-os-main symlink -> marketing-os-read-main worktree) are deliberately excluded. Each repo's surface is folded from <repo_path>/.macro/surface.json (or the state/surfaces cache); absence renders a degraded WARNING, never a crash.",
+  "repos": [
+    {
+      "environment": "fully-aware",
+      "repo_path": "/Users/anthonyflores/code/fully-aware",
+      "role": "Personal-infra 'fully aware' macro-seat layer: surface generator, next-session parser, boot-pack assembler.",
+      "status": "canonical",
+      "kind": "personal-infra",
+      "owning_system": "fully-aware",
+      "default_branch": "main",
+      "pins": []
+    },
+    {
+      "environment": "saga-protocol",
+      "repo_path": "/Users/anthonyflores/code/saga-protocol",
+      "role": "SAGA / D32 long-running build process: rules, operator runbook, spine-relay, mission-control tooling.",
+      "status": "canonical",
+      "kind": "shareable",
+      "owning_system": "saga",
+      "default_branch": "main",
+      "pins": []
+    },
+    {
+      "environment": "saga-mission-control",
+      "repo_path": "/Users/anthonyflores/code/saga-mission-control",
+      "role": "SAGA mission-control UI: run boards, spine relay surfaces, operator dashboards.",
+      "status": "canonical",
+      "kind": "shareable",
+      "owning_system": "saga",
+      "default_branch": "main",
+      "pins": ["work-main is the active local branch as of seed date"]
+    },
+    {
+      "environment": "marketing-os-main",
+      "repo_path": "/Users/anthonyflores/code/marketing-os",
+      "role": "Project-agnostic marketing generation OS; brand context loaded per-project via each project's Soul.md.",
+      "status": "canonical",
+      "kind": "product",
+      "owning_system": "marketing-os",
+      "default_branch": "main",
+      "pins": ["canonical dir is marketing-os/; marketing-os-main is a symlink to a worktree and is excluded"]
+    },
+    {
+      "environment": "anthony-wiki-vault",
+      "repo_path": "/Users/anthonyflores/code/anthony-wiki-vault",
+      "role": "Cross-product knowledge vault: build-plans, handoffs, knowledge-base. Handoffs + cross-product knowledge only, never marketing outputs.",
+      "status": "canonical",
+      "kind": "personal-infra",
+      "owning_system": "vault",
+      "default_branch": "main",
+      "pins": []
+    },
+    {
+      "environment": "imprint",
+      "repo_path": "/Users/anthonyflores/code/imprint",
+      "role": "Personal-infra memory + taste system: ingest quarantine, entity registry, operator data root. Rich-lineage fork.",
+      "status": "canonical",
+      "kind": "personal-infra",
+      "owning_system": "imprint",
+      "default_branch": "main",
+      "pins": []
+    },
+    {
+      "environment": "atlas",
+      "repo_path": "/Users/anthonyflores/code/atlas",
+      "role": "Personal-infra Atlas-v2 knowledge graph / staleness oracle. Rich-lineage fork; default branch is master.",
+      "status": "canonical",
+      "kind": "personal-infra",
+      "owning_system": "atlas",
+      "default_branch": "master",
+      "pins": []
+    }
+  ]
+}
