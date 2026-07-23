@@ -1,0 +1,16 @@
+{
+  "schema": "ratification-backlog/v1",
+  "provenance": "manual",
+  "maintained_by": "Anthony",
+  "as_of": "2026-07-23",
+  "readme": "Hand-maintained standing ratification backlog. Anthony maintains this file by hand; the boot-pack assembler only READS it and PROJECTS its items into the unified decision queue (section 3). The queue ROUTES attention -- it never absorbs, performs, or clears ratification. Merge is Anthony's. Replace the placeholder below with real standing items as they arise, and delete items once ratified. Each item: {id, summary, kind (ratification|merge|ruling), waiting_since (ISO date), source}.",
+  "items": [
+    {
+      "id": "RB-PLACEHOLDER-1",
+      "summary": "PLACEHOLDER -- replace with a real standing ratification item (e.g. a parked cross-repo ratification awaiting Anthony's sign-off). This seed exists so the assembler has a valid feed shape to project.",
+      "kind": "ratification",
+      "waiting_since": "2026-07-23",
+      "source": "tools/configs/ratification-backlog.json"
+    }
+  ]
+}

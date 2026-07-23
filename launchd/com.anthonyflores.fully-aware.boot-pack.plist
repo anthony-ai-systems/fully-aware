@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Fully Aware boot-pack assembler LaunchAgent (Macro Seat lane M4, cadence
+  ruling SS6.5): regenerate state/BOOT-PACK.md daily at 05:45 local, BEFORE the
+  6am brief so the brief can cite the pack (once a week of packs has been
+  eyeballed, per the ruling).
+
+  UNARMED until Anthony merges: this plist points at code on the feat/m4-boot-pack
+  branch. Install + load with tools/install-launchagent.sh AFTER merge to main.
+  Do not load it against unmerged code.
+
+  D30 discipline: the assembler is read-only and writes only gitignored state/.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.anthonyflores.fully-aware.boot-pack</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/anthonyflores/code/fully-aware/tools/assemble-boot-pack.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/anthonyflores/code/fully-aware</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>5</integer>
+        <key>Minute</key>
+        <integer>45</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/anthonyflores/code/fully-aware/state/logs/boot-pack.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/anthonyflores/code/fully-aware/state/logs/boot-pack.err.log</string>
+</dict>
+</plist>

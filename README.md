@@ -6,7 +6,7 @@ environment exposes a uniform, provenance-tagged state surface, a unified
 next-session view normalizes divergent handoff schemas, and a boot-pack folds
 those signals into one starting context for the seat. Three artifacts make it
 real: the **next-session parser** (`next-session/v2`), the **surface generator**
-(`surface/v1`), and the **boot-pack assembler** (future lane M4).
+(`surface/v1`), and the **boot-pack assembler** (`boot-pack/v1`, lane M4).
 
 ## Standing rule — coupling by data contract only
 
@@ -29,9 +29,14 @@ Binding design spec:
 ## Layout
 
 - `tools/` — `next_session.py` (parser CLI), `generate-surface.py` (surface
-  generator CLI), `configs/` (central per-environment surface configs), and the
-  test suites (`test_next_session.py`, `test_generate_surface.py`).
+  generator CLI), `assemble-boot-pack.py` (boot-pack assembler CLI),
+  `configs/` (central per-environment surface configs, the hand-maintained
+  `seed-manifest.json` + `ratification-backlog.json`), `install-launchagent.sh`,
+  and the test suites (`test_next_session.py`, `test_generate_surface.py`,
+  `test_assemble_boot_pack.py`).
 - `docs/` — `NEXT-SESSION-V2.md` (`next-session/v2` schema),
-  `SURFACE-V1.md` (`surface/v1` schema).
-- `state/` — local-only, gitignored session state (holds `BOOT-PACK.md` once M4
-  ships).
+  `SURFACE-V1.md` (`surface/v1` schema), `BOOT-PACK-V1.md` (`boot-pack/v1`).
+- `launchd/` — `com.anthonyflores.fully-aware.boot-pack.plist` (daily 05:45
+  boot-pack refresh; unarmed until installed via `tools/install-launchagent.sh`).
+- `state/` — local-only, gitignored session state (holds `BOOT-PACK.md` +
+  `boot-pack.json`, the surfaces cache, and logs).
