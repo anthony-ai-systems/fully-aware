@@ -49,6 +49,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 
 # Import the M1 next-session parser from the same directory (data-contract
@@ -86,30 +87,59 @@ class AssembleError(Exception):
 # --------------------------------------------------------------------------- #
 # time helpers -- wall-clock lives ONLY in as_of fields
 # --------------------------------------------------------------------------- #
+# A leading ISO date, optionally followed by a time and offset. Anchored so we
+# only ever lift a *prefix* out of free-text as_of strings (e.g. the SMC form
+# "2026-07-23T07:30 local (approx, overnight ...)" yields "2026-07-23T07:30").
+_ISO_PREFIX_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}"
+    r"(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?")
+
+# strptime fallbacks for tokens fromisoformat rejects on 3.9 (e.g. HH:MM only).
+_ISO_STRPTIME_FMTS = (
+    "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%d")
+
+
+def _iso_token_to_utc(token):
+    """Parse one clean ISO date/datetime token to aware UTC, or None."""
+    token = token.strip()
+    if not token:
+        return None
+    dt = None
+    try:
+        dt = datetime.datetime.fromisoformat(token.replace("Z", "+00:00"))
+    except ValueError:
+        for fmt in _ISO_STRPTIME_FMTS:
+            try:
+                dt = datetime.datetime.strptime(token, fmt)
+                break
+            except ValueError:
+                continue
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc)
+
+
 def parse_ts(value):
     """Parse an ISO-ish timestamp to an aware UTC datetime, or None.
 
     Accepts date-only (YYYY-MM-DD), full ISO with/without offset, and a trailing
-    'Z'. Naive values are assumed UTC. Never raises.
+    'Z'. Naive values are assumed UTC. When the whole value is not itself a clean
+    timestamp, a leading ISO date/datetime PREFIX is extracted from free text
+    (source NEXT_SESSION as_of fields carry prose like
+    "2026-07-23T07:30 local (approx, overnight 2026-07-23 session)"). Never raises.
     """
     if not isinstance(value, str) or not value.strip():
         return None
-    s = value.strip().replace("Z", "+00:00")
-    for fmt in (None,):  # fromisoformat first
-        try:
-            dt = datetime.datetime.fromisoformat(s)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=datetime.timezone.utc)
-            return dt.astimezone(datetime.timezone.utc)
-        except ValueError:
-            break
-    # date-only or space-separated fallbacks
-    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-        try:
-            dt = datetime.datetime.strptime(value.strip()[:19], fmt)
-            return dt.replace(tzinfo=datetime.timezone.utc)
-        except ValueError:
-            continue
+    s = value.strip()
+    dt = _iso_token_to_utc(s)
+    if dt is not None:
+        return dt
+    m = _ISO_PREFIX_RE.match(s)
+    if m:
+        return _iso_token_to_utc(m.group(0))
     return None
 
 
@@ -130,11 +160,12 @@ def humanize_age(delta):
 def stale_prefix(now, as_of_str, threshold_secs):
     """Return 'STALE(<age>) ' when as_of is older than threshold, else ''.
 
-    Unknown/unparseable as_of is treated as stale-unknown (fail-visible).
+    An as_of with no extractable date renders 'AS_OF-UNPARSEABLE ' (fail-visible)
+    -- distinct from STALE, which means known-but-old.
     """
     ts = parse_ts(as_of_str)
     if ts is None:
-        return "STALE(?) "
+        return "AS_OF-UNPARSEABLE "
     age = now - ts
     if age.total_seconds() > threshold_secs:
         return "STALE(%s) " % humanize_age(age)
@@ -199,6 +230,29 @@ def _has_degrade(obj):
     if isinstance(obj, list):
         return any(_has_degrade(v) for v in obj)
     return False
+
+
+def collect_degraded_probes(obj, path=""):
+    """Return [(probe_name, reason), ...] for every degraded marker in a surface.
+
+    probe_name is the dotted key path to the marker (e.g. 'next_session',
+    'identity.behind_origin_main'); reason is the marker's own 'reason' field.
+    Deterministic (insertion / index order). Does not descend into a marker once
+    found, so the reason string is reported once, never re-walked.
+    """
+    out = []
+    if isinstance(obj, dict):
+        if obj.get("degraded") is True:
+            out.append((path or "surface",
+                        obj.get("reason", "no reason given")))
+            return out
+        for k, v in obj.items():
+            child = "%s.%s" % (path, k) if path else k
+            out.extend(collect_degraded_probes(v, child))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            out.extend(collect_degraded_probes(v, "%s[%d]" % (path, i)))
+    return out
 
 
 def load_surface(repo_entry, surfaces_cache_dir):
@@ -385,7 +439,15 @@ def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir):
             continue
         data = s["data"]
         if s.get("self_degraded"):
-            warnings.append("surface for %s carries inline degraded probe(s)" % env)
+            probes = collect_degraded_probes(data)
+            if probes:
+                detail = "; ".join("%s (%s)" % (name, reason)
+                                   for name, reason in probes)
+                warnings.append("surface for %s: degraded probe %s"
+                                % (env, detail))
+            else:
+                warnings.append(
+                    "surface for %s carries inline degraded probe(s)" % env)
         surface_repos.append(_project_surface(env, data, s["path"]))
 
     # -- section 3: unified decision queue (projection) -----------------------
@@ -409,17 +471,32 @@ def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir):
         for it in ho["items"]:
             queue.append({"summary": it["summary"], "kind": "human_only",
                           "source": it["source"], "as_of": it["as_of"]})
-    # feed c: standing ratification backlog
+    # feed c: standing ratification backlog. Placeholder entries (seed shapes
+    # Anthony hasn't replaced with real items) are SKIPPED -- they never leak
+    # into the live inbox; a single provenance footer records they were skipped.
     if not backlog.get("present"):
         warnings.append("ratification backlog unavailable: %s"
                         % backlog.get("reason", "?"))
+    backlog_live = 0
+    backlog_placeholders = 0
     for it in backlog.get("items", []):
+        if it.get("placeholder") is True:
+            backlog_placeholders += 1
+            continue
+        backlog_live += 1
         queue.append({
             "summary": it.get("summary", "") or it.get("id", ""),
             "kind": it.get("kind", "ratification"),
             "source": it.get("source", "ratification-backlog.json"),
             "as_of": it.get("waiting_since", "") or backlog.get("as_of", ""),
         })
+    backlog_summary = {
+        "present": bool(backlog.get("present")),
+        "live": backlog_live,
+        "placeholders_skipped": backlog_placeholders,
+        "source": backlog.get("source", "ratification-backlog.json"),
+        "as_of": backlog.get("as_of", ""),
+    }
     # deterministic order: oldest waiting first (missing as_of sorts last),
     # tie-break by source then summary.
     def _qkey(q):
@@ -458,6 +535,7 @@ def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir):
         "queue": queue,
         "scan": scan,
         "backlog": backlog,
+        "backlog_summary": backlog_summary,
         "warnings": warnings,
         "open_items": open_items,
     }
@@ -580,6 +658,14 @@ def render_queue(model, now):
         sp = stale_prefix(now, q["as_of"], STALE_DECISIONS)
         lines.append("- %s[%s] %s %s"
                      % (sp, q["kind"], q["summary"], tag(q["source"], q["as_of"])))
+    bs = model.get("backlog_summary")
+    if bs and bs.get("present"):
+        note = (" (seed placeholder skipped)"
+                if bs.get("placeholders_skipped") else "")
+        lines.append("- ratification backlog: %d live items%s %s"
+                     % (bs.get("live", 0), note,
+                        tag(bs.get("source", "ratification-backlog.json"),
+                            bs.get("as_of", ""))))
     lines.append("")
     return "\n".join(lines)
 
@@ -591,9 +677,19 @@ def render_scan(model, now):
              "consumption, each artifact validated independently_", ""]
     scan = model["scan"]
     if not scan.get("present"):
-        lines.append("- no scan artifacts found at %s %s"
-                     % (scan.get("path") or "(no --scan-consumption-dir)",
-                        tag(scan.get("reason", "absent"), scan.get("as_of", ""))))
+        if not scan.get("path"):
+            # No dir configured at all -- one clean, actionable line.
+            lines.append(
+                "- scan consumption dir not configured (pass "
+                "--scan-consumption-dir; wire into the LaunchAgent once the "
+                "saga-scan run emits artifacts) %s"
+                % tag("config", scan.get("as_of", "")))
+        else:
+            # Dir configured but no artifacts present (empty / missing dir).
+            lines.append("- no scan artifacts found at %s %s"
+                         % (scan.get("path"),
+                            tag(scan.get("reason", "absent"),
+                                scan.get("as_of", ""))))
         lines.append("")
         return "\n".join(lines)
     for a in scan.get("artifacts", []):
