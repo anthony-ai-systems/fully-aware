@@ -137,6 +137,17 @@ python3 generate-surface.py --repo <path>            # -> <repo>/.macro/surface.
 python3 generate-surface.py --repo <path> --out <p>  # explicit output path
 ```
 
+### Zero-footprint cache (`state/surfaces/<environment>.json`)
+
+Writing `<repo>/.macro/surface.json` requires the target repo to gitignore
+`.macro/`. For repos that should carry **zero footprint** from the macro-seat
+layer (the non-coupling rule -- no `.gitignore` edits, no `.macro/` committed
+anywhere else), pass `--out state/surfaces/<environment>.json` so the surface
+lands in the Fully Aware-local, gitignored cache instead. The M4 assembler reads
+that cache as its fallback (lookup order: `<repo_path>/.macro/surface.json`, then
+`state/surfaces/<environment>.json`), and `tools/morning-pack.sh` (M5) uses this
+path for every config so surfaces exist without touching any other repo.
+
 ## Deviation from spec SS1.2 (per-repo config placement)
 
 Spec SS1.2 places each repo's `surface-config.json` in that repo

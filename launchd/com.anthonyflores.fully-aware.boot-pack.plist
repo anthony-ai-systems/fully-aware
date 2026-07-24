@@ -2,16 +2,23 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Fully Aware boot-pack assembler LaunchAgent (Macro Seat lane M4, cadence
-  ruling SS6.5): regenerate state/BOOT-PACK.md daily at 05:45 local, BEFORE the
+  Fully Aware boot-pack LaunchAgent (Macro Seat lane M4 cadence ruling SS6.5,
+  extended by M5): regenerate state/BOOT-PACK.md daily at 05:45 local, BEFORE the
   6am brief so the brief can cite the pack (once a week of packs has been
   eyeballed, per the ruling).
 
-  UNARMED until Anthony merges: this plist points at code on the feat/m4-boot-pack
-  branch. Install + load with tools/install-launchagent.sh AFTER merge to main.
-  Do not load it against unmerged code.
+  M5 change: the agent now runs tools/morning-pack.sh (the orchestration wrapper)
+  instead of assemble-boot-pack.py directly. The wrapper FIRST regenerates every
+  repo surface (so the 24h-staleness surfaces stay fresh), THEN runs the read-only
+  assembler. Without this, a daily-assembled pack would render permanently-stale
+  surfaces. Per-repo generation failure degrades (log + continue), never aborts.
 
-  D30 discipline: the assembler is read-only and writes only gitignored state/.
+  UNARMED until Anthony merges: this plist points at code on the feat/m5-surface-
+  coverage branch. Install + load with tools/install-launchagent.sh AFTER merge to
+  main. Do not load it against unmerged code.
+
+  D30 discipline: generate-surface.py and assemble-boot-pack.py stay read-only;
+  the wrapper writes only gitignored state/ outputs (surfaces cache, pack, logs).
 -->
 <plist version="1.0">
 <dict>
@@ -20,8 +27,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
-        <string>/Users/anthonyflores/code/fully-aware/tools/assemble-boot-pack.py</string>
+        <string>/bin/bash</string>
+        <string>/Users/anthonyflores/code/fully-aware/tools/morning-pack.sh</string>
     </array>
 
     <key>WorkingDirectory</key>

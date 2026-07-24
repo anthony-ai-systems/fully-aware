@@ -1,0 +1,41 @@
+{
+  "schema": "surface-config/v1",
+  "environment": "anthony-wiki-vault",
+  "repo_path": "/Users/anthonyflores/code/anthony-wiki-vault",
+  "canonical": true,
+  "role": "Cross-product knowledge vault: build-plans, handoffs, knowledge-base. Handoffs + cross-product knowledge only, never marketing outputs.",
+  "default_branch": "main",
+  "gh_repo": "tonyflo79/anthony-wiki-vault",
+  "cold_load": [
+    {
+      "claim_template": "HEAD is {value}",
+      "probe": {"kind": "git-head"}
+    },
+    {
+      "claim_template": "HEAD committed {value}",
+      "probe": {"kind": "git-head-time"}
+    },
+    {
+      "claim_template": "open PRs: {value}",
+      "probe": {"kind": "gh-pr-count"}
+    },
+    {
+      "claim_template": "build-plans present (build-plans/): {value}",
+      "probe": {"kind": "file-exists", "path": "build-plans"}
+    },
+    {
+      "claim_template": "handoffs present (knowledge-base/handoffs/): {value}",
+      "probe": {"kind": "file-exists", "path": "knowledge-base/handoffs"}
+    }
+  ],
+  "verification": [],
+  "decisions": [],
+  "next_lanes": [],
+  "do_not_read": [],
+  "pitfalls": [
+    {"entry": "Vault holds handoffs + cross-product knowledge ONLY -- never marketing outputs (those live in the product/workspace repos).", "source": "operator-memory", "as_of": "2026-07-23"},
+    {"entry": "Local HEAD sits on a long-lived chore/triage branch that diverges materially from origin/main (origin/main lacks the adjudication system); do not treat HEAD as main.", "source": "operator-memory", "as_of": "2026-07-23"},
+    {"entry": "Repo carries git submodules (.gitmodules) -- nested repos exist; scope operations to the correct tree.", "source": "config", "as_of": "2026-07-23"},
+    {"entry": "Never merge or direct-push to a default branch -- merge is Anthony's.", "source": "operator-memory", "as_of": "2026-07-23"}
+  ]
+}

@@ -2,15 +2,20 @@
 # install-launchagent.sh -- install (and arm) the Fully Aware boot-pack LaunchAgent.
 #
 # Macro Seat lane M4, cadence ruling SS6.5: regenerate state/BOOT-PACK.md daily
-# at 05:45, before the 6am brief.
+# at 05:45, before the 6am brief. Lane M5 changed the scheduled command from the
+# assembler alone to tools/morning-pack.sh, which regenerates every repo surface
+# FIRST (so the 24h-staleness surfaces stay fresh) and THEN runs the read-only
+# assembler.
 #
 # ARMING IS ANTHONY'S, POST-MERGE. The plist points at code on a branch; run
-# this ONLY after feat/m4-boot-pack merges to main. It copies the plist into
-# ~/Library/LaunchAgents/ and (re)loads it via launchctl. Running it arms the
-# schedule immediately.
+# this ONLY after feat/m5-surface-coverage merges to main. It copies the plist
+# into ~/Library/LaunchAgents/ and (re)loads it via launchctl. Running it arms
+# the schedule immediately. The currently-armed M4 agent (assembler-only) stays
+# live until you rerun this script post-merge.
 #
-# D30 discipline: the assembler this arms is read-only; it writes only the
-# gitignored state/ outputs (BOOT-PACK.md, boot-pack.json, surfaces cache, logs).
+# D30 discipline: generate-surface.py and assemble-boot-pack.py stay read-only;
+# the morning-pack.sh wrapper writes only the gitignored state/ outputs
+# (BOOT-PACK.md, boot-pack.json, surfaces cache, logs).
 
 set -euo pipefail
 
