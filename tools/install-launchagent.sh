@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install-launchagent.sh -- install (and arm) the Fully Aware boot-pack LaunchAgent.
 #
-# Fully Aware lane M4, cadence ruling SS6.5: regenerate state/BOOT-PACK.md daily
+# Macro Seat lane M4, cadence ruling SS6.5: regenerate state/BOOT-PACK.md daily
 # at 05:45, before the 6am brief.
 #
 # ARMING IS ANTHONY'S, POST-MERGE. The plist points at code on a branch; run
