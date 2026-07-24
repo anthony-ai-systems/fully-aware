@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Fully Aware boot-pack LaunchAgent (Macro Seat lane M4 cadence ruling SS6.5,
+  Fully Aware boot-pack LaunchAgent (Fully Aware lane M4 cadence ruling SS6.5,
   extended by M5): regenerate state/BOOT-PACK.md daily at 05:45 local, BEFORE the
   6am brief so the brief can cite the pack (once a week of packs has been
   eyeballed, per the ruling).

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install-launchagent.sh -- install (and arm) the Fully Aware boot-pack LaunchAgent.
 #
-# Macro Seat lane M4, cadence ruling SS6.5: regenerate state/BOOT-PACK.md daily
+# Fully Aware lane M4, cadence ruling SS6.5: regenerate state/BOOT-PACK.md daily
 # at 05:45, before the 6am brief. Lane M5 changed the scheduled command from the
 # assembler alone to tools/morning-pack.sh, which regenerates every repo surface
 # FIRST (so the 24h-staleness surfaces stay fresh) and THEN runs the read-only
