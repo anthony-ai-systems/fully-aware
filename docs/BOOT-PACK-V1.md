@@ -45,7 +45,12 @@ Every entry is tagged `[source | as_of]`.
      root `NEXT_SESSION.json`, normalized to `next-session/v2`);
    - a standing ratification backlog from the hand-maintained
      `tools/configs/ratification-backlog.json` (`provenance: manual`, Anthony's
-     to maintain).
+     to maintain). A backlog item may carry an optional `"placeholder": true`
+     flag (used only on the seed shape); placeholder items are **skipped** --
+     they never enter the live inbox. Instead the queue section renders one
+     provenance footer line, e.g. `ratification backlog: 0 live items (seed
+     placeholder skipped) [tools/configs/ratification-backlog.json | <as_of>]`.
+     Real items must **not** carry the flag.
    Staleness threshold **1h**.
    **OPEN-ITEM (COS v2):** SS3.1 specifies this queue as a projection over the
    COS v2 event contract, with mission-control as a second head. No concrete
@@ -57,22 +62,33 @@ Every entry is tagged `[source | as_of]`.
    `intentions.json`) from a configurable `--scan-consumption-dir`. Each artifact
    is validated **independently** (one bad artifact never kills the cycle):
    unknown keys ignored, unknown schema majors rejected + bannered, full producer
-   provenance surfaced. If the dir/artifacts are absent, the section renders an
-   explicit `no scan artifacts found at <path>` line -- absence is a state, not
-   an error. (saga-protocol PR #150 ratified the interface; this is real
+   provenance surfaced. Absence is a state, not an error: when **no** dir is
+   configured the section renders one clean actionable line (`scan consumption
+   dir not configured (pass --scan-consumption-dir; ...) [config | <as_of>]`);
+   when a dir **is** configured but holds no artifacts it renders `no scan
+   artifacts found at <path>`. (saga-protocol PR #150 ratified the interface; this is real
    consumption, not the spec's pre-ratification `UNRATIFIED -- omitted` stub.)
 
 ## Staleness
 
 Stale entries render a `STALE(<age>)` prefix (e.g. `STALE(2d)`, `STALE(5h)`) --
-**never dropped, never silently trusted.** An unparseable `as_of` renders
-`STALE(?)` (fail-visible). Thresholds: topology 7d, surfaces 24h, decisions 1h.
+**never dropped, never silently trusted.** Free-text `as_of` values (source
+NEXT_SESSION files carry prose like `2026-07-23T07:30 local (approx, overnight
+2026-07-23 session)`) have their leading ISO date/datetime **prefix** extracted
+for age computation (that example -> `2026-07-23T07:30`). Only when **no** date
+is extractable does the entry render `AS_OF-UNPARSEABLE` (fail-visible, distinct
+from STALE which means known-but-old); such entries sort **last** in the
+oldest-first queue with a stable tie-break. Thresholds: topology 7d, surfaces
+24h, decisions 1h.
 
 ## Degraded sources
 
 Every degraded source (missing/invalid surface, invalid/rejected/absent-required
 scan artifact, broken decision feed) produces a line in the **WARNING block at
-the top of the pack** -- never a silent omission.
+the top of the pack** -- never a silent omission. A surface that carries inline
+degraded probes names each one and why, e.g. `surface for saga-protocol:
+degraded probe next_session (no root-level NEXT_SESSION.json)`, pulling the
+probe name (dotted key path) and reason from the surface's own degraded markers.
 
 ## Hard cap + truncation
 
