@@ -106,10 +106,32 @@ python3 assemble-boot-pack.py \
     --ratification-backlog tools/configs/ratification-backlog.json
 ```
 
-On-demand run is the default entry point (macro-session boot). A LaunchAgent
-(`launchd/com.anthonyflores.fully-aware.boot-pack.plist`, daily 05:45 before the
-6am brief) is authored but **unarmed** -- arm it post-merge with
-`tools/install-launchagent.sh`.
+On-demand run is the default entry point (macro-session boot).
+
+## Morning freshness wrapper (`tools/morning-pack.sh`)
+
+The assembler is strictly read-only and never regenerates surfaces -- but
+surfaces go **STALE at 24h**. A scheduled assembler alone would therefore render
+permanently-stale surfaces. `tools/morning-pack.sh` is the orchestration layer:
+it FIRST regenerates every `surface-config/v1` config under `tools/configs/`
+(via `generate-surface.py`, writing into the Fully Aware-local
+`state/surfaces/<environment>.json` cache -- **never into any other repo**), then
+runs `assemble-boot-pack.py` over the fresh surfaces. Non-repo configs
+(`seed-manifest.json`, `ratification-backlog.json`) are skipped by schema.
+Per-repo generation **failure degrades** (logged, skipped) -- it never aborts the
+pack; a merely *degraded* surface still writes with inline markers the assembler
+renders as WARNINGs. Any args to the wrapper are forwarded to the assembler.
+
+```
+tools/morning-pack.sh                        # regenerate all surfaces, then assemble
+tools/morning-pack.sh --scan-consumption-dir <dir>   # args pass through to the assembler
+```
+
+A LaunchAgent (`launchd/com.anthonyflores.fully-aware.boot-pack.plist`, daily
+05:45 before the 6am brief) runs the **wrapper** (M5; previously the assembler
+alone) and is authored but **unarmed** -- arm it post-merge with
+`tools/install-launchagent.sh`. The currently-armed M4 agent stays live until the
+install script is rerun post-merge.
 
 ## Hand-maintained seeds
 

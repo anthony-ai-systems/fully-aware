@@ -1,0 +1,43 @@
+{
+  "schema": "surface-config/v1",
+  "environment": "saga-mission-control",
+  "repo_path": "/Users/anthonyflores/code/saga-mission-control",
+  "canonical": true,
+  "role": "SAGA mission-control UI: run boards, spine relay surfaces, operator dashboards.",
+  "default_branch": "main",
+  "gh_repo": "tonyflo79/saga-mission-control",
+  "cold_load": [
+    {
+      "claim_template": "HEAD is {value}",
+      "probe": {"kind": "git-head"}
+    },
+    {
+      "claim_template": "HEAD committed {value}",
+      "probe": {"kind": "git-head-time"}
+    },
+    {
+      "claim_template": "open PRs: {value}",
+      "probe": {"kind": "gh-pr-count"}
+    },
+    {
+      "claim_template": "current-context surface present (context/CURRENT_CONTEXT.md): {value}",
+      "probe": {"kind": "file-exists", "path": "context/CURRENT_CONTEXT.md"}
+    },
+    {
+      "claim_template": "roadmap present (docs/planning/ROADMAP.md): {value}",
+      "probe": {"kind": "file-exists", "path": "docs/planning/ROADMAP.md"}
+    }
+  ],
+  "verification": [],
+  "decisions": [],
+  "next_lanes": [],
+  "do_not_read": [
+    {"entry": "runs/ -- bulk run bundles/traces; regenerate, do not read.", "source": "config", "as_of": "2026-07-23"},
+    {"entry": "outputs/ -- bulk run outputs (gitignored); regenerate, do not read.", "source": "config", "as_of": "2026-07-23"},
+    {"entry": "node_modules/ + dist/ -- installed/built artifacts; not source.", "source": "config", "as_of": "2026-07-23"}
+  ],
+  "pitfalls": [
+    {"entry": "work-main is the active local branch (seed date); it is not the default branch main -- verify branch before assuming HEAD == main.", "source": "seed-manifest.json pins", "as_of": "2026-07-23"},
+    {"entry": "Never merge or direct-push to a default branch -- merge is Anthony's.", "source": "operator-memory", "as_of": "2026-07-23"}
+  ]
+}

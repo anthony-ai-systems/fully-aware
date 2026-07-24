@@ -1,0 +1,42 @@
+{
+  "schema": "surface-config/v1",
+  "environment": "fully-aware",
+  "repo_path": "/Users/anthonyflores/code/fully-aware",
+  "canonical": true,
+  "role": "Personal-infra 'fully aware' macro-seat layer: surface generator, next-session parser, boot-pack assembler.",
+  "default_branch": "main",
+  "gh_repo": "tonyflo79/fully-aware",
+  "cold_load": [
+    {
+      "claim_template": "HEAD is {value}",
+      "probe": {"kind": "git-head"}
+    },
+    {
+      "claim_template": "HEAD committed {value}",
+      "probe": {"kind": "git-head-time"}
+    },
+    {
+      "claim_template": "open PRs: {value}",
+      "probe": {"kind": "gh-pr-count"}
+    },
+    {
+      "claim_template": "surface generator present (tools/generate-surface.py): {value}",
+      "probe": {"kind": "file-exists", "path": "tools/generate-surface.py"}
+    },
+    {
+      "claim_template": "boot-pack assembler present (tools/assemble-boot-pack.py): {value}",
+      "probe": {"kind": "file-exists", "path": "tools/assemble-boot-pack.py"}
+    }
+  ],
+  "verification": [],
+  "decisions": [],
+  "next_lanes": [],
+  "do_not_read": [
+    {"entry": "state/ -- local-only, gitignored session scratch (boot pack, surfaces cache, logs); regenerate, never read/commit.", "source": "CLAUDE.md", "as_of": "2026-07-23"}
+  ],
+  "pitfalls": [
+    {"entry": "Tools here are D30-class read-only: they never fetch, mutate, commit, push, or merge in any repo -- keep them that way.", "source": "CLAUDE.md", "as_of": "2026-07-23"},
+    {"entry": "Coupling by data contract only: shareable repos never import from this repo; surface/v1 and next-session/v2 are the only interface.", "source": "CLAUDE.md", "as_of": "2026-07-23"},
+    {"entry": "Never merge or direct-push to a default branch -- merge is Anthony's.", "source": "operator-memory", "as_of": "2026-07-23"}
+  ]
+}

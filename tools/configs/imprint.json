@@ -1,0 +1,43 @@
+{
+  "schema": "surface-config/v1",
+  "environment": "imprint",
+  "repo_path": "/Users/anthonyflores/code/imprint",
+  "canonical": true,
+  "role": "Personal-infra memory + taste system: ingest quarantine, entity registry, operator data root. Rich-lineage fork.",
+  "default_branch": "main",
+  "gh_repo": "tonyflo79/imprint",
+  "cold_load": [
+    {
+      "claim_template": "HEAD is {value}",
+      "probe": {"kind": "git-head"}
+    },
+    {
+      "claim_template": "HEAD committed {value}",
+      "probe": {"kind": "git-head-time"}
+    },
+    {
+      "claim_template": "open PRs: {value}",
+      "probe": {"kind": "gh-pr-count"}
+    },
+    {
+      "claim_template": "package present (src/imprint/): {value}",
+      "probe": {"kind": "file-exists", "path": "src/imprint"}
+    },
+    {
+      "claim_template": "project metadata present (pyproject.toml): {value}",
+      "probe": {"kind": "file-exists", "path": "pyproject.toml"}
+    }
+  ],
+  "verification": [],
+  "decisions": [],
+  "next_lanes": [],
+  "do_not_read": [
+    {"entry": "dist/ + release-artifacts/ -- build/release outputs; regenerate, do not read as source.", "source": "config", "as_of": "2026-07-23"}
+  ],
+  "pitfalls": [
+    {"entry": "Rich-lineage fork: intelligence-layer changes live HERE (diffable vs RichSchefren upstream), never in the wiki-vault.", "source": "operator-memory", "as_of": "2026-07-23"},
+    {"entry": "Fork history is disjoint from upstream (blocks straight upstreaming); reconcile deliberately, do not assume a shared base.", "source": "operator-memory", "as_of": "2026-07-23"},
+    {"entry": "Local HEAD sits on a fix/ working branch, not the default branch main -- verify branch before assuming HEAD == main.", "source": "config", "as_of": "2026-07-23"},
+    {"entry": "Never merge or direct-push to a default branch -- merge is Anthony's.", "source": "operator-memory", "as_of": "2026-07-23"}
+  ]
+}
