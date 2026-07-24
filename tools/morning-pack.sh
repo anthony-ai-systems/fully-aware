@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # morning-pack.sh -- regenerate every repo surface, then assemble the boot pack.
 #
-# Macro Seat lane M5 (surface freshness): surfaces go STALE at 24h, but the armed
+# Fully Aware lane M5 (surface freshness): surfaces go STALE at 24h, but the armed
 # LaunchAgent only ran the assembler -- so a daily-assembled pack would render
 # permanently-stale surfaces. This wrapper is the orchestration layer: it FIRST
 # regenerates every repo's surface via generate-surface.py (into the Fully Aware-
