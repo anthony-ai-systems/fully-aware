@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""assemble-boot-pack.py -- D30-class boot-pack assembler (Macro Seat Artifact 3).
+"""assemble-boot-pack.py -- D30-class boot-pack assembler (Fully Aware Artifact 3).
 
 Folds four sections into ``state/BOOT-PACK.md`` (human render) plus
 ``state/boot-pack.json`` (machine sidecar), the single primary artifact a fresh
@@ -757,7 +757,7 @@ def _default(*parts):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="D30 read-only boot-pack assembler (Macro Seat Artifact 3).")
+        description="D30 read-only boot-pack assembler (Fully Aware Artifact 3).")
     ap.add_argument("--manifest", default=_default("tools", "configs",
                                                    "seed-manifest.json"),
                     help="topology seed manifest (provenance: manual)")
