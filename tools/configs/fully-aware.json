@@ -3,7 +3,7 @@
   "environment": "fully-aware",
   "repo_path": "/Users/anthonyflores/code/fully-aware",
   "canonical": true,
-  "role": "Personal-infra 'fully aware' macro-seat layer: surface generator, next-session parser, boot-pack assembler.",
+  "role": "Personal-infra 'fully aware' layer: surface generator, next-session parser, boot-pack assembler.",
   "default_branch": "main",
   "gh_repo": "tonyflo79/fully-aware",
   "cold_load": [
