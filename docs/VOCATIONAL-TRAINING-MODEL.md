@@ -8,8 +8,9 @@ This document instead reconstructs the underlying business model — "start a
 vocational school and the government pays the tuition" — from primary sources:
 DOL/ETA regulations, state workforce agency guidance, workforce board ITA
 policies, and industry references. Every load-bearing claim is sourced at the
-bottom. If the video transcript is obtained later, diff it against this brief;
-the formula below is what that genre of video teaches.
+bottom. Update 2026-07-30: a NotebookLM report generated from the video's
+transcript was subsequently provided and cross-checked against this brief —
+see §9 for what the video adds and where its claims fail fact-check.
 
 ---
 
@@ -223,6 +224,80 @@ Shared DNA with a test-prep business:
    process is being stood up now — early movers advantage).
 5. Interview 2–3 existing ETPL operators (the list is public, with prices and
    outcomes — free competitor intel).
+
+## 9. Cross-check against the source video (via NotebookLM transcript report)
+
+The video pitches an **online-only trade school** variant of the model: lean
+two-person operation, white-labeled digital curriculum (~$500–$1,500 cost,
+sold at $7,500–$15,000), ~55-hour courses, VR (e.g., Oculus for HVAC) plus
+optional 10-hour ride-alongs, CRM/drip-campaign sales automation, and claimed
+80–90% margins. Startup capital claimed: $15k–$30k plus 2–3 months operating
+reserves. Its regulatory roadmap matches §3 exactly: state license → ETPL
+listing → price within the board's training cap.
+
+### Transcription artifact
+The report's "WEO" / "the Wheel process" is a mis-transcription of **WIOA**
+spoken aloud. There is no separate "Wheel" program.
+
+### Genuinely valuable additions (adopted into this playbook)
+- **Two revenue tracks, sequenced.** "Direct sale" (B2B/B2C) alongside
+  "state reimbursed." In many states, training sold **to employers** for
+  their own workers is exempt from career-school licensing (which regulates
+  sales to individuals) — so B2B bulk contracts (apartment complexes,
+  manufacturers, data centers) can generate revenue while the license and
+  ETPL application are pending. State-specific; verify the exemption first.
+- **White-label curriculum arbitrage.** Buy pre-approved curriculum instead
+  of authoring; approval timelines shrink and content cost becomes trivial
+  relative to voucher value.
+- **Niches worth stealing:** corrections/reentry certification programs
+  (proctored online training for incarcerated students; real funding exists
+  behind reentry), data-center facility maintenance training, employer
+  pipeline plays ("monetize training, hire the cream of the crop, certify
+  the rest for the market"), and gap-year positioning against first-year
+  university tuition for undecided 18-year-olds.
+- **Sales ops as the moat:** CRM, automated follow-up, standardized scripts
+  — traditional vocational schools are genuinely weak at follow-up.
+- Case studies claimed: Houston HVAC/electrical school at $4–5M/yr on
+  manufacturing contracts; Arizona IT reseller at $1M/yr direct before
+  licensing, later +$60k/mo grant revenue; Utah prison program at $30k/mo;
+  Idaho data-center school at $1M/yr. (Unverifiable; treat as directional.)
+
+### Claims that fail fact-check
+1. **80–90% net margins.** Real-world school margins run 10–25% (§4). A lean
+   online white-label shop beats brick-and-mortar, but 90% net ignores
+   marketing, instruction/proctoring, compliance, refunds, and bad cohorts.
+   The video's own case study is garbled (claims "low profit" and "70%
+   margin" for the same $2.4M operation).
+2. **The 55-hour "glorified ebook" contradicts the funding engine.** ETPL
+   retention is outcome-gated: states wage-match all graduates and delist
+   low performers (§3 step 7). A 2-week online cert with weak placement
+   loses its ETPL slot — the exact revenue source the model depends on.
+   Most trades the video lists (HVAC, electrical, welding, plumbing, dental
+   assisting) also have hands-on/licensing hour requirements a fully online
+   course cannot satisfy. Net: the lean online model fits the **direct/B2B
+   track**; the **grant track** requires outcome-engineered programs.
+3. **$7,500–$15,000 tuition vs. real ITA caps.** Verified board caps run
+   $5,500–$8,000 (some $7,000 lifetime). The upper half of the video's
+   price range requires stacked payers or direct-pay customers, not a
+   single WIOA voucher.
+4. **"$30+/hour almost instantly"** is cherry-picked; true for CDL and some
+   industrial maintenance, not entry HVAC helpers or dental assistants.
+5. **"Bizzy"** (LLC-formation app) is a sponsor placement, not strategy.
+6. Dog grooming and flight-attendant training rarely appear on state
+   in-demand occupation lists (a hard ETPL prerequisite) — direct-sale-only
+   niches.
+7. The video predates/ignores **Workforce Pell** (§5), which is the current
+   scale catalyst for exactly this program shape — but note its 8-week/
+   150-hour floor and 70/70 outcome gates exclude 55-hour ebook courses.
+
+### Synthesis
+The durable version of this business runs the video's lean sales machine on
+top of this brief's compliance-grade delivery: B2B direct sales for early
+cash flow, then outcome-engineered ETPL programs (real skills hours, exam-pass
+optimization, placement desk) for the government annuity, then Workforce
+Pell-shaped programs (150–599 hrs) for scale. The "AI-proof trades" thesis
+(physical diagnostics, legacy equipment with no digitized training data) is a
+reasonable long-horizon demand argument.
 
 ## Sources
 
