@@ -1,0 +1,361 @@
+Rank & Rent SEO: How Ippei Built 130 Sites - and Made $240K From
+One 15-Hour Website
+Transcribed by TurboScribe. Go Unlimited to remove this message.
+We are talking about rank and rent on the podcast with Ipe Ipe. You've been requested a bunch
+of times to come on this show and this is gonna be a great, great episode. I'm so hyped.
+Thank you for coming on the pod. I appreciate you having me on and it's a great honor. I've been
+watching your channel for quite a long time.
+So it feels like I'm talking to a celebrity here. So yeah, it's good to go. Let's go.
+Thank you. So, all right, just opening question for somebody new to the concept, what is rank and
+rent? So rank and rent is unlike an SEO agency where you're ranking other business owners
+websites, we're going to rank our own websites to the top of Google for local services. We really
+love working with home construction type of industries, general contractors, you know, especially
+in the U.S. people are homeowners here.
+I don't, I think people underestimate how much money is exchanging hands just in your
+neighborhood and your community each and every day. People need drywall done, wood
+flooring, concrete, you know, these things sound so mundane. But when you get into it, you
+realize how much money is exchanging hands.
+You know, each one of these like concrete jobs might go five, ten thousand dollars. These
+websites can also rank for commercial jobs. You know, I just recently had a roofing client close a
+two hundred thousand dollar commercial roofing job.
+And then with rank and rent, we rank our own websites. We add our tracking phone number on
+these websites. And the tracking phone number is a really important key piece to this, because
+every time one of my rank and rent sites generates a phone call for a local business owner, every
+time they pick up the phone, the software attaches a whisper message at the beginning of the
+call.
+So for me, it'll say this lead was sent to you at the beginning of the call right before the customer
+begins speaking. So now you own this website, you own this phone line. Once they start getting
+these leads from you.
+Another important piece is that, you know, when you're first trying to get into SEO or business for
+that matter, like you have to sell something to somebody. Right. And that selling part of it can be
+kind of challenging, especially like I started this business over 11 years ago.
+I didn't have any sales experience. But with these websites, once they rank and generating leads,
+we can start throwing free leads to these business owners using the whisper message. They're
+
+hearing your name.
+Then we reach out to the business owner and say, hey, I'm the guy that's been sending you those
+leads the last couple of days. Would you like to work? Would you want more of those customers
+or do you have the capacity to handle more of these customers? If so, then I like to create a long
+term win win relationship. And then at that point, we're kind of be able to lead with results in
+advance and be able to get our foot in the door with these business owners.
+And once these business owners, you know, they're already intrigued. They want to know, like,
+how did you even generate those customers? You start the relationship. I like starting the
+relationship on a commission deal.
+So you're pretty much risking all the you're removing all the risks from the business owner. Hey,
+you know, like I like I know you just met me from the Internet. In order to prove myself, I like to
+just start the relationship on a commission deal.
+And if everything goes well, then eventually I like to do a flat fee rental where it makes sense for
+both parties. And then after a month or two, the business owner is confident in you. There's trust
+bill.
+Then you can rent these websites out for a thousand dollars a month, two thousand dollars a
+month. There's a few other ways to monetize it right now. I'm working with a huge construction
+company in Los Angeles, which is where I'm located right now.
+And with them, like they do like seven different services. I have dozens and dozens of these rank
+and rank sites all across L.A. and seven different niches. And I'm API.
+I have my call tracking software is API connected to their CRM. So I'm just getting paid straight
+commissions on every job that they close. So that could be quite lucrative with the right business
+owner where that trust and trust is built.
+But for most rank and rank people, I think closing it on a flat fee provides a very predictable
+residual income stream. Essentially, I mean, you know, I've been doing this for 11 years. I'm still a
+big I still love the rank and rank model.
+I mean, I have sites that I built over 11 years ago still paying me residual income to this day. I
+have the business owner's credit card on file on Stripe. And, yeah, we build it on a weekly basis.
+That's another like a hack is like it's better to build business owners weekly as opposed to
+monthly so that they're not seeing this big fat bill at the end of the month where it's if it's weekly
+250 a week, they don't see as much in their statements. Anyways, yeah, I mean, some of these
+clients I haven't talked to in a couple of years and their credit cards on file and the money's
+coming in and they don't really I don't really need to talk to unlike an SEO client where I have to
+provide reports or I have to make sure that they're satisfied with my service or whatnot, like with
+
+ranking. It's like I'm getting you the leads, you're paying me for the leads and that's it.
+You're hearing my name every time you pick up the phone and I don't have to do that much
+handholding or feel like, yeah, with SEO, I mean, there's a lot of money to be made as SEO
+agency. However, you know, in my experience, some of the SEO clients like no matter how good
+of a job you do, some clients just when they decide to cancel on you, there's nothing you can do.
+So with ranking right, I feel that there's way less churn and burn.
+And also, I think one good thing to or one interesting thing to note here is that a lot of these
+general contractors like, you know, there may be a one man show or they're just not their
+revenues, not quite there. They're the concrete guy or they're the tree care guy like these type of
+business owners. They don't have the budget for an elite SEO agency.
+You know, they don't have the budget to spend fifteen hundred a month or two thousand dollars a
+month from SEO agency that might you might have to wait four or five, six months. So a lot of
+these business owners will try an SEO agency, but they'll try like a cheaper one. You know,
+there's a lot of like crappy agencies that are just selling like bullshit, like five hundred dollar a
+month programs.
+They'll sign up for that and then they don't get any results after four or five months and then they
+cancel. They still didn't get the results. And this agency just built like maybe bad backlinks or
+whatever.
+And so a lot of these business owners have a bad taste in their mouth when it comes to SEO. So
+with Rankin, we kind of like overstepped that entire objection that they have about SEO because
+we're putting in the work, we're building and ranking the sites ourselves and then generating the
+results, what they ultimately want, which are leads, which are customers to increase their bottom
+line. So.
+You know, you know, it's going to be an amazing episode when just an absurd amount of value is
+delivered within the first like seven minutes. You know, it's going to be a good episode when you
+get so much good stuff right there in the first seven minutes. All right.
+Just going going back to the beginning and we're going to get into everything like choosing the
+niche and location, building links, building the site, structure for the site, the Google business
+profile. We're going to get into everything in this. But this method of marketing is so effective, I
+had to make sure it wasn't against Google's rules before I kept using it.
+It's a form of SEO I call compact keywords, whereas most SEO focuses on putting up articles to
+answer questions, how, what, when. Compact keywords focuses on putting up dozens of pages
+that sell to searchers who are actually looking to buy. These pages rank on Google and convert
+so much better than normal that when I discovered this years ago, I couldn't believe this was
+allowed.
+
+It's less work, too. The average compact keywords landing page is only 415 words. Compact
+keywords is a 13 hour deep course on getting sales with SEO.
+A customer said, we spent nearly 18,000 in the last year and a half on marketing and SEO
+through different agencies locally, and that did nothing. We decided to take the leap on the
+compact keywords course. We're now getting about six to eight calls per day on a good day,
+which is just unheard of.
+Another customer said, give it to a junior employee, have them follow it exactly as Edwards laid
+out. You don't have to do anything and you're going to gain a six figure SEO level employee just
+by having them go through this course. Compact keywords is about setting up an SEO funnel that
+brings you sales for years and years and years.
+It works with AI. It's less work than traditional SEO, and it makes way more money. You can get it
+now at compactkeywords.com. Back to the podcast.
+Just going back to the beginning. How did you get started, man? Like, how did you get started?
+And also what was, you've done so many sites, what was your most successful website? Yeah.
+So, you know, I'm 37 right now.
+I got started with RankinRent when I was 24, so roughly over 11 years ago. At the time I was 24.
+So, you know, I went to Michigan State University.
+I graduated with some BS degree, but at least I got the degree. I started working for an
+automotive company in Michigan. It was a Japanese company.
+I'm bilingual, so I can speak Japanese. I was born in Japan and then moved to the U.S. when I
+was nine. So, I was working for this company that I hated the nine to five.
+So, you know, after three years of working there, they gave me a standard 5% raise and my
+monthly paycheck went up by $60 because my starting salary was low. It was $35K a year. So,
+after taxes, I was only making $2,200 a month.
+So, you know, that got, I got really desperate about like figuring out some other way. I always
+dreamed of having a laptop lifestyle. Started doing a bunch of research online and came across
+this program at the time was called JobKilling, ran by this guy named Dan Klein.
+He was teaching RankinRent. I mean, this was in 2014. So, this was before there was like so
+many online coaching programs out there.
+And I joined, started, the whole business model made sense to me. At the time, we were building
+like pretty like basic, quite ugly sites on Weebly. I started building like limousine sites in Michigan
+and some tree care sites and towing sites.
+
+Seven months later, I had like four or five clients. I was making $3,000, $4,000 a month. I put in
+my two weeks notice at the job and I quit.
+And I haven't looked back. I've been self-employed with RankinRent ever since. And two, three
+years goes by and I'm at like $25K a month, $25K to $30K.
+I'm like one of the top students in the community. He was doing like, we were doing Vegas events
+every year. And yeah, and I started talking to Dan and me and him, like me and him started
+talking about business.
+And we started, we ended up becoming partners. And so, I ended up becoming partners with
+Dan. And we started, we worked closely together for the last like seven, eight years.
+This is kind of a long story, so I'll try to kind of speed it up here. But so, I got into some, so then
+my focus started to shift towards the coaching program, right? So, I built a blog, epay.com, which
+I still have to this day. At one point, I was spending like $50K a month on that site and content.
+I was doing like top of the funnel, bottom of the funnel, course reviews, keywords about like
+business models, like Amazon FBA drop shipping. And I was generating a bunch of these leads
+for the coaching program. During the pandemic, like Dan made a bunch of money with online and
+with offline, like really say he's a great entrepreneur.
+And I think Dan was a great coach to get started with because he's not a SEO guy, even though
+his model was teaching SEO. He's like he comes from a car sales background. And so, and I
+think he's a he's a natural born entrepreneur, like he built like a bunch of different businesses.
+So, he taught me the value of not just like getting good at SEO, but like how to build a business,
+how to build a scalable business, how to be good at sales, how to position yourself with these
+business owners so you can make lucrative deals. So, he taught me a lot about business, right?
+Not just SEO. And to make a long story short, he kind of retired five years ago.
+And, you know, the training videos are kind of older in that group. So, I launched my own
+RankinRankin community like this past year. And in the last year, also, this blog, you know, like
+HelloFresh and all these different blogs.
+I mean, I got hit with those algorithmic updates as well. I mean, at one point, I was generating like
+3,500 clicks on epay.com. But these days, like it went down to like two, 300 clicks to 300 per day
+clicks, and I had to do a bunch of different things to try to recover. But, you know, and meanwhile,
+I'm like, there's a few different algorithmic updates in the last seven years, like where the site
+tanked, and I had to bring it back up.
+But then I see these RankinRankin sites that I built over 11 years ago, and how steady the
+rankings have been on all these sites. Dude, it's the bottom of the funnel. It's the bottom of the
+
+funnel, man.
+Bottom of the funnel doesn't die. Exactly. Yeah.
+And I took your compact keyword course as well. Great, great program, especially for the price.
+Yeah, amazing stuff.
+Yeah, I'm a big believer in bottom of the funnel keywords as well. It's the sole reason I've survived
+with SEO with all these different sites. And yeah, well, I mean, RankinRankin, we are targeting
+bottom of the funnel, and it's like, that's where the money is made anyway, you know? So yeah,
+so like the last year, I went fully back into RankinRankin, and I built like 130 sites in the last year
+alone with RankinRankin brand new sites.
+Oh my gosh. So I'm implementing more newer, advanced SEO tactics, as you can say, that I've
+learned and implemented on epay.com. And I started applying on my RankinRankin sites. So
+yeah, obviously, with those 130 sites, I'm kind of able to see what's working right now, as
+opposed to like using tactics that I learned initially 11 years ago.
+What's been your best site? I mean, I have a bunch of like sites that are now ranking Los Angeles
+and all around Los Angeles. But I mean, the example that I like to always bring up is a tree care
+site in Grand Rapids, Michigan, that I've owned for 11 years. And it's been making me two grand
+a month for like 11 years, which is like that one site that I spent like 15 hours on has made me
+over like $240,000, which is insane.
+Yeah, talking about these simple websites and what they can produce long term. Yeah, dude,
+that's that's amazing. What's what are the biggest misconceptions about the rank and rent
+business model? There's so many misconceptions.
+I made a video a few weeks ago about how like people are on Reddit, they're going rank and rent
+is dead. Like, so yeah, so many misconceptions about this. Yeah, so I think the biggest biggest
+hurdle or biggest complaint that people might have is that GBP has gotten the methods of getting
+GBP has shifted over the years, right? Like ranking a website has always been a thing that's
+important with rank and rent.
+The thing I want to mention about GBP is that we're still getting them. We're doing these video
+verifications, it might be a little bit more gray hat, but we can still get GBPs. And some niches are
+more GBP dependent than other niches.
+So for example, if you go into towing, like, I don't need to visit a towing website, like, I'm in a
+hurry, right? Like, I'm just gonna call the top GBP company that pops up and probably call by if
+I'm looking for a custom cabinets, I want to probably look at the website, look at what kind of
+custom cabinets they have. And a lot of local websites are ugly, right? They look like sites that
+were built in like, like 1015 years ago. So yeah, you can get advantage there from a design
+
+standpoint, if you do a really good job in design.
+But you know, customers are gonna call multiple companies. So they might call the GBP, they
+might go down below the GBP and call the website as well. So you know, I have a student that's
+making 15-20k a month with rank and rent, and he doesn't even bother with GBPs, right? So in
+the past, when GBPs were easier to get, a lot of people got into rank and rent and only did GBPs.
+So they were solely dependent on GBPs for rank and rent. And when it got a little bit more
+difficult, those people would now claim rank and rent is dead. But I assure you, I have a lot of
+sites, maybe the 130 sites that I have right now, maybe I have GBPs for like 30-40% of them.
+And we're still working on maybe getting a few more. But I teach that like, ranking the website is
+more important than the GBP, especially when you know the right types of niches. Now we'll get
+into Google Business Profile in a little bit.
+I want to start with just choosing a niche. So how do you even decide what niches are worth
+targeting? There's so many different niches that you can go into. Yeah, absolutely.
+And you know, I'm finding about new niches all the time. So let me give you an example. So like
+one of the students, they started working with epoxy flooring company.
+And that company also does custom storage units for garages. And sure enough, we started
+doing research and that's getting search volume. So that's a whole nother niche, especially when
+you can hyper target what I like to call sub niches or more obscure niches.
+These niches become very, very easy to rank as well. And when you already have a business
+owner that's want these jobs, and you can rank easily, it can become quite lucrative. But to go
+back to your question, I think anything to do anything that's phone driven, anything that has to do
+with home construction niches.
+I like targeting niches where the average value of a customer is like two to $3,000. At least I stay
+away from the lower ticket stuff personally, like in the really common ones like plumbing, or
+plumbing or HVAC or maybe even carpet cleaning. You know, there's place there's things like like
+TaskRabbit now where you can hire carpet cleaners.
+I think plumbing is that industry in of itself is saturated because there's just so many plumbing
+companies. What signals tell you that a local market is too competitive? So I think you got to look
+at the competition on a more holistic level. I know some people just look at DR and keyword
+difficulty from various SEO tools, but it's not quite that simple to look at competition, you actually
+want to do the local searches, you want to analyze the top three, four, five websites.
+You know, 100% 100% on this. I'm so with you. Yeah, yeah, like you got to take a look at the site.
+Obviously, you know, if you go into personal injury attorney law, all the top three, four sites have
+
+like a DR of like 30 plus. So we avoid that's another beautiful thing about RankinRan is like we
+can pick and choose our battles, right? So we'll avoid like very competitive niches like personal
+injury law. But in most home construction, the DR, you're dealing with sites that are not that high
+in DR, maybe five or less, oftentimes, like DR zeros, then it's about okay, analyzing the website,
+how quality it is, right? And most times you visit the website.
+What are the keyword structure with the h1, h2, h3? Like just like, like, you know, analyzing as an
+SEO agency would like what are the all the SEO mistakes that this site has made? And there's
+plenty of mistakes that they have made because most contractors and general contractors, they
+may be hired a web developer for like $500 to build them a website, but it has no SEO
+optimization behind it. How many pages does this site have index? In many cases, they only
+have like 10 pages index. Well, they're now I'm extremely confident and I can outrank this guy
+even without backlinks by building topical authority of indexing or ranking 30, 40 pages, right? Are
+they using exact match domain or like what kind of keywords are part of their brand name? So I
+like to use exact match domains or partial match domains.
+So I get confidence there. And so yeah, just looking at, you know, DR is one metric, but it's only
+part of the picture. Just looking at the whole site as a everything that I mentioned, and if I see a
+bunch of weaknesses, then I feel confident that that's a niche that's not saturated that you can
+compete and rank in.
+Yeah, dude, that's why I love SEO. Because that's the case in like most niches is that is that a lot
+of the top sites that are ranking for for lucrative bottom of funnel keywords, they're doing it
+accidentally. Like they don't know what they're doing.
+They are they are not targeting these keywords. And just by just by actually targeting the
+keyword, you can outrank them, especially if you're an existing business. For you, you're talking
+about building businesses from the ground up building sorry, websites from the ground up.
+So so looking at authority is quite important because you're like, okay, we're actually gonna have
+to like, create authority here. That makes Yeah, that makes a lot of sense. And you said that you
+prefer you prefer high ticket, low volume versus lower ticket, high volume.
+Obviously, you want high ticket high volume. But yeah, you said you're staying out of out of low
+ticket. Yeah, like, high ticket, like average volume.
+Okay, you know, there are high ticket, super low volume ones that I think as a beginner in ranking
+around that I probably would avoid such as let's just say maybe kitchen and bathroom
+remodeling. Okay, it's like that's going to be very like high ticket. But oftentimes, these jobs kind
+of take a while to close.
+People are real price shoppers. These jobs might take a few months to get done. And like, you
+know, I have some sites in like adu construction adu stands for additional dwelling unit.
+
+These are only some states California included like people build like like houses like secondary
+like small houses in their backyard and whatnot. Those like we're getting leads, but it's difficult to
+close. So there's some caveat depending on the industry.
+But you know, like anything to do with homes, right? Like drywall, just look around the home and
+all the different services that a home needs. You know, drywall, you got, you know, painting, you
+got custom cabinets, you got countertops. Yeah, concrete driveways, metal gates, metal fences.
+Foundation repair. Yeah, there's a bunch. When I get into actually building the sites now and
+ranking the site.
+So what is your ideal rank and rent website structure look like? Well, we start off with like a brand
+that's good targeting. I like targeting a city that's at least 80,000 population. I think the sweet spot
+for most people is going to be 100 to like 300,000 population cities.
+You do some searches for that keyword. And again, I like, again, the keyword tools are not even
+that great for this either. Because I, for example, drywall, Glendale, California, if you were to put
+down a keyword, so it shows zero monthly search volume, but I get plenty of leads with that site
+as well.
+Because, you know, as long as you do a search and you see businesses and the Google Maps,
+at least like 10, 15 businesses, the demand is going to be there once you rank, right? So first, I
+pick in the right, pick in the right brand. In terms of the right structure, I mean, you know, you
+want, I want the H1 to have the brand name first, the first words in H1 and the brand name, page
+title, the brand name as well. And the main keywords after the title, after the H1, the first one to
+two paragraphs, in my opinion, is very important.
+They want to be very, very clear and identify what that entity does. So if it's like Glendale quality
+drywall, the first sentence, I like to repeat the brand Glendale quality windows has 20 years
+experience doing X, Y, Z, which X, Y, Z is going to be the main various keywords of services that
+that company does. You also want to sort of increase the quality score in the eyes of Google.
+I like to like load different entities. When I say entities, different, like maybe engineering terms,
+different things that are certain special keywords or not even search keywords, but certain words
+that are tied to that industry. You know, such as maybe types of materials for that drywall or
+different engineering terms, different, different things that display expertise.
+Does that make sense? It makes sense. And you said you're, you're actually mentioning the
+company that you're renting the site out to in the copy. So, so no, not the company.
+We don't even know what company we're going to rent out the site to. We are creating our own
+brand with RankinRent. So Glendale quality drywall is like a brand that I created and I'm writing
+as if I am the brand.
+
+So with RankinRent, the mentality that we have is the clients that began renting our sites is
+essentially, they're going to now own two different brands. So they already have their own brand,
+right? They might be Joe's drywall, but now they're getting leads from Glendale quality drywall,
+which is my brand. So now they're essentially operating two different brands and getting leads
+from both.
+And we kind of treat it as if every lead that we generate with RankinRent are our customers, no
+different than in a lot of general contractor industry, like you'll subcontract out the work to other
+GCs. We're kind of essentially taking that, that kind of model where we're just renting out our
+customers essentially, right? Going back to the structure, does that make sense? Yeah, it does
+make sense. It does make sense.
+Yeah. Yeah. Is that difficult to explain to the companies that you're sending the leads to? Or it's
+just like, hey, if you want these leads, like that's how you got to do it.
+You got to act like this is your brand. Yeah, no, exactly. They get it.
+They go, you know, at the end of the day... They want the money. They want the money. Exactly.
+I mean, I go like, at the end of the day, having two brands is more powerful than having one
+brand. It's like a franchise, but better. Like you own two different brands, you know? And my
+brands are going to be... My brand is because I've been doing SEO for a while.
+It's going to be more powerful in the SERPs because I have keywords in the name and all that
+stuff. So once they understand it, they love the idea. Because also with RankinRent, I can begin
+building that client, different RankinRent sites targeting different cities surrounding them.
+You know, like most of these service-based businesses, they can travel 20-30 mile radius. So
+again, this is where RankinRent truly shines as well is that you can start off with a client paying
+you $500 a month because your site's generating like maybe 10 leads a month. But then if it's a
+good client, they want to scale, you can start building multiple different other RankinRent sites
+targeting other cities and get that client from like paying you $500 a month to like $2,000 to
+$3,000 a month.
+And then they really understand the power and the leverage of owning multiple brands. It's okay.
+You're starting with the city.
+You're not building out... You start with the city and then maybe you'll build out a larger regional
+site. Yeah, regional site or just targeting just other websites that target other types of cities
+nearby. And how important are exact match domains to your strategy? It's important.
+I think it gives you an edge. So can you give me some examples of what type of EMD you might
+use? So a lot of true EMDs are a lot of it's taken, right? Like Glendale, drywall.com. That's
+
+probably taken, right? So I'll add a word in there as well as Glendale quality drywall.com. So I
+guess that's technically partial exact match by my opinion. Just having the city and the keyword
+there already kind of gives you like an advantage from SEO standpoint because most brands do
+not have that.
+So yeah. And what pages should every local lead gen site have? Are there any like pages that
+every one of your sites has to have? For sure. Like, you know, most local companies, they'll build
+like five service pages, you know, and I get it.
+That's like the main services that they want, right? That's the moneymaker. So they just build five
+service pages. They probably don't even do keyword research.
+No, exactly. Yeah. Yeah.
+Yeah. A lot of these sites are built for utility. They're not built with SEO understanding.
+Well, yeah, they're built for people going directly to the site. Yeah. Yeah.
+Yeah. Like a site you put on a business card and these are the five service...
+This file is longer than 30 minutes.
+Go Unlimited at https://turboscribe.ai/ to transcribe files up to 10 hours long.
