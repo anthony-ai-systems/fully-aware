@@ -6,7 +6,7 @@ guest: "Ippei Kanehara"
 published: 2026-07-26
 captured: 2026-07-30
 type: video-deep-dive
-status: first-30min-verbatim-remainder-outline
+status: verbatim-except-middle-block-2822-5759
 tags: [seo, rank-and-rent, local-seo, lead-gen, recurring-revenue, video-notes]
 ---
 
@@ -46,14 +46,26 @@ last year to re-test the playbook.
    **weekly billing** ($250/wk < $1K/mo psychologically).
 8. ⏳ First-30-days launch sequence (51:09).
 9. ⏳ Keyword mining: autocomplete + GSC; new-page-vs-expand rule (43:34–48:31).
-10. ✅ GBP = optional upside (video verification, ~30–40% of his sites have one; student
-    does $15–20K/mo with none); urgency niches (towing) GBP-driven, consideration niches
-    (cabinets) website-driven. ⏳ verification + review detail (57:59–1:05:52).
-11. ✅ Monetize: free leads → commission → flat rent; whale tier = call-tracking
-    API-wired to tenant CRM, straight commission (his LA construction deal: 7 niches,
-    dozens of sites). ⏳ contracts/leverage (1:16:16), handoff scripts (1:10:08).
-12. ✅ Scale tenant first: service businesses travel 20–30 mi → sibling-city sites take a
-    client from $500 to $2–3K/mo. ⏳ mega brand rollup (1:21:51).
+   ✅ Never automate links — link-services spike then crash; quality on-page ranks in
+   3–4 months with **zero links**.
+10. ✅ GBP = optional upside (~30–40% of his sites; student does $15–20K/mo with none).
+    Verification (relayed as "what other people do", on-air disclaimer): vehicle-only
+    video — ~$60 car magnet, open/enter/start vehicle, show NAP business cards for the
+    AI; never enter a building; precise location OFF; on failure delete listing + retry
+    same-everything. Trust stack: Workspace email + GSC + Analytics. Call tracking
+    ~$10/mo, AI-voice whisper. No-GBP compensation: more sites + sub-niche sites
+    (lime-wash painting ranks in LA, no GBP). ⏳ review tactics (1:05:52).
+11. ✅ Monetize: free leads → qualify ("10 leads — how many close?" expect ~30%; 10% =
+    walk) → commission → **lead-value calculator** (customer value × close rate × ~7% ≈
+    $/lead, e.g. $60) prices the flat rent → weekly billing; whale tier = call tracking
+    API-wired to tenant CRM. Contracts mostly unneeded — owning site + number + routing
+    is the enforcement (reroute leads to a competitor on non-payment); tenants ask for
+    exclusivity contracts, not you.
+12. ✅ Done-criterion: homepage top of page one → leave it, build the next. **10-site
+    rule**: ~10 h/site × 10 = 100 hours; "never seen anybody build 10 and not make
+    money" — #1 failure is quitting after one site. Scale tenant first (20–30 mi radius,
+    $500 → $2–3K/mo), then portfolio; national endgame = 301 rollup into a real brand +
+    branded-search moat via a utility (photo-upload quotes).
 
 ## Secrets worth remembering
 - **The whisper message is the sales engine** — tenant hears your name before every job.
@@ -67,10 +79,10 @@ last year to re-test the playbook.
   portfolio both ways.
 
 ## Pending ([[fully-aware]] intake F1)
-Transcript captured 0:00–30:00 (TurboScribe free cut). Still needed: 30:00–1:31:00 —
-internal linking, doorway avoidance, AI content workflow, keyword split rule, first-30-days
-blueprint, image sourcing, GBP video verification, reviews, handoff scripts, contracts,
-rollup, failure post-mortems.
+Verbatim coverage: 0:00–28:22 + ~57:59–end. Still needed: the **middle block
+~28:22–57:59** — must-have pages, internal linking, doorway avoidance, AI content
+workflow, keyword research/GSC/page splits, first-30-days blueprint, site-structure
+strategy, image sourcing — plus reviews/conversions (1:05:52).
 
 ## Related
 - ippei.com guides: [rank-and-rent 5 steps](https://ippei.com/rank-and-rent/),

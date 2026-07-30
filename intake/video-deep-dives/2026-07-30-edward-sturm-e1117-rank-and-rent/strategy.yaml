@@ -1,7 +1,7 @@
 # TEACHING: Ippei Kanehara's Rank-and-Rent Local SEO System
 # Source: The Edward Show E1117 (2026-07-26, youtube.com/watch?v=muwrS4Dh_R8)
-#         Transcript 0:00-30:00 verbatim (TurboScribe); remainder from chapters +
-#         ippei.com published guides (rank-and-rent/, rank-and-rent-definition/, rank-rent-seo/)
+#         Transcript verbatim for 0:00-28:22 (TurboScribe) and ~57:59-end (raw paste);
+#         middle block from chapters + ippei.com guides (rank-and-rent/, rank-rent-seo/)
 # Application: Building rentable local lead-generation assets; reusable SERP-vetting,
 #              page-architecture and BOF-keyword doctrine for bridge pages and offer sites.
 # DESTINATION: ryan-super-affiliate:marketing-os/10-organic/teachings/content-strategy/
@@ -48,7 +48,10 @@ core_principles:
     application:
       - Weekly Stripe billing as a churn hack
       - Keep domain, site, and phone number ownership in every deal
-      - "[transcript-needed] contract/leverage terms (1:16:16)"
+      - "Contracts mostly unnecessary: owning site + number + lead routing IS the enforcement - non-payment answered by rerouting leads to a competitor"
+      - "When a contract appears it is usually the TENANT wanting exclusivity"
+      - "Qualification: 'If I sent 10 leads, how many close?' - expect ~30%; 10% = walk"
+      - "Price rent via lead-value calculator: avg customer value x close rate x ~7% commission = $/lead (e.g. $60); 10-15 leads/mo prices the flat fee"
 
   principle_3:
     name: "Niche Filter With Numbers"
@@ -110,7 +113,12 @@ core_principles:
       alone converts.
     application:
       - Decide GBP effort per niche urgency profile
-      - "[transcript-needed] video-verification method + review tactics (57:59-1:05:52)"
+      - "Verification (relayed on-air as 'what other people do', with explicit disclaimer): vehicle-only video - ~$60 car magnet, open/enter/start the vehicle, show NAP business cards readably for the AI; never walk into a building (misclassifies as location-based)"
+      - "Precise location OFF while filming; on failure delete the listing and retry same-everything - often passes second time"
+      - "Trust stack: Workspace email on-domain + Search Console + Analytics connected as ownership proof"
+      - "Call tracking ~$10/mo: records calls, typed whisper message read by AI voice"
+      - "No-GBP compensation: more sites per client + hyper-targeted sub-niche sites (lime-wash painting ranks in LA with no GBP)"
+      - "[transcript-needed] review tactics (1:05:52)"
 
   principle_7:
     name: "Scale the Tenant, Then the Portfolio"
@@ -121,9 +129,13 @@ core_principles:
       author's last year alone). Bottom-of-funnel intent makes the portfolio
       update-resilient where content sites are not.
     application:
+      - "Done-criterion per site: homepage top of page one for the main keyword -> leave it alone, build the next"
+      - "The 10-site rule: ~10 hours/site x 10 sites = 100 hours; nobody who built 10 failed to make money; #1 failure cause is quitting after one site"
+      - "Never automate links (link-services spike then crash); quality on-page + real H2/H3 depth ranks in 3-4 months with zero links"
+      - "Untested lever: 10-20 YouTube videos per site on '{service} {city}' keywords linking back"
+      - "National endgame: 301 portfolio into one real brand + press releases ('acquisition') + active social; moat = branded search signals (Roto-Rooter effect) built via a utility feature (photo-upload digital quotes)"
       - "[transcript-needed] first-30-days launch sequence (51:09)"
       - "[transcript-needed] keyword mining: autocomplete + GSC, new-page-vs-expand rule (43:34-48:31)"
-      - "[transcript-needed] mega brand rollup + failure post-mortems (1:21:51, 1:27:18)"
 
 affiliate_engine_mapping:
   scan: "Niche filter + Maps-pack demand proxy reusable as market-engine pack criteria"

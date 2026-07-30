@@ -42,11 +42,11 @@ queue:
       - video_id: muwrS4Dh_R8
         title: "Rank & Rent SEO: How Ippei Built 130 Sites - and Made $240K From One 15-Hour Website"
         deep_dive: intake/video-deep-dives/2026-07-30-edward-sturm-e1117-rank-and-rent/
-        status: first-30min-verbatim-remainder-outline
+        status: verbatim-except-middle-block-2822-5759
 
 follow_ups:
   - id: F1
-    entry: "Remaining transcript 30:00-1:31:00 for muwrS4Dh_R8 (TurboScribe free tier cut at 30 min - re-run with Unlimited or yt-dlp locally); fill remaining [transcript-needed] markers in the deep dive + strategy.yaml."
+    entry: "Transcript for middle block ~28:22-57:59 of muwrS4Dh_R8 (must-have pages, internal linking, doorway avoidance, AI workflow, keyword research/GSC/splits, first-30-days blueprint, structure strategy, image sourcing) + reviews segment (1:05:52); rest is verbatim-covered."
   - id: F2
     entry: "Decide the queue's permanent home (market-engine pack sources vs standalone) and port; this intake copy is a staging proposal."
   - id: F3

@@ -11,17 +11,16 @@
 | Layer | Source | Confidence |
 |---|---|---|
 | Metadata, full description, 32 chapters, channel catalog | YouTube Innertube API — verbatim in `source/` | Verbatim |
-| **First 30 minutes (chapters 0:00 → ~28:22)** | TurboScribe transcript (`source/transcript-0000-3000.txt`) | **Verbatim** |
-| Remaining hour (~28:22 → 1:31:00) | Chapter titles + description topic list, cross-checked against ippei.com published guides | Outline only — **[transcript-needed]** |
+| **0:00 → ~28:22** | TurboScribe transcript (`source/transcript-0000-3000.txt`) | **Verbatim** |
+| **~57:59 → 1:31:00** (GBP boost, video verification, lead-value math, contracts, mistakes, rollup, why-fail) | Ryan's raw auto-transcript paste (`source/transcript-remainder-paste.txt`) | **Verbatim** |
+| **~28:22 → ~57:59** | Chapter titles + description topic list, cross-checked against ippei.com published guides | Outline only — **[transcript-needed]** |
 
-**Transcript status**: TurboScribe free tier cut the transcript at 30:00, mid-way through
-"EMDs and Must Have Pages". Chapters still needing the spoken detail: internal linking
-(31:36), doorway avoidance (36:31), AI content workflow (39:44), keyword research + GSC +
-page splits (43:34–48:31), **first-30-days blueprint (51:09)**, image sourcing (56:35),
-GBP lead boost + video verification (57:59–1:05:52), reviews (1:05:52), monetization models
-(1:08:23), **lead handoff scripts (1:10:08)**, contracts (1:16:16), scaling mistakes
-(1:18:14), mega brand rollup (1:21:51), why projects fail (1:27:18).
-(Transcription note: "Ipe/epay.com" in the raw transcript = Ippei / ippei.com.)
+**Transcript status**: only the middle block still lacks spoken detail — must-have pages
+tail (28:22), internal linking (31:36), doorway avoidance (36:31), AI content workflow
+(39:44), keyword research + GSC + page splits (43:34–48:31), **first-30-days blueprint
+(51:09)**, site structure strategy (54:38), image sourcing (56:35), and the reviews/
+conversions segment (1:05:52).
+(Transcription note: "Ipe/eBay/eay/epay.com" in the raw transcripts = Ippei / ippei.com.)
 
 ---
 
@@ -124,14 +123,66 @@ built in ~15 hours 11 years ago, has paid ~$2K/month ever since — $240K+ lifet
     partner; launched his own rank-and-rent community in the past year. Key lesson credited
     to Dan: sales, positioning, and deal structure matter more than SEO technique.
 
-**[transcript-needed] remainder** — internal linking, doorway avoidance, AI workflow,
-autocomplete/GSC keyword mining, page-split rule, first-30-days blueprint, image sourcing,
-GBP video-verification detail, reviews, lead handoff scripts, contracts/leverage, mega
-brand rollup, failure post-mortems.
+**GBP video verification (57:59–1:05:52 — framed on-air as "what other people have done", explicit don't-do-this disclaimer)**
+21. **Vehicle-only verification video**: today's service-business GBP verification wants a
+    phone-shot video proving the business is real. The pattern that passes: a vehicle with
+    a **~$60 car magnet** (Home Depot), film yourself opening/entering/starting the
+    vehicle, show **$10–20 business cards** with logo + name + address + phone (NAP) held
+    clearly so the AI can read them. Do NOT walk into a house/home-office — it confuses
+    the classifier into treating you as a location-based business instead of service-area.
+22. **Turn precise location OFF** while shooting (there's IP/location tracking in the
+    flow). If verification fails: **delete the listing and redo it with the exact same
+    name/address** — it frequently passes on the retry.
+23. **Trust stack**: Google Workspace email on the domain, plus Search Console and
+    Analytics connected to the site, as ownership proof signals.
+24. **The call-tracking stack is ~$10/month**: records every call, and the whisper message
+    is just typed into settings and read by an AI voice before each call connects.
+25. **GBP-less compensation**: if you skip GBP, build MORE sites per client — sibling
+    cities and hyper-specific sub-niche sites (his example: a whole site for **lime-wash
+    painting** ranks in Los Angeles without any GBP because it's so targeted).
+
+**Sales mechanics & leverage (1:08:23–1:17:00)**
+26. **Qualification question**: "If I sent you 10 leads, how many could you close?" Most
+    industries should close ~**30%**; an answer of 10% = not a good fit, walk.
+27. **Lead value calculator**: avg customer value × close rate × ~7% commission = per-lead
+    value (e.g. **$60/lead**); at 10–15 leads/month that prices the site's rent and makes
+    the flat-fee conversation trivial ("this site is easily worth $X/month").
+28. **Why he mostly doesn't need contracts**: he owns the site, the phone line, and the
+    routing — non-payment is answered by pointing the leads at a competitor, which "forces
+    their hand" faster than any contract would. When contracts appear, it's usually the
+    TENANT wanting exclusivity (stop you working with their competitor). Leverage grows
+    with every week of delivered leads — tenants fear losing you to a rival.
+
+**Ops doctrine (1:18:14–end)**
+29. **Per-site done-criterion**: once the homepage ranks top of page one for the main
+    "{service} {city}" keyword, leave the site alone and build the next one.
+30. **His two most expensive mistakes**: (a) lazy "shotgun" sites with thin, undetailed
+    content — they never rank durably; (b) **automated backlink/link-generation services**
+    — rankings spiked then crashed. Conclusion: no automation on links; on-page topical
+    authority + genuinely structured content (H2/H3s that go deeper, not walls of text)
+    ranks in **3–4 months with zero links**.
+31. **Untested idea he wants to run**: 10–20 YouTube videos per site targeting the same
+    "{service} {city}" keywords, linking back — one video per site already works.
+32. **The 10-site rule (why projects fail)**: the #1 failure cause is building ONE site,
+    getting a mediocre result, and quitting. ~10 hours per site × 10 sites = 100 hours;
+    "I've never seen anybody build 10 rank-and-rent sites and not be making money."
+    Consistency is "the mother of all skills."
+33. **Mega-brand rollup** (Edward's riff, Ippei's amendment): Edward — 301-redirect a
+    ranking portfolio into one national-sounding brand, press-release the "acquisition,"
+    add active social for top-of-mind awareness; a real brand ranks faster for high-volume
+    terms and opens adjacent niches. Ippei — the national moat is **branded search
+    signals** (Roto-Rooter effect), and without an ad budget you build them by shipping a
+    **utility** that earns repeat visits (e.g. photo-upload digital quoting instead of an
+    in-home estimator; directories that win long-term all have one).
+
+**[transcript-needed] middle block (~28:22–57:59)** — must-have pages list, internal
+linking, doorway avoidance, AI content workflow, autocomplete/GSC keyword mining,
+page-split rule, first-30-days blueprint, site-structure strategy, image sourcing; plus
+the reviews/conversions segment (1:05:52).
 
 ## 3. Step-by-step formula (operator sequence)
 
-Steps 1–7 are now verbatim-grounded; 8–12 pending remainder transcript.
+All steps verbatim-grounded except the bracketed middle-block details.
 
 1. **Pick the niche**: phone-driven home-construction service, avg job ≥$2–3K, fast close.
    Kill list: carpet cleaning (commoditized), plumbing/HVAC (saturated), remodels/ADU
@@ -150,13 +201,20 @@ Steps 1–7 are now verbatim-grounded; 8–12 pending remainder transcript.
    weekly billing rails ready (Stripe).
 8. **Run the first-30-days sequence** after launch *[transcript-needed — 51:09]*.
 9. **Mine and split keywords**: Autocomplete + GSC; new-page-vs-expand rule
-   *[transcript-needed — 43:34–48:31]*.
-10. **(Optional) GBP layer**: video verification, reviews *[transcript-needed — 57:59–1:05:52]*.
-11. **Monetize the ring**: free leads → "want more of these?" call → commission →
-    $1–2K/month flat rent billed weekly → (whale tenants) CRM-integrated commission.
-    Keep domain, site, and number ownership *[contract detail transcript-needed — 1:16:16]*.
-12. **Scale**: sibling-city sites for proven tenants ($500 → $2–3K/month per client),
-    portfolio of many sites, eventual mega-brand rollup *[transcript-needed — 1:21:51]*.
+   *[transcript-needed — 43:34–48:31]*. No automated link building ever — spike-and-crash;
+   quality on-page ranks in 3–4 months with zero links.
+10. **(Optional) GBP layer**: vehicle-only verification video (car magnet + NAP business
+    cards, precise location off, delete-and-retry on failure), Workspace email + GSC +
+    Analytics as trust stack. Skipping GBP? Compensate with more sites and sub-niche
+    hyper-targeting per client.
+11. **Monetize the ring**: free leads → qualification ("10 leads — how many close?",
+    expect ~30%) → commission → price via the lead-value calculator (value × close rate ×
+    ~7% ≈ $/lead) → $1–2K/month flat rent billed weekly → (whale tenants) CRM-integrated
+    commission. Contracts optional: owning site + number + routing IS the leverage.
+12. **Ship the next site once the homepage hits top of page one** — and build 10 sites
+    (~100 hours) before judging the model. Scale: sibling-city sites for proven tenants
+    ($500 → $2–3K/month per client); long-term, consider the mega-brand rollup (301s into
+    a national brand + branded-search moat via a utility feature).
 
 ## 4. Fit to our system (ryan-super-affiliate)
 
@@ -174,8 +232,10 @@ Steps 1–7 are now verbatim-grounded; 8–12 pending remainder transcript.
 
 ## 5. Open items
 
-- F1 — remaining transcript 30:00–1:31:00 (TurboScribe free tier cut at 30 min; re-run
-  with Unlimited, or yt-dlp locally) → fill remaining **[transcript-needed]** markers.
+- F1 — transcript for the middle block **~28:22–57:59** only (must-have pages, internal
+  linking, doorway avoidance, AI workflow, keyword research/GSC/splits, first-30-days
+  blueprint, structure strategy, image sourcing) + reviews segment (1:05:52). Everything
+  else is now verbatim-covered.
 - F2 — channel-wide scan of The Edward Show queued in `intake/channel-scan-queue/QUEUE.yaml`.
 - F3 — port `strategy.yaml` + `obsidian-note.md` to their destinations once write access exists.
 
