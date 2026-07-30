@@ -1,0 +1,53 @@
+# Channel scan queue — YouTube channels queued for full-catalog deep dives.
+# schema: channel-scan-queue/v1 (intake; hand-consumed, no automation attached yet)
+# Rules: entries are proposals; a deep dive per video lands in intake/video-deep-dives/.
+# Consumption order: priority desc, then queued_at asc.
+
+schema: channel-scan-queue/v1
+last_updated: '2026-07-30'
+maintained_by: session (proposals) / Anthony+Ryan ratify
+
+access_notes: |
+  From a Claude Code remote session the working route is YouTube Innertube on
+  youtubei.googleapis.com (youtube.com itself is blocked by the environment
+  network policy):
+    - POST /youtubei/v1/next   {context.client WEB, videoId}  -> title, channel,
+      date, views, full description, chapters (macroMarkersListItemRenderer).
+    - POST /youtubei/v1/browse {context.client WEB, browseId, params} -> channel
+      metadata + video catalog (lockupViewModel items) + continuations.
+  NOT available without an authenticated session: player (bot-check) and
+  get_transcript (precondition failure) -> word-for-word transcripts need a local
+  machine (yt-dlp / youtube-transcript-api) or a network-policy allowlist for
+  youtube.com. YOUTUBE_API_KEY / APIFY_TOKEN exist only in local .env files
+  (ryan-super-affiliate/market-engine/.env), not in this remote environment.
+
+queue:
+  - id: CSQ-1
+    channel: "Edward Sturm — The Edward Show"
+    handle: "@buildinpublic"
+    channel_id: UCDxhBSgPvrFvyXLdpmygDhg
+    url: https://www.youtube.com/@buildinpublic
+    queued_at: '2026-07-30'
+    queued_by: "Ryan (session request: deep dive all videos on the channel)"
+    priority: high
+    directive: |
+      Deep-dive every video in the catalog: extract secrets + step-by-step
+      formulas per video, land each as intake/video-deep-dives/<date>-<slug>/,
+      port strategies to marketing-os teachings and notes to the Obsidian vault.
+      Daily SEO podcast, 1000+ episodes (episode numbering at E1117 as of
+      2026-07-26) - process newest-first, prioritizing interview episodes with
+      named practitioners over news roundups.
+    seed_scan: intake/video-deep-dives/2026-07-30-edward-sturm-e1117-rank-and-rent/source/channel-latest-30.tsv
+    completed:
+      - video_id: muwrS4Dh_R8
+        title: "Rank & Rent SEO: How Ippei Built 130 Sites - and Made $240K From One 15-Hour Website"
+        deep_dive: intake/video-deep-dives/2026-07-30-edward-sturm-e1117-rank-and-rent/
+        status: outline-complete-transcript-pending
+
+follow_ups:
+  - id: F1
+    entry: "Transcript pass for muwrS4Dh_R8 from a local machine (yt-dlp/youtube-transcript-api); fill [transcript-needed] markers in the deep dive + strategy.yaml."
+  - id: F2
+    entry: "Decide the queue's permanent home (market-engine pack sources vs standalone) and port; this intake copy is a staging proposal."
+  - id: F3
+    entry: "Port strategy.yaml -> ryan-super-affiliate:marketing-os/10-organic/teachings/content-strategy/kanehara-rank-and-rent.yaml and obsidian-note.md -> anthony-wiki-vault once write access exists."

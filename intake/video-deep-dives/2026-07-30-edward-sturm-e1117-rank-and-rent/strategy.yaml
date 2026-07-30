@@ -1,0 +1,109 @@
+# TEACHING: Ippei Kanehara's Rank-and-Rent Local SEO System
+# Source: The Edward Show E1117 (2026-07-26, youtube.com/watch?v=muwrS4Dh_R8)
+#         + ippei.com published guides (rank-and-rent/, rank-and-rent-definition/, rank-rent-seo/)
+# Application: Building rentable local lead-generation assets; reusable page-architecture
+#              and BOF-keyword doctrine for bridge pages and offer sites.
+# DESTINATION: ryan-super-affiliate:marketing-os/10-organic/teachings/content-strategy/
+#              (staged here in fully-aware/intake/ because this session has read-only
+#              access to that repo; port verbatim, then delete this copy.)
+# STATUS: outline-complete; chapter-level tactics pending transcript pass (see markers).
+
+framework_name: "Rank-and-Rent Local SEO System"
+author: "Ippei Kanehara (interviewed by Edward Sturm)"
+source: "The Edward Show E1117 + ippei.com"
+core_thesis: |
+  Rank a small website for bottom-of-funnel local service searches, then rent the
+  asset (per-lead, commission, or flat monthly) to a local operator. You own a
+  compounding property instead of selling labor; recurring rental income churns
+  less than retainers; and commercial local intent is resilient to Google core
+  updates that wreck content sites. Proof: a ~15-hour build grossing $240K+ over
+  its lifetime, still paying monthly after a decade.
+
+core_principles:
+
+  principle_1:
+    name: "Rent the Asset, Not Your Labor"
+    description: |
+      The agency sells hours against a retainer; the rank-and-rent operator owns
+      the ranking property. If a tenant leaves, the asset re-rents. Flat monthly
+      site rental produces the lowest churn; commission/per-lead deals are the
+      on-ramp that proves value first.
+    application:
+      - Start tenants on per-lead or commission to prove the phone rings
+      - Convert proven tenants to flat monthly rental for stability
+      - Keep ownership of domain, site, and call-tracking numbers (contract leverage)
+
+  principle_2:
+    name: "Leads Before Clients"
+    description: |
+      Rank first, sell second. Hand a chosen local operator free leads for a short
+      window; the sale closes itself because the product already demonstrably works.
+    application:
+      - Never pitch with a deck; pitch with a ringing phone
+      - Free-lead window -> commission -> flat rent ladder
+      - "[transcript-needed] exact handoff scripts (episode 1:10:08)"
+
+  principle_3:
+    name: "Niche and City Filter"
+    description: |
+      Phone-driven home services with high ticket, high margin, low customer
+      loyalty, urgent need. Mid-size cities (~75K-250K population) over saturated
+      metros. Saturation is judged at the page/angle level: many local businesses
+      still have weak SEO, so a 'competitive' niche with thin competitor pages is
+      open.
+    application:
+      - Filter: does the buyer call whoever ranks, without brand loyalty?
+      - Validate real search demand for "{service} {city}" variants first
+      - SERP-audit competitor pages for thinness before committing
+
+  principle_4:
+    name: "Homepage as Authority Hub (Topical Authority over Backlinks)"
+    description: |
+      Site structure does the ranking: homepage hub, strict heading hierarchy,
+      service pages, sub-city landing pages, internal links concentrating authority
+      outward, dozens of bottom-of-funnel pages toward full topical coverage.
+      Ippei has largely abandoned guest-post link building; coverage plus internal
+      authority across an owned network replaces it. Avoid doorway footprints by
+      making every local page genuinely unique (local case studies, unique images).
+    application:
+      - EMD/PMD or local-brandable domain that can absorb neighboring cities
+      - Hub -> service pages -> sub-city pages, internally linked
+      - "[transcript-needed] must-have page list + launch page count (28:22)"
+
+  principle_5:
+    name: "AI Content With a Human Ceiling"
+    description: |
+      AI-assisted drafting scaled across the page set, then entity optimization,
+      then a human edit for quality and local uniqueness. AI is the volume tool,
+      not the publish button.
+    application:
+      - Draft with AI, optimize entities, edit by hand, localize with real proof
+      - "[transcript-needed] exact workflow steps (39:44)"
+
+  principle_6:
+    name: "Mine Overlooked BOF Keywords Continuously"
+    description: |
+      Google Autocomplete and Search Console are the ongoing keyword sources.
+      Overlooked service-variant keywords are the margin. A defined rule decides
+      when a query gets a new page versus expanding an existing one.
+    application:
+      - Weekly GSC query mining; autocomplete sweeps per service
+      - "[transcript-needed] new-page-vs-expand split rule (47:27)"
+
+  principle_7:
+    name: "Portfolio over Perfection"
+    description: |
+      Beginners should build multiple sites, not one perfect site: faster feedback,
+      portfolio math, resilience. GBP is upside, not a requirement. Scale by
+      replicating to neighbor cities, multiple sites per winning tenant, and
+      eventual brand rollup.
+    application:
+      - "[transcript-needed] first-30-days launch sequence (51:09)"
+      - "[transcript-needed] GBP video-verification and review tactics (57:59-1:05:52)"
+      - "[transcript-needed] mega brand rollup mechanics (1:21:51)"
+
+affiliate_engine_mapping:
+  scan: "Niche filter doubles as pack relevance criteria (high-ticket, low-loyalty, phone-driven)"
+  route: "A ranked lead-gen site is a permanently-owned BRIDGE; free-leads close works for pay-per-call offers"
+  build: "Hub/service/sub-city BOF architecture maps to 02-page-builder; AI workflow maps to 10-organic"
+  learn: "Update-resilience thesis: weight portfolio toward commercial-intent properties"
