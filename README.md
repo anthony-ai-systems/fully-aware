@@ -38,5 +38,8 @@ Binding design spec:
   `SURFACE-V1.md` (`surface/v1` schema), `BOOT-PACK-V1.md` (`boot-pack/v1`).
 - `launchd/` — `com.anthonyflores.fully-aware.boot-pack.plist` (daily 05:45
   boot-pack refresh; unarmed until installed via `tools/install-launchagent.sh`).
+- `telegram/` — desktop keep-alive kit for the "Ryan's Assistant" Telegram
+  bridge (`watchdog.sh` + installer; see `telegram/README.md`). Unarmed until
+  installed on the desktop via `telegram/install-telegram-watchdog.sh`.
 - `state/` — local-only, gitignored session state (holds `BOOT-PACK.md` +
   `boot-pack.json`, the surfaces cache, and logs).
