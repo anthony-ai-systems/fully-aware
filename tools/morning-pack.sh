@@ -24,6 +24,12 @@
 
 set -uo pipefail  # NOT -e: a per-repo generation failure must degrade, not abort.
 
+# The armed LaunchAgent invokes this script with launchd's bare PATH
+# (/usr/bin:/bin:/usr/sbin:/sbin), which lacks Homebrew -- so `gh` is invisible
+# and every surface degrades with gh_missing (open_prs + cold-load probes).
+# Prepend the Homebrew bin dirs so scheduled runs see the same tools as a shell.
+export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}"
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIGS_DIR="${REPO_ROOT}/tools/configs"
 SURFACES_DIR="${REPO_ROOT}/state/surfaces"
