@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Fully Aware daily-scan LaunchAgent: run the Codex-managed scan pipeline every
+  day at 06:15 local -- 30 minutes after the 05:45 boot-pack agent, so the pack
+  the scanner reads is already fresh (stage 0 re-runs morning-pack.sh only if it
+  somehow is not).
+
+  The pipeline is Codex scan -> Fable review -> Codex summarize, all three stages
+  behind their own watchdogs, degrading rather than aborting. It always exits 0:
+  a partial run is reported in state/logs/daily-scan.log and the per-stage
+  .FAILED markers, never as a launchd failure.
+
+  /bin/bash -lc is deliberate. The scan shells out to `codex`, `claude`, `gh` and
+  `git`; launchd hands the agent a stripped PATH, and a login shell gives it the
+  same environment Anthony's own terminal has. (run-daily-scan.sh also sets an
+  explicit PATH itself -- belt and braces, same lesson as the SAGA agents.)
+
+  UNARMED until Anthony merges: this plist points at code on the
+  feat/codex-daily-scan branch. Install + load with
+  tools/daily-scan/install-daily-scan-launchagent.sh AFTER merge to main. Do not
+  load it against unmerged code.
+
+  D30 discipline: every stage runs Codex under a read-only sandbox and writes
+  only gitignored state/ outputs (scan, review, brief, LATEST.md, thread-id,
+  logs). Nothing in this lane commits or pushes.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.anthony.fully-aware.daily-scan</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>cd /Users/anthonyflores/code/fully-aware &amp;&amp; tools/daily-scan/run-daily-scan.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/anthonyflores/code/fully-aware</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>6</integer>
+        <key>Minute</key>
+        <integer>15</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/anthonyflores/code/fully-aware/state/logs/daily-scan.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/anthonyflores/code/fully-aware/state/logs/daily-scan.err.log</string>
+</dict>
+</plist>
