@@ -13,9 +13,9 @@
   assembler. Without this, a daily-assembled pack would render permanently-stale
   surfaces. Per-repo generation failure degrades (log + continue), never aborts.
 
-  UNARMED until Anthony merges: this plist points at code on the feat/m5-surface-
-  coverage branch. Install + load with tools/install-launchagent.sh AFTER merge to
-  main. Do not load it against unmerged code.
+  INSTALLED AND ARMED: this plist is live in ~/Library/LaunchAgents/ and fires
+  daily at 05:45. Editing this file changes nothing on its own -- re-run
+  tools/install-launchagent.sh to copy + reload the edited plist.
 
   D30 discipline: generate-surface.py and assemble-boot-pack.py stay read-only;
   the wrapper writes only gitignored state/ outputs (surfaces cache, pack, logs).

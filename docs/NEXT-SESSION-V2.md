@@ -3,10 +3,18 @@
 Status: v2 (Fully Aware lane M1). Parser: [`next_session.py`](../tools/next_session.py).
 
 The machine survey found **five** divergent NEXT_SESSION schemas across ~1,761
-files on this laptop. `next-session/v2` is the single shape every consumer
-(Iris, mission-control, the boot-pack assembler) reads. One parser module —
-`next_session.py` — normalizes all legacy variants into v2 **read-only**;
-new interactive/continuity handoffs are **written** directly as v2.
+files on this laptop. `next-session/v2` is the single shape consumers read. One
+parser module — `next_session.py` — normalizes all legacy variants into v2
+**read-only**; new interactive/continuity handoffs are **written** directly as
+v2.
+
+## Consumers
+
+| Consumer | State | How it reads v2 |
+|----------|-------|-----------------|
+| boot-pack assembler | **wired** | `assemble-boot-pack.py` imports this module in-repo and projects each manifest repo's `human_only[]` into the unified decision queue. |
+| Iris | **wired**, indirectly | The Iris console reads the boot pack's JSON sidecar, so it sees v2 through the assembler rather than calling the parser itself. |
+| mission-control | **intended**, not yet wired | No mission-control code reads v2 today. A design target, not a live consumer. |
 
 ## Field table
 

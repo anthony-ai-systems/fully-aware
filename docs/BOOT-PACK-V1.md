@@ -21,6 +21,27 @@ non-enforcing, report-only, manually invoked. It performs **no git operations an
 no network**. The only files it writes are its own `state/` outputs, and it
 refuses to write a non-gitignored path.
 
+## Consumer contract -- `boot-pack/v1` has a LIVE external consumer
+
+`boot-pack/v1` is **not** an internal-only shape. The Iris console server
+(`_awareness_digest`, in the vault's Iris runtime checkout) reads the JSON
+sidecar directly, from the **hardcoded absolute default path**
+`/Users/anthonyflores/code/fully-aware/state/boot-pack.json`, and **hard-validates**
+it: `schema == "boot-pack/v1"`, `generated_at`, `token_estimate`, `warnings[]`
+and `open_items[]` as arrays, and `sections.decision_queue.items[]` as an array.
+Anything else raises.
+
+Two consequences:
+
+- **Any change to the sidecar schema MUST be reviewed against Iris first** --
+  renaming or retyping one of those fields silently breaks its awareness
+  context.
+- **Breakage is silent.** Iris wraps the whole read in an `except Exception`
+  guard (awareness must never abort packet or chat construction), so a missing,
+  moved, or schema-drifted pack degrades to `{"available": false, "reason": ...}`
+  with only a log line -- never an error the operator sees. Do not rely on Iris
+  to fail loudly.
+
 ## The four sections
 
 Every entry is tagged `[source | as_of]`.
@@ -30,13 +51,17 @@ Every entry is tagged `[source | as_of]`.
    `repo-manifest.json` ships. Canonical repos only; worktree copies excluded.
    Each entry: environment, path, role, status, kind, owning system, branch,
    pins. Staleness threshold **7d**.
-2. **State surfaces** -- the fold of every discoverable `<repo>/.macro/surface.json`
-   (schema `surface/v1`, produced by `generate-surface.py`). Lookup order:
-   `<repo_path>/.macro/surface.json`, then `state/surfaces/<environment>.json`
-   (a Fully Aware-local cache so the assembler folds surfaces without writing
-   into other repos). A missing/invalid surface for a manifest repo is a
-   **degraded-source WARNING**, never a crash. Staleness threshold **24h**
-   (on the surface's `generated_at`).
+2. **State surfaces** -- the fold of every discoverable surface (schema
+   `surface/v1`, produced by `generate-surface.py`). In practice every surface
+   on this machine lives in the Fully Aware-local cache
+   **`state/surfaces/<environment>.json`** -- that is what `morning-pack.sh`
+   writes and what the assembler actually reads, and it is how the layer keeps a
+   zero footprint in every other repo. The lookup order is
+   `<repo_path>/.macro/surface.json` first, then the cache; the `.macro/` path is
+   a supported per-repo fallback that no repo here exercises (no `.macro/`
+   directory exists on this machine). A missing/invalid surface for a manifest
+   repo is a **degraded-source WARNING**, never a crash. Staleness threshold
+   **24h** (on the surface's `generated_at`).
 3. **Unified decision queue** -- a **PROJECTION** (routes, never absorbs
    ratification) over three feeds, rendered as one ordered inbox (oldest waiting
    first) with per-item age + provenance:
@@ -145,9 +170,10 @@ tools/morning-pack.sh --scan-consumption-dir <dir>   # args pass through to the 
 
 A LaunchAgent (`launchd/com.anthonyflores.fully-aware.boot-pack.plist`, daily
 05:45 before the 6am brief) runs the **wrapper** (M5; previously the assembler
-alone) and is authored but **unarmed** -- arm it post-merge with
-`tools/install-launchagent.sh`. The currently-armed M4 agent stays live until the
-install script is rerun post-merge.
+alone) and is **installed and armed** -- the scheduled 05:45 run is the pack's
+normal source. `tools/install-launchagent.sh` re-copies + reloads the plist; run
+it only after changing the plist, since edits in this repo do not reach the
+installed copy on their own.
 
 ## Hand-maintained seeds
 

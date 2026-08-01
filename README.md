@@ -12,9 +12,9 @@ real: the **next-session parser** (`next-session/v2`), the **surface generator**
 
 Shareable / productizable repos (saga-protocol, saga-mission-control,
 marketing-os) **never import code from this repo**. Coupling is by data contract
-only: the published schemas `surface/v1` and `next-session/v2` (and, once it
-ships, the boot-pack schema). This keeps the shareable repos clean for sharing
-and productization while Fully Aware keeps its own working folder.
+only: the published schemas `surface/v1`, `next-session/v2`, and `boot-pack/v1`.
+This keeps the shareable repos clean for sharing and productization while Fully
+Aware keeps its own working folder.
 
 ## Provenance
 
@@ -30,13 +30,16 @@ Binding design spec:
 
 - `tools/` — `next_session.py` (parser CLI), `generate-surface.py` (surface
   generator CLI), `assemble-boot-pack.py` (boot-pack assembler CLI),
-  `configs/` (central per-environment surface configs, the hand-maintained
-  `seed-manifest.json` + `ratification-backlog.json`), `install-launchagent.sh`,
-  and the test suites (`test_next_session.py`, `test_generate_surface.py`,
-  `test_assemble_boot_pack.py`).
+  `morning-pack.sh` (the scheduled entry point: regenerate every surface, then
+  assemble the pack), `configs/` (central per-environment surface configs, the
+  hand-maintained `seed-manifest.json` + `ratification-backlog.json`),
+  `install-launchagent.sh`, and the test suites (`test_next_session.py`,
+  `test_generate_surface.py`, `test_assemble_boot_pack.py`,
+  `test_m5_surface_coverage.py`).
 - `docs/` — `NEXT-SESSION-V2.md` (`next-session/v2` schema),
   `SURFACE-V1.md` (`surface/v1` schema), `BOOT-PACK-V1.md` (`boot-pack/v1`).
 - `launchd/` — `com.anthonyflores.fully-aware.boot-pack.plist` (daily 05:45
-  boot-pack refresh; unarmed until installed via `tools/install-launchagent.sh`).
+  boot-pack refresh; installed and armed — re-run
+  `tools/install-launchagent.sh` only after changing the plist).
 - `state/` — local-only, gitignored session state (holds `BOOT-PACK.md` +
   `boot-pack.json`, the surfaces cache, and logs).
