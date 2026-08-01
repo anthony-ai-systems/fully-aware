@@ -1,7 +1,7 @@
 {
   "schema": "surface-config/v1",
   "environment": "marketing-os-main",
-  "repo_path": "/Users/anthonyflores/code/marketing-os-main",
+  "repo_path": "/Users/anthonyflores/code/marketing-os",
   "canonical": true,
   "role": "Project-agnostic marketing generation OS; brand context loaded per-project via each project's Soul.md.",
   "default_branch": "main",
@@ -58,6 +58,7 @@
     {"entry": "~outputs/ -- gitignore rule: project runtime, absent on disk", "source": "~system/context-packs/FABLE-LOAD-PACK.md", "as_of": "2026-07-02"}
   ],
   "pitfalls": [
+    {"entry": "The environment id is marketing-os-main (matching the GitHub repo) but repo_path is the canonical checkout /Users/anthonyflores/code/marketing-os -- ~/code/marketing-os-main is a symlink to the marketing-os-read-main worktree and is NOT canonical; never point this config back at it.", "source": "config", "as_of": "2026-08-01"},
     {"entry": "Root NEXT_SESSION.json has historically been invalid JSON (Codex appended objects without array brackets); the M1 E-adapter salvages it, and a separate writer fix stops the append.", "source": "macro-seat-spec-2026-07-23.md SS1.3", "as_of": "2026-07-23"},
     {"entry": "Never edit marketing-os on main directly; every scope gets its own branch plus a peer worktree.", "source": "operator-memory", "as_of": "2026-07-23"},
     {"entry": "Commits into pg-main-tflo / PG-MUSCLE paths block em-dashes; ASCII hyphen only.", "source": "operator-memory", "as_of": "2026-07-23"}

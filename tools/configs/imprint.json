@@ -37,7 +37,6 @@
   "pitfalls": [
     {"entry": "Rich-lineage fork: intelligence-layer changes live HERE (diffable vs RichSchefren upstream), never in the wiki-vault.", "source": "operator-memory", "as_of": "2026-07-23"},
     {"entry": "Fork history is disjoint from upstream (blocks straight upstreaming); reconcile deliberately, do not assume a shared base.", "source": "operator-memory", "as_of": "2026-07-23"},
-    {"entry": "Local HEAD sits on a fix/ working branch, not the default branch main -- verify branch before assuming HEAD == main.", "source": "config", "as_of": "2026-07-23"},
     {"entry": "Never merge or direct-push to a default branch -- merge is Anthony's.", "source": "operator-memory", "as_of": "2026-07-23"}
   ]
 }

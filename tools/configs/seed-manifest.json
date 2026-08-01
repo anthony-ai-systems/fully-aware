@@ -2,8 +2,8 @@
   "schema": "seed-manifest/v1",
   "provenance": "manual",
   "maintained_by": "Anthony (hand-maintained seed; superseded by P21 repo-manifest.json when it ships)",
-  "as_of": "2026-07-23",
-  "note": "Hand-maintained topology seed for the M4 boot-pack assembler. P21's repo-manifest.json + launchagent-manifest.json do not exist yet; until they do the assembler reads this file, tagged provenance:manual. Canonical repos only -- worktree copies (e.g. the marketing-os-* worktrees, and the marketing-os-main symlink -> marketing-os-read-main worktree) are deliberately excluded. Each repo's surface is folded from <repo_path>/.macro/surface.json (or the state/surfaces cache); absence renders a degraded WARNING, never a crash.",
+  "as_of": "2026-08-01",
+  "note": "Hand-maintained topology seed for the M4 boot-pack assembler. P21's repo-manifest.json + launchagent-manifest.json do not exist yet; until they do the assembler reads this file, tagged provenance:manual. Canonical repos only -- worktree copies (e.g. the marketing-os-* worktrees, and the marketing-os-main symlink -> marketing-os-read-main worktree) are deliberately excluded. Each repo's surface is folded from the state/surfaces cache (or <repo_path>/.macro/surface.json, the unused per-repo fallback); absence renders a degraded WARNING, never a crash. as_of is the date this topology was last HUMAN-VERIFIED, not the date it was last correct: STALE(n d) in the pack means 'not re-verified in n days', never 'wrong'. The seven repos here are a deliberate core-loop scope, not an inventory of ~/code -- repos absent from this list are out of scope by choice, and expanding the canon is Anthony's ruling to make.",
   "repos": [
     {
       "environment": "fully-aware",
