@@ -74,3 +74,22 @@ done
 echo "morning-pack: surfaces regenerated -- ${ok} ok, ${failed} failed, ${skipped} non-repo config(s) skipped."
 echo "morning-pack: assembling boot pack"
 "${PY}" "${ASM}" "$@"
+asm_rc=$?
+
+# Slim boot digest over the pack the assembler just wrote: a few-hundred-token
+# attention summary a fresh session absorbs at boot, pointing at the full pack
+# for everything else. It READS state/boot-pack.json and never rewrites it.
+#
+# Degrade-not-abort, same as the per-repo surface step above: a missing or
+# unparseable pack makes the digest a silent no-op (exit 0), and a hard digest
+# failure is logged and skipped -- the pack is the deliverable, the digest is a
+# convenience over it.
+echo "morning-pack: generating boot digest"
+"${PY}" "${REPO_ROOT}/tools/boot-digest.py" || {
+    rc=$?
+    echo "morning-pack: WARNING boot digest FAILED (exit ${rc}); continuing" >&2
+}
+
+# The pack is what this wrapper is judged on: exit with the ASSEMBLER's status,
+# not the digest's.
+exit ${asm_rc}
