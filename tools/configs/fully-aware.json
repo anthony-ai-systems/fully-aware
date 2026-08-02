@@ -5,7 +5,7 @@
   "canonical": true,
   "role": "Personal-infra 'fully aware' layer: surface generator, next-session parser, boot-pack assembler.",
   "default_branch": "main",
-  "gh_repo": "tonyflo79/fully-aware",
+  "gh_repo": "anthony-ai-systems/fully-aware",
   "cold_load": [
     {
       "claim_template": "HEAD is {value}",

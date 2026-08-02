@@ -225,8 +225,17 @@ class TokenCap(unittest.TestCase):
         self.assertIn("ATTENTION (30):", md)
 
     def test_attention_is_shed_last(self):
-        """Open items go first, warnings next, attention only as a last resort."""
-        md = bd.build_digest(NOW, self._fat_pack(), cap_tokens=120)
+        """Open items go first, warnings next, attention only as a last resort.
+
+        Use a stable synthetic pointer so this priority test does not change
+        behavior merely because the repository is cloned into a longer path.
+        Absolute pointer behavior is covered independently above.
+        """
+        pack_md = "/synthetic/BOOT-PACK.md"
+        with unittest.mock.patch.object(bd, "PACK_MD", pack_md), \
+                unittest.mock.patch.object(
+                    bd, "PACK_POINTER", "Full pack: %s" % pack_md):
+            md = bd.build_digest(NOW, self._fat_pack(), cap_tokens=120)
         self.assertIn("- synth-00: 1 behind origin/main", md)
 
     def test_a_normal_pack_stays_a_few_hundred_tokens(self):
