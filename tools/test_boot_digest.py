@@ -251,6 +251,19 @@ class DailyBrief(unittest.TestCase):
             self.assertIn(latest, md)
             self.assertNotIn("second line", md)
 
+    def test_brief_pointer_is_absolute(self):
+        """Same contract as the pack pointer: arbitrary-cwd sessions need it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            latest = os.path.join(tmp, "LATEST.md")
+            with open(latest, "w", encoding="utf-8") as fh:
+                fh.write("headline\n")
+            rel = os.path.relpath(latest)
+            md = bd.build_digest(NOW, _pack(),
+                                 daily_brief=bd.load_daily_brief(rel),
+                                 daily_brief_path=rel)
+            self.assertIn("(%s)" % os.path.abspath(rel), md)
+            self.assertNotIn("(%s)" % rel, md)
+
     def test_absent_brief_adds_no_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             missing = os.path.join(tmp, "LATEST.md")

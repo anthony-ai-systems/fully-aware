@@ -292,7 +292,8 @@ def render_md(model):
                           model["attention_total"], model["attention_truncated"]))
     if model["daily_brief"]:
         lines.append("Daily brief: %s (%s)"
-                     % (model["daily_brief"], _rel(model["daily_brief_path"])))
+                     % (model["daily_brief"],
+                        os.path.abspath(model["daily_brief_path"])))
     lines.append(PACK_POINTER)
     return "\n".join(lines) + "\n"
 
