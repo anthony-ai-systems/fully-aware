@@ -31,9 +31,12 @@
   rewrites the boot pack, and the codex CLI keeps session rollouts under
   ~/.codex. Nothing in this lane commits or pushes.
 
-  A single run is serialised by an atomic mkdir lock at
-  state/daily-scan/.lock: if a previous run is still going when this one fires,
-  the new one logs and exits 0 rather than racing it.
+  A single run is serialised by an atomic mkdir lock at state/daily-scan/.lock,
+  whose pid file names the owner. If that pid is alive when this job fires, the
+  new run logs and exits 0 rather than racing it. If the owner died without
+  releasing (kill -9, reboot), the firing run CLEARS the lock and still exits
+  without scanning -- the next fire, or a second manual run, does the scan. The
+  breaker is never the runner; that is what holds an 8-way race to one winner.
 -->
 <plist version="1.0">
 <dict>

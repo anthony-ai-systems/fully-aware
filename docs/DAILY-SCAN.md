@@ -29,9 +29,10 @@ can join rather than a report he can only read.
   06:15 launchd (com.anthonyflores.fully-aware.daily-scan)
     |
     v
-  LOCK ..................... atomic mkdir state/daily-scan/.lock
-    |                          held by a live run -> log + exit 0
-    |                          older than the total watchdog budget -> broken
+  LOCK ..................... atomic mkdir state/daily-scan/.lock + pid file
+    |                          owner pid alive (kill -0) -> log + exit 0
+    |                          owner pid dead -> clear the lock, log, exit 0
+    |                            (the breaker never runs; the NEXT run scans)
     v
   RETENTION ................ prune dated outputs + raw logs older than 30d,
     |                          rotate daily-scan.log at ~1 MB,
@@ -85,16 +86,45 @@ watchdog reads as a crashing script. Every stage redirects its own output, so
 nothing real is diverted; the file is deleted when it comes out empty, which is
 every run that does not time out.
 
+### The lock
+
 Two runs never overlap. The lock is an atomic `mkdir` of
-`state/daily-scan/.lock`, released by an `EXIT` trap; a second run (launchd
-firing while a 15-minute scan is still going, or a hand re-run on top of it)
-logs `LOCK held by a live run` and exits 0. A lock older than the sum of every
-watchdog budget cannot belong to a live run, so it is broken rather than obeyed
--- and **breaking it is atomic too**: the breaker `mv`s the lock aside to
-`.lock.stale.<pid>` and only the winner of that single rename may re-create it.
-`rmdir` then `mkdir` was not enough; measured 8-way, it let two or more runs
-believe they held the lock in 16 of 25 trials. Losers log `LOCK stale-break lost
-to another run` or `LOCK re-taken after stale-break` and exit 0.
+`state/daily-scan/.lock`; the winner writes its pid to `.lock/pid` and releases
+on `EXIT`, but **only if `.lock/pid` is still its own** -- no run ever removes
+another run's lock.
+
+Liveness is decided by **the owner's pid**, never by the lock's age. A second
+run reads `.lock/pid` and asks the kernel (`kill -0`): if the owner is alive it
+logs `LOCK held by live pid N` and exits 0. Mtime plays no part -- an mtime is
+stamped once at creation and never refreshed, so it says how long ago the lock
+was taken, not whether anyone is still holding it. Two adversarial rounds killed
+that version: a run that legitimately outlived the watchdog budget had its lock
+broken under it, and a `kill -9`'d run parked the whole lane for 53 minutes
+behind a lock nobody held.
+
+**The breaker never becomes the runner.** If the owner is dead, the run `mv`s
+the lock aside to `.lock.stale.<pid>` -- one `rename()`, so exactly one racer can
+win it and the losers log `LOCK stale-break lost to another run` and leave --
+then deletes it, logs `stale lock (dead pid N) cleared; re-run to start a scan`,
+and **exits 0 without scanning**. Clearing and acquiring in one pass is what let
+several racers come out of an 8-way start believing they held the lock (34 of 115
+trials, measured). Clearing is a one-shot service to the *next* invocation.
+
+> **After a crash, a manual re-run means running it twice.** The first
+> invocation clears the dead owner's lock and exits; the second acquires and
+> scans. Under launchd this is invisible -- the next scheduled fire does the
+> scanning -- but by hand it looks like the script did nothing. It did: read the
+> `cleared; re-run to start a scan` line, then run it again.
+
+Two smaller guards close the races around the break. The breaker re-reads
+`.lock/pid` immediately before the `mv` and refuses if it changed or came alive
+(`LOCK changed hands while we looked at it`), and re-verifies **after** the `mv`:
+if the moved lock's owner turns out to be alive -- a race lost to an acquirer
+that had not yet written its pid -- the lock is handed straight back
+(`lock returned`). If the give-back cannot land, the run says so loudly
+(`cleared a live lock ... one-time overlap possible`) rather than pretending.
+A racer that finds an empty `.lock/pid` waits up to half a second for the
+acquirer to write it before calling the lock abandoned.
 
 ## File map
 
@@ -114,7 +144,7 @@ to another run` or `LOCK re-taken after stale-break` and exit 0.
 | `state/daily-scan/<date>.<stage>.FAILED` | a stage broke; contents are the reason. |
 | `state/daily-scan/<date>.<stage>.SKIPPED` | a stage did not run; contents are why. |
 | `state/daily-scan/raw/` | per-stage raw CLI logs (the session-id banner, model stderr), the collected PR-state block, the composed prompt inputs, and `<date>.<stage>.watchdog.log` when a stage was killed. |
-| `state/daily-scan/.lock` | held for the duration of a run; an atomic `mkdir`, removed by an `EXIT` trap. A stale one is broken by renaming it to `.lock.stale.<pid>`, so only one racer can win it. |
+| `state/daily-scan/.lock` | held for the duration of a run; an atomic `mkdir` whose `pid` file names the owner. Removed by an `EXIT` trap, and only if `pid` is still the exiting run's. A dead owner's lock is cleared by whichever run renames it to `.lock.stale.<pid>` first -- and that run then **exits without scanning**. |
 | `state/logs/daily-scan.log` | the timestamped run log -- start here. Rotated to `.log.1` at ~1 MB. |
 
 Everything the pipeline itself writes is under `state/`, which is gitignored --
@@ -182,7 +212,9 @@ should do the same.
 | `WARNING no session id in ...` | codex banner changed shape | `raw/<date>-scan.raw.log`; the parse is `sed -n 's/^session id: *//p'` |
 | `stage0 FAILED -- morning-pack.sh exit N` | surface generation broke | the scan still runs, against a stale pack; see `state/logs/daily-scan.log` |
 | stage 3 skipped, `no codex thread id recorded` | `thread-id` empty or unwritten, or stage 1's resume failed and truncated it | re-run; stage 1 starts a fresh thread and records the new id |
-| the run logged `LOCK held by a live run` and did nothing | a previous run is still going | `state/logs/daily-scan.log` for the live run's stage lines; wait it out, or remove `state/daily-scan/.lock` if you are sure nothing is running |
+| the run logged `LOCK held by live pid N` and did nothing | pid N is genuinely running a scan | `ps -p N`; `state/logs/daily-scan.log` for its stage lines. Wait it out -- do not delete the lock while N is alive. If `ps` shows something that is *not* this script (a pid recycled across a reboot, with the lock surviving in `state/`), remove `state/daily-scan/.lock` by hand |
+| the run logged `stale lock (dead pid N) cleared; re-run to start a scan` and did nothing | a previous run crashed; this invocation cleared its lock and, by design, did not scan | nothing is wrong -- **run it again** |
+| `LOCK WARNING -- cleared a live lock ... one-time overlap possible` | a break lost a tight race with an acquirer and could not hand the lock back | rare by construction; check `state/logs/daily-scan.log` for two overlapping `run start` lines and, if the day's brief looks doubled, re-run |
 | PR sections all say `UNAVAILABLE` | `gh` missing from the runner's PATH, or not authenticated | `state/daily-scan/raw/<date>-pr-state.md`; try `gh pr list` by hand in one of the manifest repos |
 | the scan complains it cannot reach GitHub | the model tried `gh` itself despite the prompt | it cannot -- the sandbox is offline. The runner's block is the only PR source; check it landed in `raw/<date>-scan-input.*` |
 

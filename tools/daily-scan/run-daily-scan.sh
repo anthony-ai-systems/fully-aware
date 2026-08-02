@@ -77,10 +77,6 @@ SCAN_TIMEOUT="${DAILY_SCAN_SCAN_TIMEOUT:-900}"    # stage 1: 15 min
 REVIEW_TIMEOUT="${DAILY_SCAN_REVIEW_TIMEOUT:-600}" # stage 2: 10 min
 SUM_TIMEOUT="${DAILY_SCAN_SUM_TIMEOUT:-600}"      # stage 3: 10 min
 
-# Total budget: every stage's watchdog plus slack. It is also the stale-lock
-# threshold -- a lock older than this cannot belong to a live run.
-TOTAL_BUDGET=$((PACK_TIMEOUT + PR_TIMEOUT + SCAN_TIMEOUT + REVIEW_TIMEOUT + SUM_TIMEOUT + 300))
-
 # Retention.
 RETAIN_DAYS="${DAILY_SCAN_RETAIN_DAYS:-30}"       # dated outputs + raw logs
 LOG_MAX_BYTES="${DAILY_SCAN_LOG_MAX_BYTES:-1048576}"  # rotate daily-scan.log at ~1 MB
@@ -110,33 +106,114 @@ fi
 # no test-then-create window. A second run (launchd firing while yesterday's
 # 15-minute scan is still going, or Anthony re-running by hand) must exit
 # QUIETLY and successfully -- two codex threads writing the same dated files is
-# the failure this prevents. A lock older than the whole watchdog budget cannot
-# belong to a live run, so it is broken rather than obeyed forever.
-if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
-    lock_stale_mins=$(( TOTAL_BUDGET / 60 + 1 ))
-    if [ -z "$(find "${LOCK_DIR}" -maxdepth 0 -mmin "-${lock_stale_mins}" 2>/dev/null)" ]; then
-        log "LOCK stale (${LOCK_DIR} older than ${lock_stale_mins} min); breaking it"
-        # Breaking the lock has to be atomic too. `rmdir` then `mkdir` is
-        # check-then-act: eight runs can all see the same stale lock, all
-        # rmdir-then-mkdir, and several come out believing they hold it
-        # (measured on this script: 16 of 25 8-way trials). A `mv` to a
-        # pid-unique name is one rename(): exactly one racer can win the old
-        # lock, and only that winner is entitled to create the new one.
-        stale_tmp="${LOCK_DIR}.stale.$$"
-        if mv "${LOCK_DIR}" "${stale_tmp}" 2>/dev/null; then
-            rmdir "${stale_tmp}" 2>/dev/null || rm -rf "${stale_tmp}"
-            mkdir "${LOCK_DIR}" 2>/dev/null || { log "LOCK re-taken after stale-break; exiting 0"; exit 0; }
-        else
-            log "LOCK stale-break lost to another run; exiting 0"
-            exit 0
-        fi
-    else
-        log "LOCK held by a live run (${LOCK_DIR}); exiting 0 without running"
+# the failure this prevents.
+#
+# Liveness is decided by the OWNER'S PID, never by mtime. The mtime version of
+# this lock failed two adversarial rounds: a lock's mtime is set when it is
+# created and never touched again, so a run that legitimately outlives the
+# watchdog budget gets its lock broken under it, while a crashed run's lock is
+# obeyed for the whole budget (a `kill -9` parked the lane for 53 minutes).
+# `kill -0` asks the kernel instead of guessing from a timestamp.
+#
+# The other half of the design is BREAK-AND-EXIT: whoever clears a dead owner's
+# lock does NOT then run. Breaking and acquiring in one pass is what let several
+# racers come out of an 8-way start believing they held the lock (34 of 115
+# trials, measured). Clearing is a one-shot service to the NEXT invocation --
+# launchd's next fire, or a second manual run. A crash therefore costs one extra
+# run: the first clears, the second scans.
+LOCK_PID_FILE="${LOCK_DIR}/pid"
+LOCK_STALE_TMP="${LOCK_DIR}.stale.$$"
+
+pid_alive() {
+    case "${1:-}" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$1" 2>/dev/null
+}
+
+read_pid() {  # read_pid <pid-file>
+    tr -d '[:space:]' < "$1" 2>/dev/null
+}
+
+# The acquirer writes its pid one statement after the mkdir, so a racer can
+# arrive in between and see an empty lock. Settle briefly before calling a
+# pid-less lock dead: half a second of patience here removes the only window in
+# which a live run's lock can be misread as abandoned.
+read_owner_pid_settled() {
+    local i owner
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        owner="$(read_pid "${LOCK_PID_FILE}")"
+        [ -n "${owner}" ] && { printf '%s' "${owner}"; return 0; }
+        sleep 0.05
+    done
+    return 0
+}
+
+# `mv a b` moves a INSIDE b when b already exists -- a give-back that lands one
+# level down would report success while leaving the lock slot free. Refuse when
+# the slot is taken, and re-check for the nested name in case it was taken
+# between the test and the rename.
+give_back_lock() {
+    [ -e "${LOCK_DIR}" ] && return 1
+    mv "${LOCK_STALE_TMP}" "${LOCK_DIR}" 2>/dev/null || return 1
+    if [ -d "${LOCK_DIR}/$(basename "${LOCK_STALE_TMP}")" ]; then
+        mv "${LOCK_DIR}/$(basename "${LOCK_STALE_TMP}")" "${LOCK_STALE_TMP}" 2>/dev/null || true
+        return 1
+    fi
+    return 0
+}
+
+# Release only what we still own. A run whose lock was cleared out from under it
+# (see the loud warning below) must not delete the successor's lock on the way
+# out.
+release_lock() {
+    [ "$(read_pid "${LOCK_PID_FILE}")" = "$$" ] || return 0
+    rm -rf "${LOCK_DIR}" 2>/dev/null || true
+}
+
+if mkdir "${LOCK_DIR}" 2>/dev/null; then
+    printf '%s\n' "$$" > "${LOCK_PID_FILE}"
+    # Subshells reset traps, so only the top-level script releases the lock.
+    trap release_lock EXIT
+else
+    lock_owner="$(read_owner_pid_settled)"
+    if pid_alive "${lock_owner}"; then
+        log "LOCK held by live pid ${lock_owner}; exiting 0 without running"
         exit 0
     fi
+    # Re-read at the LAST possible moment. Between the read above and this line
+    # another racer can have broken the same dead lock and a third can have
+    # acquired a fresh one -- moving THAT aside would leave the slot open for a
+    # fourth run while its owner is still working. Requiring the pid to be
+    # unchanged and still dead shrinks the window from "however long the
+    # scheduler took" to the gap between these two syscalls.
+    if [ "$(read_pid "${LOCK_PID_FILE}")" != "${lock_owner}" ] || pid_alive "$(read_pid "${LOCK_PID_FILE}")"; then
+        log "LOCK changed hands while we looked at it; exiting 0"
+        exit 0
+    fi
+    # One rename() decides the breaker: exactly one racer can move the old lock
+    # aside, everyone else's mv fails and they leave.
+    if ! mv "${LOCK_DIR}" "${LOCK_STALE_TMP}" 2>/dev/null; then
+        log "LOCK stale-break lost to another run; exiting 0"
+        exit 0
+    fi
+    # Re-verify AFTER the move. If the owner turns out to be alive we lost a
+    # tight race against an acquirer that had not yet written its pid; hand the
+    # lock straight back.
+    moved_owner="$(read_pid "${LOCK_STALE_TMP}/pid")"
+    if pid_alive "${moved_owner}"; then
+        if give_back_lock; then
+            log "LOCK owner ${moved_owner} is alive after all; lock returned, exiting 0"
+        else
+            rm -rf "${LOCK_STALE_TMP}" 2>/dev/null || true
+            log "LOCK WARNING -- cleared a live lock (pid ${moved_owner}) and could not return it; one-time overlap possible"
+        fi
+        exit 0
+    fi
+    rm -rf "${LOCK_STALE_TMP}" 2>/dev/null || true
+    log "LOCK stale lock (dead pid ${lock_owner:-unknown}) cleared; re-run to start a scan"
+    exit 0
 fi
-# Subshells reset traps, so only the top-level script releases the lock.
-trap 'rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
 
 # A stage that fails leaves a marker naming the reason; later stages read the
 # marker (not an exit code that has long since been discarded) to decide whether
@@ -580,15 +657,20 @@ else
         # first line before the copy, so every reader -- Anthony by hand, or the
         # boot digest when it lands -- sees which day this is without stat(1).
         brief_headline="$(head -1 "${BRIEF_FILE}")"
-        # Plain redirect, not mktemp: mktemp's 0600 would ride the `mv` into the
-        # brief and from there into LATEST.md. The name is fixed and per-date --
-        # the lock serialises runs -- and raw/ retention sweeps it if a run dies
-        # between the write and the rename.
-        stamped="${RAW_DIR}/${DATE}-brief-stamped.tmp"
-        if { printf 'Daily brief -- %s\n\n' "${DATE}"; cat "${BRIEF_FILE}"; } > "${stamped}"; then
+        # mktemp, not a fixed per-date name. A shared name is a shared inode: two
+        # runs that overlap for even a moment can have one truncating the file
+        # the other is `cat`ing INTO -- observed as an 11.3 GB self-feeding
+        # stamped tmp. A pid-unique name cannot be aliased no matter how the lock
+        # behaves. It lives in raw/ so the retention sweep ages it out if a run
+        # dies between the write and the rename. mktemp is 0600, so the mode is
+        # restored after the rename -- otherwise 0600 would ride the `mv` into
+        # the brief and the `cp` into LATEST.md.
+        stamped="$(mktemp "${RAW_DIR}/${DATE}-brief-stamped.XXXXXX" 2>/dev/null)"
+        if [ -n "${stamped}" ] && { printf 'Daily brief -- %s\n\n' "${DATE}"; cat "${BRIEF_FILE}"; } > "${stamped}"; then
             mv -f "${stamped}" "${BRIEF_FILE}"
+            chmod 644 "${BRIEF_FILE}" 2>/dev/null || true
         else
-            rm -f "${stamped}"
+            [ -n "${stamped}" ] && rm -f "${stamped}"
             log "stage3 WARNING -- could not date-stamp ${BRIEF_FILE}; copying it unstamped"
         fi
         cp "${BRIEF_FILE}" "${LATEST_FILE}"
