@@ -5,9 +5,13 @@ fresh Fable macro session boots here regardless of the task's true cwd.
 
 ## Boot protocol
 
-Once lane M4 ships, the boot protocol loads `state/BOOT-PACK.md` (with its
-`boot-pack.json` sidecar) as the single primary artifact and answers the
-cold-load bar from the pack alone. Until M4 ships, there is no boot pack yet.
+Boot loads `state/BOOT-PACK.md` (with its `boot-pack.json` sidecar) as the single
+primary artifact and answers the cold-load bar from the pack alone. The pack is
+generated daily at 05:45 local by `tools/morning-pack.sh`, run by the installed
+and armed LaunchAgent (`launchd/com.anthonyflores.fully-aware.boot-pack.plist`,
+lane M4 cadence ruling §6.5). A pack whose `Generated:` line is not from today
+means the agent did not run — re-run the wrapper by hand rather than boot from a
+stale pack.
 
 ## Rules
 

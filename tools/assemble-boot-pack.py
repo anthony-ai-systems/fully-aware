@@ -6,8 +6,8 @@ Folds four sections into ``state/BOOT-PACK.md`` (human render) plus
 Fully Aware macro session loads regardless of cwd:
 
   1. Topology manifest   -- hand-maintained seed (provenance: manual) until P21.
-  2. State surfaces       -- the fold of every discoverable <repo>/.macro/
-                             surface.json (surface/v1, produced by generate-surface.py).
+  2. State surfaces       -- the fold of every discoverable surface (surface/v1,
+                             produced by generate-surface.py; normally state/surfaces/).
   3. Unified decision queue -- a PROJECTION (routes, never absorbs ratification)
                              over three feeds: surface decisions[], next-session
                              human_only[] (via the M1 next_session.py parser), and
@@ -599,7 +599,7 @@ def render_topology(model, now):
 
 def render_surfaces(model, now):
     lines = ["## 2. State surfaces",
-             "_fold of every discoverable <repo>/.macro/surface.json (surface/v1)_",
+             "_fold of every discoverable surface (surface/v1); normally state/surfaces/<env>.json_",
              ""]
     for s in model["surfaces"]:
         env = s["environment"]

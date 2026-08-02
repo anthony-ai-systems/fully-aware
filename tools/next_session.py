@@ -2,9 +2,21 @@
 """next_session.py -- unified NEXT_SESSION.json parser (next-session/v2).
 
 Normalizes every NEXT_SESSION.json schema variant found on this machine into a
-single ``next-session/v2`` shape so that Iris and mission-control consume state
-through one reader instead of five. Read-only by construction: source files are
-never mutated. Stdlib only, Python 3.9+, no third-party deps.
+single ``next-session/v2`` shape, so state is consumed through one reader instead
+of five. Read-only by construction: source files are never mutated. Stdlib only,
+Python 3.9+, no third-party deps.
+
+Consumers
+---------
+  boot-pack assembler  WIRED, in-repo. ``assemble-boot-pack.py`` imports this
+                       module and projects each repo's ``human_only[]`` into the
+                       unified decision queue.
+  Iris                 WIRED, indirectly. The Iris console reads the boot pack's
+                       JSON sidecar, so it sees v2 through the assembler rather
+                       than calling this parser itself.
+  mission-control      INTENDED, not yet wired. No mission-control code reads
+                       v2 today; treat it as a design target, not a live
+                       consumer.
 
 Schemas handled
 ---------------

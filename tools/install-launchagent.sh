@@ -7,11 +7,11 @@
 # FIRST (so the 24h-staleness surfaces stay fresh) and THEN runs the read-only
 # assembler.
 #
-# ARMING IS ANTHONY'S, POST-MERGE. The plist points at code on a branch; run
-# this ONLY after feat/m5-surface-coverage merges to main. It copies the plist
-# into ~/Library/LaunchAgents/ and (re)loads it via launchctl. Running it arms
-# the schedule immediately. The currently-armed M4 agent (assembler-only) stays
-# live until you rerun this script post-merge.
+# THE AGENT IS ALREADY INSTALLED AND ARMED (daily 05:45). This script copies
+# launchd/<label>.plist into ~/Library/LaunchAgents/ and (re)loads it via
+# launchctl, so re-run it ONLY after changing the plist -- a plist edit in this
+# repo does nothing until the installed copy is replaced. Re-running is safe and
+# idempotent: the unload is best-effort and the reload re-arms the same schedule.
 #
 # D30 discipline: generate-surface.py and assemble-boot-pack.py stay read-only;
 # the morning-pack.sh wrapper writes only the gitignored state/ outputs
