@@ -6,11 +6,18 @@ session can absorb at boot without loading the ~3k-token pack. The digest is a
 POINTER, not a replacement -- it names what is degraded, what is open, and which
 repos need attention, then points at ``state/BOOT-PACK.md`` for everything else.
 
-Class D30 (read-only, stateless, non-enforcing, report-only). Stdlib only,
-Python 3.9+. NO git operations beyond the gitignore write-guard, NO network. It
-CONSUMES ``state/boot-pack.json`` (schema ``boot-pack/v1``) and never writes,
-rewrites, or reshapes the pack -- the pack has external consumers, and its
-schema is the contract. The only file this writes is its ``--out`` path.
+Class D30 (read-only, stateless, non-enforcing, report-only, MANUALLY invoked --
+never wired into CI/hooks/gates). The SessionStart hook does not contradict that:
+the hook READS the digest file this generator already wrote, and never invokes
+this generator -- the only caller is the morning-pack wrapper Anthony armed by
+hand.
+
+Stdlib only, Python 3.9+. NO git operations beyond the gitignore write-guard, NO
+network. It CONSUMES ``state/boot-pack.json`` (schema ``boot-pack/v1``) and never
+writes, rewrites, or reshapes the pack -- the pack has external consumers, and
+its schema is the contract. The only file this writes is its ``--out`` path
+(written atomically via a sibling ``.tmp`` + ``os.replace``, so the hook never
+reads a half-written digest).
 
 The digest is ADVISORY STATE, NOT LAW: SAGA doctrine, repo CLAUDE.md, and
 merge-is-Anthony's bind regardless of digest content.
@@ -57,7 +64,14 @@ STALE_PACK = 36 * 3600
 MAX_LINE_CHARS = 120
 
 TITLE = "# FULLY AWARE -- BOOT DIGEST (advisory, not law)"
-PACK_MD = "state/BOOT-PACK.md"
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# The digest is read in SESSIONS, whose cwd is arbitrary (folder = activity, but
+# not this folder). A repo-relative pointer resolves against the wrong directory
+# there, so both the pack pointer and the [truncated] markers name the pack by
+# ABSOLUTE path, derived from this file's repo root.
+PACK_MD = os.path.join(_REPO_ROOT, "state", "BOOT-PACK.md")
 PACK_POINTER = "Full pack: %s" % PACK_MD
 
 # Decision-queue items carry a "<feed>:<environment>" source; these two feeds
@@ -66,8 +80,6 @@ _REPO_FEEDS = ("next-session:", "surface:")
 
 _SENTENCE_RE = re.compile(r"^(.*?[.!?])(?:\s|$)", re.DOTALL)
 _WS_RE = re.compile(r"\s+")
-
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class DigestError(Exception):
@@ -373,8 +385,13 @@ def main(argv=None):
     d = os.path.dirname(out)
     if d and not os.path.isdir(d):
         os.makedirs(d, exist_ok=True)
-    with open(out, "w", encoding="utf-8") as fh:
+    # Atomic: the SessionStart hook is a concurrent READER of this exact path,
+    # and a session that boots mid-write would read a truncated digest. Write a
+    # sibling .tmp (same filesystem, so os.replace is a rename) and swap it in.
+    tmp = out + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(md)
+    os.replace(tmp, out)
     _report(sys.stderr, md, args.cap_tokens, dest=out)
     return 0
 

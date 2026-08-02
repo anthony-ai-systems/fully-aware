@@ -16,6 +16,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WRAPPER = os.path.join(_HERE, "morning-pack.sh")
@@ -86,6 +87,16 @@ class Header(unittest.TestCase):
     def test_full_pack_pointer_is_the_last_line(self):
         md = bd.build_digest(NOW, _pack())
         self.assertEqual(md.rstrip("\n").splitlines()[-1], bd.PACK_POINTER)
+
+    def test_pack_pointer_is_the_absolute_repo_path(self):
+        """The digest is read in sessions with arbitrary cwd -- no relative path."""
+        self.assertTrue(os.path.isabs(bd.PACK_MD), bd.PACK_MD)
+        self.assertEqual(bd.PACK_MD,
+                         os.path.join(os.path.dirname(_HERE), "state",
+                                      "BOOT-PACK.md"))
+        md = bd.build_digest(NOW, _pack())
+        self.assertIn("Full pack: %s" % bd.PACK_MD, md)
+        self.assertNotIn("Full pack: state/BOOT-PACK.md", md)
 
     def test_unparseable_generated_at_degrades_to_age_unknown(self):
         md = bd.build_digest(NOW, _pack(generated_at="whenever"))
@@ -190,6 +201,14 @@ class TokenCap(unittest.TestCase):
         self.assertLessEqual(bd.est_tokens(md), bd.HARD_CAP_TOKENS)
         self.assertIn("[truncated]", md)
 
+    def test_truncation_markers_name_the_absolute_pack(self):
+        md = bd.build_digest(NOW, self._fat_pack())
+        marked = [ln for ln in md.splitlines() if "[truncated]" in ln]
+        self.assertTrue(marked, md)
+        for line in marked:
+            self.assertIn(bd.PACK_MD, line)
+            self.assertNotIn("see state/BOOT-PACK.md", line)
+
     def test_header_and_pointer_survive_truncation(self):
         md = bd.build_digest(NOW, self._fat_pack())
         self.assertTrue(md.startswith(bd.TITLE + "\n"))
@@ -291,6 +310,48 @@ class CliWrites(unittest.TestCase):
             self.assertEqual(os.path.getmtime(path), before)
             with open(path, "r", encoding="utf-8") as fh:
                 self.assertEqual(json.load(fh), pack)
+
+    def test_write_leaves_no_tmp_file_behind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write_pack(tmp, _pack())
+            out = os.path.join(tmp, "BOOT-DIGEST.md")
+            rc = bd.main(["--pack", path, "--out", out,
+                          "--daily-scan", os.path.join(tmp, "nope.md")])
+            self.assertEqual(rc, 0)
+            self.assertFalse(os.path.exists(out + ".tmp"))
+            self.assertEqual(sorted(os.listdir(tmp)),
+                             ["BOOT-DIGEST.md", "boot-pack.json"])
+
+    def test_write_is_atomic_via_replace_of_a_complete_tmp(self):
+        """The SessionStart hook is a concurrent reader: never a partial file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write_pack(tmp, _pack())
+            out = os.path.join(tmp, "BOOT-DIGEST.md")
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write("PREVIOUS DIGEST\n")
+            seen = {}
+            real_replace = os.replace
+
+            def spy(src, dst):
+                with open(src, "r", encoding="utf-8") as fh:
+                    seen["staged"] = fh.read()
+                with open(dst, "r", encoding="utf-8") as fh:
+                    seen["dest_before_swap"] = fh.read()
+                seen["src"], seen["dst"] = src, dst
+                return real_replace(src, dst)
+
+            with unittest.mock.patch.object(bd.os, "replace", spy):
+                rc = bd.main(["--pack", path, "--out", out,
+                              "--daily-scan", os.path.join(tmp, "nope.md")])
+            self.assertEqual(rc, 0)
+            self.assertEqual(seen["src"], out + ".tmp")
+            self.assertEqual(seen["dst"], out)
+            # The old digest was still whole right up to the swap ...
+            self.assertEqual(seen["dest_before_swap"], "PREVIOUS DIGEST\n")
+            # ... and what got swapped in was the complete new digest.
+            self.assertTrue(seen["staged"].rstrip("\n").endswith(bd.PACK_POINTER))
+            with open(out, "r", encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), seen["staged"])
 
     def test_defaults_point_at_the_repo_state_dir(self):
         self.assertEqual(bd._default("state", "boot-pack.json"),
