@@ -9,14 +9,21 @@
 # It copies the plist into ~/Library/LaunchAgents/ and (re)loads it via launchctl.
 # Running it arms the schedule immediately.
 #
+# The label matches the installed boot-pack agent's prefix
+# (com.anthonyflores.fully-aware.*), so `launchctl list | grep
+# com.anthonyflores.fully-aware` shows the whole lane rather than half of it.
+#
 # D30 discipline: the pipeline runs Codex under a read-only sandbox and writes
-# only the gitignored state/ outputs (scan, review, brief, LATEST.md, thread-id,
-# logs). It never commits or pushes.
+# its own outputs only under the gitignored state/ tree (scan, review, brief,
+# LATEST.md, thread-id, raw logs, transient prompt inputs). Two side effects sit
+# outside it: stage 0 may re-run tools/morning-pack.sh, which rewrites the boot
+# pack, and the codex CLI records its session rollouts under ~/.codex. It never
+# commits or pushes.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-LABEL="com.anthony.fully-aware.daily-scan"
+LABEL="com.anthonyflores.fully-aware.daily-scan"
 SRC="${REPO_ROOT}/launchd/${LABEL}.plist"
 DEST_DIR="${HOME}/Library/LaunchAgents"
 DEST="${DEST_DIR}/${LABEL}.plist"

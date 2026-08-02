@@ -12,24 +12,33 @@
   a partial run is reported in state/logs/daily-scan.log and the per-stage
   .FAILED markers, never as a launchd failure.
 
-  /bin/bash -lc is deliberate. The scan shells out to `codex`, `claude`, `gh` and
-  `git`; launchd hands the agent a stripped PATH, and a login shell gives it the
-  same environment Anthony's own terminal has. (run-daily-scan.sh also sets an
-  explicit PATH itself -- belt and braces, same lesson as the SAGA agents.)
+  /bin/bash -lc is deliberate. The runner shells out to `codex`, `claude`, `gh`
+  and `git`; launchd hands the agent a stripped PATH, and a login shell gives it
+  the same environment Anthony's own terminal has. (run-daily-scan.sh also sets
+  an explicit PATH itself -- belt and braces, same lesson as the SAGA agents.)
+  `gh` matters here: the sandboxed scanner is offline, so the RUNNER collects
+  open-PR state and feeds it to the model as data.
 
   UNARMED until Anthony merges: this plist points at code on the
   feat/codex-daily-scan branch. Install + load with
   tools/daily-scan/install-daily-scan-launchagent.sh AFTER merge to main. Do not
   load it against unmerged code.
 
-  D30 discipline: every stage runs Codex under a read-only sandbox and writes
-  only gitignored state/ outputs (scan, review, brief, LATEST.md, thread-id,
-  logs). Nothing in this lane commits or pushes.
+  D30 discipline: every model stage runs Codex under a read-only sandbox, and
+  the runner's own writes all land in the gitignored state/ tree (scan, review,
+  brief, LATEST.md, thread-id, raw logs, transient prompt inputs). Two side
+  effects sit outside it: stage 0 may re-run tools/morning-pack.sh, which
+  rewrites the boot pack, and the codex CLI keeps session rollouts under
+  ~/.codex. Nothing in this lane commits or pushes.
+
+  A single run is serialised by an atomic mkdir lock at
+  state/daily-scan/.lock: if a previous run is still going when this one fires,
+  the new one logs and exits 0 rather than racing it.
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.anthony.fully-aware.daily-scan</string>
+    <string>com.anthonyflores.fully-aware.daily-scan</string>
 
     <key>ProgramArguments</key>
     <array>

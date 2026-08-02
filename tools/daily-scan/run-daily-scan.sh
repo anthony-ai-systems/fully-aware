@@ -23,12 +23,21 @@
 # scheduled run that half-worked must never look like a launchd failure -- the
 # log and the markers are the report.
 #
-# D30 discipline: nothing here writes outside the gitignored state/ tree. The
-# Codex sandbox is read-only in both stages; the report files are written by the
-# codex CLI itself via -o (the last-message file), never by model-run shell.
+# D30 discipline: this script writes only under the gitignored state/ tree --
+# outputs, per-stage raw logs, and the transient prompt-input files it composes
+# (those go to state/daily-scan/raw/, never /tmp). Two side effects are outside
+# that tree and are not ours to relocate: the codex CLI records its own rollouts
+# under ~/.codex, and stage 0 runs tools/morning-pack.sh, which writes the boot
+# pack. The Codex sandbox is read-only in both model stages; the report files are
+# written by the codex CLI itself via -o (the last-message file), never by
+# model-run shell.
 #
 #   tools/daily-scan/run-daily-scan.sh          # one real run
 #   DAILY_SCAN_STUB=1 tools/daily-scan/run-daily-scan.sh   # plumbing only, no tokens
+#
+# Stub mode stubs ALL THREE model calls and stage 0 as well, so a stub run spends
+# no tokens and does not regenerate the boot pack. It still writes the state/
+# outputs, markers and logs -- that plumbing is the thing being exercised.
 
 set -uo pipefail  # NOT -e: a failed stage must degrade, not abort.
 
@@ -44,12 +53,16 @@ LOG="${LOG_DIR}/daily-scan.log"
 RAW_DIR="${OUT_DIR}/raw"
 BOOT_PACK="${REPO_ROOT}/state/BOOT-PACK.md"
 THREAD_FILE="${OUT_DIR}/thread-id"
+MANIFEST="${REPO_ROOT}/tools/configs/seed-manifest.json"
+LOCK_DIR="${OUT_DIR}/.lock"
+PY="${FULLY_AWARE_PYTHON:-/usr/bin/python3}"
 
 DATE="$(date +%F)"
 SCAN_FILE="${OUT_DIR}/${DATE}-scan.md"
 REVIEW_FILE="${OUT_DIR}/${DATE}-review.md"
 BRIEF_FILE="${OUT_DIR}/${DATE}-brief.md"
 LATEST_FILE="${OUT_DIR}/LATEST.md"
+PR_STATE_FILE="${RAW_DIR}/${DATE}-pr-state.md"
 
 # Model pins: explicit, never inherited from ~/.codex/config.toml or ~/.claude.
 CODEX_MODEL="${DAILY_SCAN_CODEX_MODEL:-gpt-5.6-sol}"
@@ -58,9 +71,19 @@ FABLE_MODEL="${DAILY_SCAN_FABLE_MODEL:-claude-fable-5}"
 
 # Watchdog budgets (seconds).
 PACK_TIMEOUT="${DAILY_SCAN_PACK_TIMEOUT:-600}"    # stage 0: 10 min
+PR_TIMEOUT="${DAILY_SCAN_PR_TIMEOUT:-120}"        # pre-stage-1 gh collection: 2 min
 SCAN_TIMEOUT="${DAILY_SCAN_SCAN_TIMEOUT:-900}"    # stage 1: 15 min
 REVIEW_TIMEOUT="${DAILY_SCAN_REVIEW_TIMEOUT:-600}" # stage 2: 10 min
 SUM_TIMEOUT="${DAILY_SCAN_SUM_TIMEOUT:-600}"      # stage 3: 10 min
+
+# Total budget: every stage's watchdog plus slack. It is also the stale-lock
+# threshold -- a lock older than this cannot belong to a live run.
+TOTAL_BUDGET=$((PACK_TIMEOUT + PR_TIMEOUT + SCAN_TIMEOUT + REVIEW_TIMEOUT + SUM_TIMEOUT + 300))
+
+# Retention.
+RETAIN_DAYS="${DAILY_SCAN_RETAIN_DAYS:-30}"       # dated outputs + raw logs
+LOG_MAX_BYTES="${DAILY_SCAN_LOG_MAX_BYTES:-1048576}"  # rotate daily-scan.log at ~1 MB
+THREAD_MAX_DAYS="${DAILY_SCAN_THREAD_MAX_DAYS:-30}"   # rotate the rolling thread monthly
 
 STUB="${DAILY_SCAN_STUB:-0}"
 STUB_THREAD_ID="00000000-0000-4000-8000-0000000stub"
@@ -70,6 +93,40 @@ mkdir -p "${OUT_DIR}" "${RAW_DIR}" "${LOG_DIR}"
 log() {
     printf '[%s] daily-scan: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" | tee -a "${LOG}"
 }
+
+# --- log rotation ---------------------------------------------------------
+# One append-only log per lane grows without bound; roll it before writing this
+# run's first line so a single .1 generation is always the whole recent past.
+if [ -f "${LOG}" ]; then
+    log_bytes="$(wc -c < "${LOG}" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "${log_bytes}" ] && [ "${log_bytes}" -gt "${LOG_MAX_BYTES}" ] 2>/dev/null; then
+        mv -f "${LOG}" "${LOG}.1" 2>/dev/null || true
+    fi
+fi
+
+# --- concurrency lock -----------------------------------------------------
+# mkdir is the atomic primitive: it either creates the directory or fails, with
+# no test-then-create window. A second run (launchd firing while yesterday's
+# 15-minute scan is still going, or Anthony re-running by hand) must exit
+# QUIETLY and successfully -- two codex threads writing the same dated files is
+# the failure this prevents. A lock older than the whole watchdog budget cannot
+# belong to a live run, so it is broken rather than obeyed forever.
+if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
+    lock_stale_mins=$(( TOTAL_BUDGET / 60 + 1 ))
+    if [ -z "$(find "${LOCK_DIR}" -maxdepth 0 -mmin "-${lock_stale_mins}" 2>/dev/null)" ]; then
+        log "LOCK stale (${LOCK_DIR} older than ${lock_stale_mins} min); breaking it"
+        rmdir "${LOCK_DIR}" 2>/dev/null || true
+        if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
+            log "LOCK held after stale-break attempt; another run is live -- exiting 0"
+            exit 0
+        fi
+    else
+        log "LOCK held by a live run (${LOCK_DIR}); exiting 0 without running"
+        exit 0
+    fi
+fi
+# Subshells reset traps, so only the top-level script releases the lock.
+trap 'rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
 
 # A stage that fails leaves a marker naming the reason; later stages read the
 # marker (not an exit code that has long since been discarded) to decide whether
@@ -95,13 +152,24 @@ skip_stage() {
 # --- watchdog -------------------------------------------------------------
 # There is no GNU `timeout` on this Mac. Same bash-native pattern the SAGA
 # codex-composer agent uses: background the work, background a sleeper that
-# TERMs (then KILLs) the whole process tree on expiry, reap both.
+# TERMs (then KILLs) the work on expiry, reap both.
+#
+# The kill is by PROCESS GROUP, not by pid. `codex` and `claude` spawn their own
+# children (node, sandbox helpers, git); killing the direct child and its
+# immediate children by `pkill -P` leaves grandchildren alive, holding the log
+# fds open and burning tokens after the watchdog has already given up. Job
+# control (`set -m`) makes each backgrounded job a process-group leader whose
+# pgid equals its pid, so `kill -TERM -$pid` reaches the entire tree in one call.
 
 terminate_tree() {
     local pid="$1"
+    # Negative pid = the whole process group. -P fallbacks cover the case where
+    # job control was unavailable and the child never became a group leader.
+    kill -TERM "-${pid}" 2>/dev/null || true
     pkill -TERM -P "${pid}" 2>/dev/null || true
     kill -TERM "${pid}" 2>/dev/null || true
     sleep 10
+    kill -KILL "-${pid}" 2>/dev/null || true
     pkill -KILL -P "${pid}" 2>/dev/null || true
     kill -KILL "${pid}" 2>/dev/null || true
 }
@@ -114,8 +182,13 @@ run_watchdog() {
     local secs="$1" label="$2"
     shift 2
 
+    # Monitor mode only for the launch, so the staged work lands in its own
+    # process group; restored immediately so the rest of the script (and the
+    # sleeper below) keeps the plain non-interactive behaviour.
+    set -m
     "$@" &
     local work_pid=$!
+    set +m
 
     # The sleeper detaches from our stdout: it outlives nothing, but while it
     # lives it would otherwise hold the inherited pipe open and hang anything
@@ -214,14 +287,42 @@ extract_session_id() {
 
 log "=== run start (date=${DATE}, stub=${STUB}, codex-model=${CODEX_MODEL}) ==="
 
-# Clear TODAY's markers up front. Without this, a second run on the same day
-# reads the first run's failure and skips stages that would now succeed -- which
-# is exactly the case where Anthony is re-running by hand to fix something.
-rm -f "${OUT_DIR}/${DATE}".*.FAILED "${OUT_DIR}/${DATE}".*.SKIPPED
+# Clear TODAY's markers AND today's artifacts up front. Without this, a second
+# run on the same day reads the first run's failure and skips stages that would
+# now succeed -- exactly the case where Anthony is re-running by hand to fix
+# something. The artifacts go too: a rerun that dies at stage 1 must not leave
+# this morning's dead scan sitting next to yesterday's live brief, looking like
+# a matched pair.
+rm -f "${OUT_DIR}/${DATE}".*.FAILED "${OUT_DIR}/${DATE}".*.SKIPPED \
+      "${SCAN_FILE}" "${REVIEW_FILE}" "${BRIEF_FILE}"
+
+# --- retention ------------------------------------------------------------
+# Dated outputs and raw logs age out at ${RETAIN_DAYS} days. LATEST.md and
+# thread-id are named explicitly out of the sweep -- they are current state, not
+# history, and thread-id in particular must survive any amount of idleness short
+# of the monthly rotation below.
+find "${OUT_DIR}" -maxdepth 1 -type f \
+    \( -name '*-scan.md' -o -name '*-review.md' -o -name '*-brief.md' \
+       -o -name '*.FAILED' -o -name '*.SKIPPED' \) \
+    -mtime "+${RETAIN_DAYS}" -delete 2>/dev/null || true
+find "${RAW_DIR}" -maxdepth 1 -type f -mtime "+${RETAIN_DAYS}" -delete 2>/dev/null || true
+
+# Thread rotation. A rolling thread is the design, but an unbounded one
+# eventually hits the model's context limit mid-scan and takes the day with it.
+# Monthly is the rule: a thread whose id file has not been touched in
+# ${THREAD_MAX_DAYS} days is retired and stage 1 starts fresh.
+if [ -s "${THREAD_FILE}" ] && [ -z "$(find "${THREAD_FILE}" -maxdepth 0 -mtime "-${THREAD_MAX_DAYS}" 2>/dev/null)" ]; then
+    log "thread ROTATED -- ${THREAD_FILE} older than ${THREAD_MAX_DAYS} days; starting a fresh thread"
+    : > "${THREAD_FILE}"
+fi
 
 # --- stage 0: boot-pack freshness ----------------------------------------
 log "stage0 START -- boot-pack freshness check"
-if [ -f "${BOOT_PACK}" ] && [ -n "$(find "${BOOT_PACK}" -maxdepth 0 -mmin -60 2>/dev/null)" ]; then
+if [ "${STUB}" = "1" ]; then
+    # Stub mode must not regenerate the boot pack: morning-pack.sh is a real
+    # writer, and "plumbing only" has to mean it.
+    log "stage0 STUBBED -- freshness check and morning-pack.sh skipped"
+elif [ -f "${BOOT_PACK}" ] && [ -n "$(find "${BOOT_PACK}" -maxdepth 0 -mmin -60 2>/dev/null)" ]; then
     log "stage0 OK -- BOOT-PACK.md is fresh (<60 min old); skipping morning-pack"
 else
     log "stage0 -- BOOT-PACK.md missing or >60 min old; running tools/morning-pack.sh"
@@ -237,6 +338,73 @@ else
     fi
 fi
 
+# --- pre-stage-1: open-PR state ------------------------------------------
+# The scanner CANNOT run `gh` itself. Codex's read-only sandbox also blocks the
+# network, so a sandboxed `gh pr list` dies with "error connecting to
+# api.github.com" -- verified, not theorised. So the runner collects PR state
+# out here, where the network exists, and hands it to the model as DATA appended
+# to the prompt. Failure is soft in every direction: no gh, no auth, a repo that
+# is not a GitHub remote, or the whole thing hitting its own short watchdog just
+# means the scan runs without a PR block and says so.
+log "prs START -- collecting open-PR state for the scan prompt"
+
+manifest_repo_paths() {
+    "${PY}" - "${MANIFEST}" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(0)
+for repo in data.get("repos", []):
+    path = repo.get("repo_path")
+    if path:
+        print(path)
+PYEOF
+}
+
+collect_pr_state() {
+    {
+        printf '## OPEN PULL REQUESTS (collected by the runner, %s)\n\n' "${DATE}"
+        printf 'Collected OUTSIDE the sandbox with `gh pr list --limit 10` per manifest repo.\n'
+        printf 'This is your PR state -- you cannot reach the network yourself. Treat it as\n'
+        printf 'evidence, and say so if a repo block reports an error instead of a list.\n\n'
+        while IFS= read -r repo_path; do
+            [ -n "${repo_path}" ] || continue
+            printf '### %s\n\n```\n' "${repo_path}"
+            if [ ! -d "${repo_path}" ]; then
+                printf '(repo path does not exist)\n'
+            else
+                (cd "${repo_path}" && gh pr list --limit 10 2>&1) || printf '(gh pr list failed -- see the line above)\n'
+            fi
+            printf '```\n\n'
+        done < <(manifest_repo_paths)
+    } > "${PR_STATE_FILE}" 2>&1
+}
+
+if [ "${STUB}" = "1" ]; then
+    printf '## OPEN PULL REQUESTS (STUBBED %s)\n\n(no gh calls in stub mode)\n' "${DATE}" > "${PR_STATE_FILE}"
+    log "prs STUBBED -- wrote a placeholder block to ${PR_STATE_FILE}"
+elif ! command -v gh >/dev/null 2>&1; then
+    printf '## OPEN PULL REQUESTS (%s)\n\nUNAVAILABLE: `gh` is not on the runner PATH.\n' "${DATE}" > "${PR_STATE_FILE}"
+    log "prs SKIPPED -- gh not on PATH; scan proceeds without PR state"
+elif [ ! -f "${MANIFEST}" ]; then
+    printf '## OPEN PULL REQUESTS (%s)\n\nUNAVAILABLE: manifest missing at %s.\n' "${DATE}" "${MANIFEST}" > "${PR_STATE_FILE}"
+    log "prs SKIPPED -- missing manifest at ${MANIFEST}"
+else
+    run_watchdog "${PR_TIMEOUT}" prs collect_pr_state
+    pr_rc=$?
+    if [ "${pr_rc}" -eq 124 ]; then
+        printf '## OPEN PULL REQUESTS (%s)\n\nUNAVAILABLE: collection hit the %ss watchdog.\n' "${DATE}" "${PR_TIMEOUT}" > "${PR_STATE_FILE}"
+        log "prs TIMEOUT -- ${PR_TIMEOUT}s watchdog fired; scan proceeds without PR state"
+    elif [ "${pr_rc}" -ne 0 ] || [ ! -s "${PR_STATE_FILE}" ]; then
+        printf '## OPEN PULL REQUESTS (%s)\n\nUNAVAILABLE: collection exited %s.\n' "${DATE}" "${pr_rc}" > "${PR_STATE_FILE}"
+        log "prs WARNING -- collection exited ${pr_rc}; scan proceeds without PR state"
+    else
+        log "prs OK -- PR state at ${PR_STATE_FILE} ($(grep -c '^### ' "${PR_STATE_FILE}" 2>/dev/null || echo 0) repos)"
+    fi
+fi
+
 # --- stage 1: codex scan --------------------------------------------------
 log "stage1 START -- codex scan"
 SCAN_PROMPT="${PROMPT_DIR}/scan-prompt.md"
@@ -247,6 +415,16 @@ if [ "${STUB}" != "1" ] && ! command -v codex >/dev/null 2>&1; then
 elif [ ! -f "${SCAN_PROMPT}" ]; then
     fail_stage stage1 "missing scan prompt at ${SCAN_PROMPT}"
 else
+    # The model gets prompt + collected PR state as one input file. Transient,
+    # but it lives in raw/ with the logs (never /tmp) so a bad scan can be
+    # reproduced exactly, and the retention sweep ages it out with everything else.
+    scan_input="$(mktemp "${RAW_DIR}/${DATE}-scan-input.XXXXXX")"
+    cat "${SCAN_PROMPT}" > "${scan_input}"
+    if [ -s "${PR_STATE_FILE}" ]; then
+        printf '\n\n---\n\n' >> "${scan_input}"
+        cat "${PR_STATE_FILE}" >> "${scan_input}"
+    fi
+
     # One rolling thread: resume the recorded id if we have one, otherwise start
     # fresh and record whatever id codex hands back. A resume that fails (session
     # pruned, id corrupt) falls back to a fresh thread rather than losing the day.
@@ -256,17 +434,21 @@ else
     scan_rc=1
     if [ -n "${thread_id}" ]; then
         log "stage1 -- resuming thread ${thread_id}"
-        run_watchdog "${SCAN_TIMEOUT}" stage1 codex_resume "${SCAN_PROMPT}" "${SCAN_FILE}" "${SCAN_RAW}" "${thread_id}"
+        run_watchdog "${SCAN_TIMEOUT}" stage1 codex_resume "${scan_input}" "${SCAN_FILE}" "${SCAN_RAW}" "${thread_id}"
         scan_rc=$?
         if [ "${scan_rc}" -ne 0 ]; then
             log "stage1 WARNING -- resume of ${thread_id} failed (exit ${scan_rc}); starting a fresh thread"
+            # Truncate NOW, not after the fresh run. The dead id must not survive
+            # this line: if the fresh scan then fails to yield a new one, stage 3
+            # would otherwise resume the same corpse and "succeed" against it.
+            : > "${THREAD_FILE}"
             thread_id=""
         fi
     fi
 
     if [ -z "${thread_id}" ]; then
         log "stage1 -- starting a fresh codex thread"
-        run_watchdog "${SCAN_TIMEOUT}" stage1 codex_fresh "${SCAN_PROMPT}" "${SCAN_FILE}" "${SCAN_RAW}"
+        run_watchdog "${SCAN_TIMEOUT}" stage1 codex_fresh "${scan_input}" "${SCAN_FILE}" "${SCAN_RAW}"
         scan_rc=$?
     fi
 
@@ -309,14 +491,13 @@ if [ -n "${skip_review}" ]; then
     printf 'REVIEW SKIPPED: %s\n' "${skip_review}" > "${REVIEW_FILE}"
     skip_stage stage2 "${skip_review}"
 else
-    review_input="$(mktemp)"
+    review_input="$(mktemp "${RAW_DIR}/${DATE}-review-input.XXXXXX")"
     cat "${REVIEW_PROMPT}" > "${review_input}"
     printf '\n\n---\n\n## SCAN UNDER REVIEW (%s)\n\n' "${DATE}" >> "${review_input}"
     cat "${SCAN_FILE}" >> "${review_input}"
 
     run_watchdog "${REVIEW_TIMEOUT}" stage2 fable_review "${review_input}" "${REVIEW_FILE}" "${REVIEW_RAW}"
     review_rc=$?
-    rm -f "${review_input}"
 
     if [ "${review_rc}" -eq 124 ]; then
         printf 'REVIEW SKIPPED: claude hit the %ss watchdog\n' "${REVIEW_TIMEOUT}" > "${REVIEW_FILE}"
@@ -350,14 +531,13 @@ fi
 if [ -n "${skip_sum}" ]; then
     skip_stage stage3 "${skip_sum}"
 else
-    sum_input="$(mktemp)"
+    sum_input="$(mktemp "${RAW_DIR}/${DATE}-brief-input.XXXXXX")"
     cat "${SUM_PROMPT}" > "${sum_input}"
     printf '\n\n---\n\n## FABLE REVIEW OF TODAY (%s)\n\n' "${DATE}" >> "${sum_input}"
     cat "${REVIEW_FILE}" >> "${sum_input}"
 
     run_watchdog "${SUM_TIMEOUT}" stage3 codex_resume "${sum_input}" "${BRIEF_FILE}" "${SUM_RAW}" "${thread_id}"
     sum_rc=$?
-    rm -f "${sum_input}"
 
     if [ "${sum_rc}" -eq 124 ]; then
         fail_stage stage3 "codex summarize hit the ${SUM_TIMEOUT}s watchdog"

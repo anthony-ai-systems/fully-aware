@@ -20,10 +20,16 @@ rather than trusting recall.
    that repo's `repo_path`:
    - `git log --oneline --since=36.hours`
    - `git status -sb`
-   - `gh pr list --limit 10` (only if `gh` is on PATH; skip silently if not)
 
-Worktrees and symlinked copies are deliberately excluded from the manifest --
-scan only the `repo_path` values it names.
+   Worktrees and symlinked copies are deliberately excluded from the manifest --
+   scan only the `repo_path` values it names.
+4. **OPEN PULL REQUESTS** -- appended to the end of this prompt by the runner.
+   Do NOT run `gh` yourself. Your sandbox is read-only AND offline: `gh` cannot
+   reach `api.github.com` from in here, so any attempt fails with a connection
+   error and wastes a turn. The runner collects `gh pr list --limit 10` per repo
+   outside the sandbox and hands you the result as data. If a repo's block
+   reports an error or the section says UNAVAILABLE, treat PR state as unknown
+   for that repo and say so -- never infer it.
 
 ## Output sections (strict -- these headings, this order, nothing else)
 
