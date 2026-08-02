@@ -5,7 +5,7 @@
   "canonical": true,
   "role": "Cross-product knowledge vault: build-plans, handoffs, knowledge-base. Handoffs + cross-product knowledge only, never marketing outputs.",
   "default_branch": "main",
-  "gh_repo": "tonyflo79/anthony-wiki-vault",
+  "gh_repo": "anthony-ai-systems/anthony-wiki-vault",
   "cold_load": [
     {
       "claim_template": "HEAD is {value}",
