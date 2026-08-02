@@ -13,7 +13,10 @@ import datetime
 import importlib.util
 import json
 import os
+import shutil
+import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -380,6 +383,123 @@ class WrapperStep(unittest.TestCase):
     def test_wrapper_exits_with_the_assembler_status(self):
         self.assertIn("exit ${asm_rc}", self._body())
 
+    def test_digest_step_is_guarded_on_an_argument_free_run(self):
+        body = self._body()
+        self.assertIn("if [ $# -eq 0 ]; then", body)
+        self.assertLess(body.index("if [ $# -eq 0 ]; then"),
+                        body.index("boot-digest.py"))
+        self.assertIn("morning-pack: args passed, skipping boot digest", body)
+
+
+# --------------------------------------------------------------------------- #
+# EXECUTING wrapper tests: morning-pack.sh is copied into a tempdir alongside
+# SHIM tools, so REPO_ROOT resolves to the tempdir and nothing touches the real
+# repo, the real state/ dir, or any other checkout. The shims are real Python
+# (invoked through FULLY_AWARE_PYTHON), so the wrapper's actual dispatch and
+# exit-status plumbing is exercised -- not a grep over its source.
+# --------------------------------------------------------------------------- #
+_SHIM_ASSEMBLER = '''#!/usr/bin/env python3
+import os, sys
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(root, "assembler-called"), "a", encoding="utf-8") as fh:
+    fh.write(" ".join(sys.argv[1:]) + "\\n")
+sys.exit(int(os.environ.get("SHIM_ASSEMBLER_RC", "0")))
+'''
+
+_SHIM_DIGEST = '''#!/usr/bin/env python3
+import os
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+state = os.path.join(root, "state")
+os.makedirs(state, exist_ok=True)
+with open(os.path.join(state, "BOOT-DIGEST.md"), "a", encoding="utf-8") as fh:
+    fh.write("shim digest\\n")
+'''
+
+_SHIM_GENERATOR = '''#!/usr/bin/env python3
+import sys
+sys.exit(0)
+'''
+
+
+class WrapperExecution(unittest.TestCase):
+    """morning-pack.sh, actually run, against shimmed tools in a tempdir."""
+
+    def _fixture(self, tmp):
+        tools = os.path.join(tmp, "tools")
+        os.makedirs(os.path.join(tools, "configs"))
+        shutil.copy2(_WRAPPER, os.path.join(tools, "morning-pack.sh"))
+        for name, src in (("assemble-boot-pack.py", _SHIM_ASSEMBLER),
+                          ("boot-digest.py", _SHIM_DIGEST),
+                          ("generate-surface.py", _SHIM_GENERATOR)):
+            path = os.path.join(tools, name)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(src)
+            os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
+        return os.path.join(tools, "morning-pack.sh")
+
+    def _run(self, tmp, args=(), assembler_rc=0):
+        wrapper = self._fixture(tmp)
+        env = dict(os.environ)
+        env["FULLY_AWARE_PYTHON"] = sys.executable
+        env["SHIM_ASSEMBLER_RC"] = str(assembler_rc)
+        proc = subprocess.run(["bash", wrapper] + list(args), env=env, cwd=tmp,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return proc
+
+    def _digest(self, tmp):
+        return os.path.join(tmp, "state", "BOOT-DIGEST.md")
+
+    def _assembler_args(self, tmp):
+        marker = os.path.join(tmp, "assembler-called")
+        if not os.path.isfile(marker):
+            return None
+        with open(marker, "r", encoding="utf-8") as fh:
+            return fh.read().splitlines()
+
+    def test_argless_run_writes_the_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp)
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8"))
+            self.assertEqual(self._assembler_args(tmp), [""])
+            self.assertTrue(os.path.isfile(self._digest(tmp)))
+
+    def test_preview_args_skip_the_digest_entirely(self):
+        """--stdout / --out-json previews must not rewrite boot state."""
+        for args in (["--stdout"], ["--out-json", "/dev/null"]):
+            with self.subTest(args=args):
+                with tempfile.TemporaryDirectory() as tmp:
+                    proc = self._run(tmp, args)
+                    out = proc.stdout.decode("utf-8")
+                    self.assertEqual(proc.returncode, 0,
+                                     proc.stderr.decode("utf-8"))
+                    # forwarded to the assembler ...
+                    self.assertEqual(self._assembler_args(tmp),
+                                     [" ".join(args)])
+                    # ... but no digest was generated.
+                    self.assertFalse(os.path.exists(self._digest(tmp)))
+                    self.assertIn("args passed, skipping boot digest", out)
+                    self.assertNotIn("generating boot digest", out)
+
+    def test_failing_assembler_propagates_its_status_with_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, ["--stdout"], assembler_rc=3)
+            self.assertEqual(proc.returncode, 3, proc.stderr.decode("utf-8"))
+            self.assertFalse(os.path.exists(self._digest(tmp)))
+
+    def test_failing_assembler_propagates_its_status_argless(self):
+        """The digest step must not swallow or crash on the assembler's failure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, assembler_rc=4)
+            self.assertEqual(proc.returncode, 4, proc.stderr.decode("utf-8"))
+            # degrade-not-abort: the digest still ran over whatever pack exists.
+            self.assertTrue(os.path.isfile(self._digest(tmp)))
+
+    def test_digest_is_written_once_per_argless_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._run(tmp)
+            with open(self._digest(tmp), "r", encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "shim digest\n")
+
 
 class HookBody(unittest.TestCase):
     """session-digest-hook.sh: fresh -> cat, stale -> one line, absent -> silence."""
@@ -417,9 +537,30 @@ class HookBody(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(
             out.strip(),
-            "fully-aware boot digest is stale (>36h) -- check the daily-scan "
-            "LaunchAgent")
+            "fully-aware boot digest is stale (>36h) -- check the boot-pack "
+            "LaunchAgent (com.anthonyflores.fully-aware.boot-pack)")
         self.assertNotIn("stale content", out)
+
+    def test_stale_line_names_the_agent_that_actually_writes_the_digest(self):
+        """The digest comes from the boot-pack agent -- not any daily-scan job."""
+        label = "com.anthonyflores.fully-aware.boot-pack"
+        self.assertTrue(os.path.isfile(
+            os.path.join(os.path.dirname(_HERE), "launchd", label + ".plist")),
+            "stale message must name a LaunchAgent this repo actually ships")
+        with open(_HOOK, "r", encoding="utf-8") as fh:
+            body = fh.read()
+        self.assertIn(label, body)
+        self.assertNotIn("daily-scan LaunchAgent", body)
+
+    def test_digest_output_is_bounded(self):
+        """The hook consumes a file it does not control: head -c, never cat."""
+        rc, out = self._run("x" * 10000 + "\n")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(out), 4000)
+        with open(_HOOK, "r", encoding="utf-8") as fh:
+            body = fh.read()
+        self.assertIn("head -c 4000", body)
+        self.assertNotRegex(body, r"(?m)^\s*cat ")
 
     def test_absent_digest_prints_nothing(self):
         rc, out = self._run(None)
@@ -434,8 +575,34 @@ class HookBody(unittest.TestCase):
         self.assertNotRegex(body, r"set -e(?:[^a-zA-Z]|$)")
 
 
+def _git(*args, **kwargs):
+    """Run git with a synthetic identity (fixture repos need no real config)."""
+    env = dict(os.environ)
+    env.update({"GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "f@example.invalid",
+                "GIT_COMMITTER_NAME": "fixture",
+                "GIT_COMMITTER_EMAIL": "f@example.invalid"})
+    return subprocess.run(("git",) + args, env=env, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, **kwargs)
+
+
+def _installer_fixture(root):
+    """Copy the real installer + a stand-in hook body into <root>/tools/."""
+    tools = os.path.join(root, "tools")
+    os.makedirs(tools, exist_ok=True)
+    shutil.copy2(_INSTALLER, os.path.join(tools, "install-digest-hook.sh"))
+    with open(os.path.join(tools, "session-digest-hook.sh"), "w",
+              encoding="utf-8") as fh:
+        fh.write("#!/usr/bin/env bash\nexit 0\n")
+    return os.path.join(tools, "install-digest-hook.sh")
+
+
 class InstallerIdempotence(unittest.TestCase):
-    """The installer runs against a THROWAWAY HOME -- never the real settings."""
+    """The installer runs against a THROWAWAY HOME -- never the real settings.
+
+    It also runs from a COPY of itself in a tempdir, not from this checkout: the
+    installer refuses to run inside a linked git worktree (see InstallerWorktree
+    below), and these tests are about the settings.json edit, not that guard.
+    """
 
     IMPRINT = {
         "matcher": "",
@@ -447,7 +614,11 @@ class InstallerIdempotence(unittest.TestCase):
     def _install(self, home):
         env = dict(os.environ)
         env["HOME"] = home
-        return subprocess.run(["bash", _INSTALLER], env=env,
+        installer = os.path.join(home, "fixture-repo", "tools",
+                                 "install-digest-hook.sh")
+        if not os.path.isfile(installer):
+            installer = _installer_fixture(os.path.join(home, "fixture-repo"))
+        return subprocess.run(["bash", installer], env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def _settings(self, home):
@@ -456,7 +627,7 @@ class InstallerIdempotence(unittest.TestCase):
             return json.load(fh)
 
     def _seed(self, home):
-        os.makedirs(os.path.join(home, ".claude"))
+        os.makedirs(os.path.join(home, ".claude"), exist_ok=True)
         with open(os.path.join(home, ".claude", "settings.json"),
                   "w", encoding="utf-8") as fh:
             json.dump({"model": "synthetic",
@@ -507,6 +678,100 @@ class InstallerIdempotence(unittest.TestCase):
                           proc.stderr.decode("utf-8"))
             self.assertFalse(os.path.exists(
                 os.path.join(home, ".claude", "settings.json")))
+
+    def test_installer_targets_the_hook_body_beside_it(self):
+        with open(_INSTALLER, "r", encoding="utf-8") as fh:
+            self.assertIn('HOOK="${REPO_ROOT}/tools/session-digest-hook.sh"',
+                          fh.read())
+
+
+class InstallerWorktreeGuard(unittest.TestCase):
+    """settings.json outlives a worktree: never register a path inside one.
+
+    The command written into ~/.claude/settings.json is an absolute path to the
+    hook body. Installed from a linked worktree, that path dies with the
+    worktree and every later session start silently runs a missing script.
+    """
+
+    IMPRINT = InstallerIdempotence.IMPRINT
+
+    def _seed_home(self, home):
+        os.makedirs(os.path.join(home, ".claude"), exist_ok=True)
+        with open(os.path.join(home, ".claude", "settings.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"model": "synthetic",
+                       "hooks": {"SessionStart": [dict(self.IMPRINT)]}},
+                      fh, indent=2)
+
+    def _run(self, installer, home):
+        env = dict(os.environ)
+        env["HOME"] = home
+        return subprocess.run(["bash", installer], env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def _settings(self, home):
+        with open(os.path.join(home, ".claude", "settings.json"),
+                  "r", encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_refuses_from_a_linked_worktree_and_allows_the_main_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            main = os.path.join(tmp, "main")
+            linked = os.path.join(tmp, "linked")
+            home = os.path.join(tmp, "home")
+            os.makedirs(main)
+            self._seed_home(home)
+
+            init = _git("init", "-q", main)
+            if init.returncode != 0:
+                self.skipTest("git init unavailable: %s"
+                              % init.stderr.decode("utf-8"))
+            with open(os.path.join(main, "README.md"), "w",
+                      encoding="utf-8") as fh:
+                fh.write("fixture\n")
+            self.assertEqual(_git("add", "-A", cwd=main).returncode, 0)
+            self.assertEqual(_git("commit", "-qm", "fixture", cwd=main).returncode,
+                             0)
+            wt = _git("worktree", "add", "-q", "-b", "fixture-branch", linked,
+                      cwd=main)
+            self.assertEqual(wt.returncode, 0, wt.stderr.decode("utf-8"))
+
+            # From the LINKED worktree: refuse, touch nothing.
+            before = self._settings(home)
+            proc = self._run(_installer_fixture(linked), home)
+            err = proc.stderr.decode("utf-8")
+            self.assertEqual(proc.returncode, 1, proc.stdout.decode("utf-8"))
+            self.assertIn("linked worktree", err)
+            self.assertIn(linked, err)
+            self.assertEqual(self._settings(home), before)
+            self.assertEqual(
+                [f for f in os.listdir(os.path.join(home, ".claude"))
+                 if ".bak-" in f], [])
+
+            # From the MAIN checkout of the same repo: install normally.
+            ok = self._run(_installer_fixture(main), home)
+            self.assertEqual(ok.returncode, 0, ok.stderr.decode("utf-8"))
+            entries = self._settings(home)["hooks"]["SessionStart"]
+            self.assertEqual(len(entries), 2)
+            self.assertIn(os.path.join(main, "tools", "session-digest-hook.sh"),
+                          entries[1]["hooks"][0]["command"])
+
+    def test_this_checkout_is_refused_when_it_is_a_linked_worktree(self):
+        """Run the SHIPPED installer where it lives -- the guard's real target."""
+        repo_root = os.path.dirname(_HERE)
+        git_dir = _git("-C", repo_root, "rev-parse", "--git-dir")
+        common = _git("-C", repo_root, "rev-parse", "--git-common-dir")
+        if git_dir.returncode != 0 or common.returncode != 0:
+            self.skipTest("this checkout is not a git repo")
+        if git_dir.stdout == common.stdout:
+            self.skipTest("this checkout is a main clone, not a linked worktree")
+        with tempfile.TemporaryDirectory() as home:
+            self._seed_home(home)
+            before = self._settings(home)
+            proc = self._run(_INSTALLER, home)
+            self.assertEqual(proc.returncode, 1, proc.stdout.decode("utf-8"))
+            self.assertIn("linked worktree", proc.stderr.decode("utf-8"))
+            self.assertEqual(self._settings(home), before)
 
 
 if __name__ == "__main__":

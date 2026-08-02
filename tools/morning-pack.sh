@@ -20,7 +20,9 @@
 # Only surface-config/v1 configs under tools/configs/ are processed. Non-repo
 # configs (seed-manifest.json, ratification-backlog.json) are skipped by schema.
 #
-# Any args passed to this script are forwarded to assemble-boot-pack.py.
+# Any args passed to this script are forwarded to assemble-boot-pack.py -- and an
+# argument-carrying run is treated as a PREVIEW: it skips the boot-digest step
+# entirely (see the digest block below). The LaunchAgent passes no args.
 
 set -uo pipefail  # NOT -e: a per-repo generation failure must degrade, not abort.
 
@@ -84,11 +86,22 @@ asm_rc=$?
 # unparseable pack makes the digest a silent no-op (exit 0), and a hard digest
 # failure is logged and skipped -- the pack is the deliverable, the digest is a
 # convenience over it.
-echo "morning-pack: generating boot digest"
-"${PY}" "${REPO_ROOT}/tools/boot-digest.py" || {
-    rc=$?
-    echo "morning-pack: WARNING boot digest FAILED (exit ${rc}); continuing" >&2
-}
+#
+# ONLY on an argument-free run. Args are forwarded to the assembler, and the
+# assembler's argument surface includes PREVIEW modes (--stdout, --out-json to
+# a scratch path) that deliberately do not update state/boot-pack.json. Firing
+# the digest after one of those would rewrite state/BOOT-DIGEST.md from a pack
+# the run never refreshed -- a preview silently mutating boot state. The armed
+# LaunchAgent passes no args, so the daily path is unaffected.
+if [ $# -eq 0 ]; then
+    echo "morning-pack: generating boot digest"
+    "${PY}" "${REPO_ROOT}/tools/boot-digest.py" || {
+        rc=$?
+        echo "morning-pack: WARNING boot digest FAILED (exit ${rc}); continuing" >&2
+    }
+else
+    echo "morning-pack: args passed, skipping boot digest"
+fi
 
 # The pack is what this wrapper is judged on: exit with the ASSEMBLER's status,
 # not the digest's.

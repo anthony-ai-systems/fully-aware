@@ -17,6 +17,9 @@
 # after copying it to a timestamped backup alongside it. The backup is taken
 # only when there is actually a change to write, so re-running leaves no litter.
 #
+# It REFUSES to run from a linked git worktree: the path it writes into
+# settings.json must outlive the checkout it was installed from.
+#
 # ARMING IS ANTHONY'S. Nothing in this repo runs this script; run it by hand
 # when you want the digest at boot. Undo = delete the entry (or restore the
 # backup this prints).
@@ -30,6 +33,25 @@ PY="${FULLY_AWARE_PYTHON:-/usr/bin/python3}"
 
 if [[ ! -f "${HOOK}" ]]; then
     echo "install-digest-hook: missing hook body at ${HOOK}" >&2
+    exit 1
+fi
+
+# Refuse to install from a LINKED WORKTREE. The command written into
+# settings.json is an absolute path to ${HOOK}; settings.json outlives any
+# worktree, so installing from /tmp/<some-worktree> registers a SessionStart
+# hook that breaks (silently, at every session start) the moment the worktree is
+# removed. In a main checkout --git-dir == --git-common-dir; in a linked worktree
+# --git-dir points into .git/worktrees/<name>. Outside a repo entirely both
+# resolve empty and the check is a no-op.
+_git_dir="$(git -C "${REPO_ROOT}" rev-parse --git-dir 2>/dev/null || true)"
+_git_common="$(git -C "${REPO_ROOT}" rev-parse --git-common-dir 2>/dev/null || true)"
+if [[ -n "${_git_dir}" && "${_git_dir}" != "${_git_common}" ]]; then
+    echo "install-digest-hook: refusing to install from a linked worktree." >&2
+    echo "  worktree:   ${REPO_ROOT}" >&2
+    echo "  git-dir:    ${_git_dir}" >&2
+    echo "  common-dir: ${_git_common}" >&2
+    echo "  The hook path written into settings.json must live in a durable" >&2
+    echo "  checkout -- run this from the main clone, not a disposable worktree." >&2
     exit 1
 fi
 
