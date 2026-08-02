@@ -1,14 +1,22 @@
 # daily-scan -- the Codex-managed daily scan pipeline
 
 One scheduled entry point that produces one artifact: `state/daily-scan/LATEST.md`,
-a <=300-word brief opening with a single headline line. Three model stages behind
-it -- Codex scans, Fable reviews, Codex summarizes -- with the scan and the
-summary sharing **one rolling Codex thread** that Anthony can drop into and
-continue any day.
+a <=300-word brief that opens with its own date -- `Daily brief -- YYYY-MM-DD` --
+then a blank line, then a single headline line. Three model stages behind it --
+Codex scans, Fable reviews, Codex summarizes -- with the scan and the summary
+sharing **one rolling Codex thread** that Anthony can drop into and continue any
+day.
 
-The headline line is written to be lifted verbatim into the boot digest. That
-consumer is **pending**: nothing reads `LATEST.md` automatically until
-`feat/boot-digest` lands. Today the brief is opened by hand.
+**Read the date line first.** `LATEST.md` is the only undated *name* in the lane,
+so a stale one is otherwise invisible: if stage 3 fails or is skipped, yesterday's
+brief stays in place reading exactly like today's. A `LATEST.md` whose first line
+is dated before today means **stage 3 has not succeeded today** -- go to
+`state/logs/daily-scan.log` and this date's `.FAILED` / `.SKIPPED` markers.
+
+The headline line (the third line, first after the date stamp and its blank) is
+written to be lifted verbatim into the boot digest. That consumer is **pending**:
+nothing reads `LATEST.md` automatically until `feat/boot-digest` lands. Today the
+brief is opened by hand.
 
 The thread is the design. A fresh scan every morning has no memory, so "what is
 new" is guesswork; resuming the same session means the scanner genuinely knows
@@ -55,6 +63,7 @@ can join rather than a report he can only read.
   stage 3  SUMMARIZE ......... codex exec resume <thread-id>          [600s]
                                SAME thread, prompt = summarize-prompt.md + review
                                -> state/daily-scan/<date>-brief.md
+                                  (date-stamped first line, then the headline)
                                -> copied to state/daily-scan/LATEST.md
 ```
 
@@ -68,13 +77,24 @@ sitting beside yesterday's brief looking like a matched pair.
 Watchdogs kill by **process group**, not by pid: `codex` and `claude` spawn
 their own trees, and killing only the direct child leaves grandchildren running
 after the deadline. Each stage is launched under job control so its pgid is its
-pid, and the watchdog signals `-$pid`.
+pid, and the watchdog signals `-$pid`. The whole launch-wait-reap sequence runs
+in one subshell whose stderr goes to `raw/<date>.<stage>.watchdog.log`, because
+bash announces a killed job ("Terminated: 15") on the stderr of the frame that
+waited on it -- which under launchd is `daily-scan.err.log`, where a working
+watchdog reads as a crashing script. Every stage redirects its own output, so
+nothing real is diverted; the file is deleted when it comes out empty, which is
+every run that does not time out.
 
 Two runs never overlap. The lock is an atomic `mkdir` of
 `state/daily-scan/.lock`, released by an `EXIT` trap; a second run (launchd
 firing while a 15-minute scan is still going, or a hand re-run on top of it)
 logs `LOCK held by a live run` and exits 0. A lock older than the sum of every
-watchdog budget cannot belong to a live run, so it is broken rather than obeyed.
+watchdog budget cannot belong to a live run, so it is broken rather than obeyed
+-- and **breaking it is atomic too**: the breaker `mv`s the lock aside to
+`.lock.stale.<pid>` and only the winner of that single rename may re-create it.
+`rmdir` then `mkdir` was not enough; measured 8-way, it let two or more runs
+believe they held the lock in 16 of 25 trials. Losers log `LOCK stale-break lost
+to another run` or `LOCK re-taken after stale-break` and exit 0.
 
 ## File map
 
@@ -88,13 +108,13 @@ watchdog budget cannot belong to a live run, so it is broken rather than obeyed.
 | `launchd/com.anthonyflores.fully-aware.daily-scan.plist` | 06:15 daily schedule. |
 | `state/daily-scan/<date>-scan.md` | raw Codex scan. |
 | `state/daily-scan/<date>-review.md` | Fable's review, or a one-line `REVIEW SKIPPED: <reason>`. |
-| `state/daily-scan/<date>-brief.md` | the day's brief. |
-| `state/daily-scan/LATEST.md` | copy of the newest brief. **Consumer pending:** the boot digest is meant to surface its first line, but that reader does not exist until `feat/boot-digest` lands. Until then LATEST.md is read by hand. |
+| `state/daily-scan/<date>-brief.md` | the day's brief, date-stamped `Daily brief -- <date>` on line 1. |
+| `state/daily-scan/LATEST.md` | copy of the newest brief. Its first line is the brief's date: **dated before today = stage 3 has not succeeded today**, and this is last-successful-run state, not this morning's. **Consumer pending:** the boot digest is meant to surface the headline, but that reader does not exist until `feat/boot-digest` lands. Until then LATEST.md is read by hand. |
 | `state/daily-scan/thread-id` | the rolling Codex session id. Delete it to start a new thread. |
 | `state/daily-scan/<date>.<stage>.FAILED` | a stage broke; contents are the reason. |
 | `state/daily-scan/<date>.<stage>.SKIPPED` | a stage did not run; contents are why. |
-| `state/daily-scan/raw/` | per-stage raw CLI logs (the session-id banner, model stderr), the collected PR-state block, and the composed prompt inputs. |
-| `state/daily-scan/.lock` | held for the duration of a run; an atomic `mkdir`, removed by an `EXIT` trap. |
+| `state/daily-scan/raw/` | per-stage raw CLI logs (the session-id banner, model stderr), the collected PR-state block, the composed prompt inputs, and `<date>.<stage>.watchdog.log` when a stage was killed. |
+| `state/daily-scan/.lock` | held for the duration of a run; an atomic `mkdir`, removed by an `EXIT` trap. A stale one is broken by renaming it to `.lock.stale.<pid>`, so only one racer can win it. |
 | `state/logs/daily-scan.log` | the timestamped run log -- start here. Rotated to `.log.1` at ~1 MB. |
 
 Everything the pipeline itself writes is under `state/`, which is gitignored --
@@ -155,6 +175,7 @@ should do the same.
 | symptom | cause | where to look |
 | --- | --- | --- |
 | no `<date>-brief.md`, no `LATEST.md` update | stage 1 died, so 2 and 3 skipped | `<date>.stage1.FAILED`, `<date>.stage3.SKIPPED` |
+| `LATEST.md` line 1 is dated **before today** | stage 3 did not succeed today; you are reading the last good brief | `state/logs/daily-scan.log`, plus today's `.FAILED` / `.SKIPPED` markers |
 | `REVIEW SKIPPED: claude CLI not on PATH` | `claude` missing under launchd's stripped PATH | the plist runs `/bin/bash -lc`; check the login shell PATH |
 | `REVIEW SKIPPED: claude exited 1` | usually not logged in, or quota | `state/daily-scan/raw/<date>-review.raw.log` |
 | `stage1 FAILED -- ... watchdog` | scan exceeded 15 min | raise `DAILY_SCAN_SCAN_TIMEOUT`, or tighten `scan-prompt.md` |

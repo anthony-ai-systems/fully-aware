@@ -30,7 +30,8 @@
 # under ~/.codex, and stage 0 runs tools/morning-pack.sh, which writes the boot
 # pack. The Codex sandbox is read-only in both model stages; the report files are
 # written by the codex CLI itself via -o (the last-message file), never by
-# model-run shell.
+# model-run shell. The runner's only edit to a report is the `Daily brief --
+# <date>` line it prepends to the brief before copying it to LATEST.md.
 #
 #   tools/daily-scan/run-daily-scan.sh          # one real run
 #   DAILY_SCAN_STUB=1 tools/daily-scan/run-daily-scan.sh   # plumbing only, no tokens
@@ -115,9 +116,18 @@ if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
     lock_stale_mins=$(( TOTAL_BUDGET / 60 + 1 ))
     if [ -z "$(find "${LOCK_DIR}" -maxdepth 0 -mmin "-${lock_stale_mins}" 2>/dev/null)" ]; then
         log "LOCK stale (${LOCK_DIR} older than ${lock_stale_mins} min); breaking it"
-        rmdir "${LOCK_DIR}" 2>/dev/null || true
-        if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
-            log "LOCK held after stale-break attempt; another run is live -- exiting 0"
+        # Breaking the lock has to be atomic too. `rmdir` then `mkdir` is
+        # check-then-act: eight runs can all see the same stale lock, all
+        # rmdir-then-mkdir, and several come out believing they hold it
+        # (measured on this script: 16 of 25 8-way trials). A `mv` to a
+        # pid-unique name is one rename(): exactly one racer can win the old
+        # lock, and only that winner is entitled to create the new one.
+        stale_tmp="${LOCK_DIR}.stale.$$"
+        if mv "${LOCK_DIR}" "${stale_tmp}" 2>/dev/null; then
+            rmdir "${stale_tmp}" 2>/dev/null || rm -rf "${stale_tmp}"
+            mkdir "${LOCK_DIR}" 2>/dev/null || { log "LOCK re-taken after stale-break; exiting 0"; exit 0; }
+        else
+            log "LOCK stale-break lost to another run; exiting 0"
             exit 0
         fi
     else
@@ -182,37 +192,55 @@ run_watchdog() {
     local secs="$1" label="$2"
     shift 2
 
-    # Monitor mode only for the launch, so the staged work lands in its own
-    # process group; restored immediately so the rest of the script (and the
-    # sleeper below) keeps the plain non-interactive behaviour.
-    set -m
-    "$@" &
-    local work_pid=$!
-    set +m
+    # Everything from the launch to the reap runs in ONE subshell whose stderr
+    # is redirected to a per-stage watchdog log. When the watchdog kills the
+    # job, bash's job control announces it ("Terminated: 15") on the stderr of
+    # the frame that ran `wait` -- under launchd that is daily-scan.err.log, so
+    # a working watchdog looked like a crashing one. Nothing real is lost:
+    # every staged function owns its own redirection, so the only stderr this
+    # frame can produce is bash's own chatter, and it is kept (in raw/, beside
+    # the CLI logs) rather than discarded, in case it is ever something else.
+    local wd_log="${RAW_DIR}/${DATE}.${label}.watchdog.log"
 
-    # The sleeper detaches from our stdout: it outlives nothing, but while it
-    # lives it would otherwise hold the inherited pipe open and hang anything
-    # reading this script's output (`run-daily-scan.sh | grep ...`) for the full
-    # watchdog budget. It logs by appending to ${LOG} directly.
     (
-        sleep "${secs}"
-        if kill -0 "${work_pid}" 2>/dev/null; then
-            printf '[%s] daily-scan: WATCHDOG %s -- no exit after %ss; terminating pid %s\n' \
-                "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${label}" "${secs}" "${work_pid}" >> "${LOG}"
-            printf 'TIMEOUT\n' > "${RAW_DIR}/${DATE}.${label}.timeout"
-            terminate_tree "${work_pid}"
-        fi
-    ) >/dev/null 2>&1 &
-    local wd_pid=$!
+        # Monitor mode only for the launch, so the staged work lands in its own
+        # process group; restored immediately so the rest of this subshell (and
+        # the sleeper below) keeps the plain non-interactive behaviour.
+        set -m
+        "$@" &
+        work_pid=$!
+        set +m
 
-    wait "${work_pid}"
+        # The sleeper detaches from our stdout: it outlives nothing, but while
+        # it lives it would otherwise hold the inherited pipe open and hang
+        # anything reading this script's output (`run-daily-scan.sh | grep ...`)
+        # for the full watchdog budget. It logs by appending to ${LOG} directly.
+        (
+            sleep "${secs}"
+            if kill -0 "${work_pid}" 2>/dev/null; then
+                printf '[%s] daily-scan: WATCHDOG %s -- no exit after %ss; terminating pid %s\n' \
+                    "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${label}" "${secs}" "${work_pid}" >> "${LOG}"
+                printf 'TIMEOUT\n' > "${RAW_DIR}/${DATE}.${label}.timeout"
+                terminate_tree "${work_pid}"
+            fi
+        ) >/dev/null 2>&1 &
+        wd_pid=$!
+
+        wait "${work_pid}"
+        rc=$?
+
+        # Kill the sleeper FIRST: killing the subshell alone orphans its `sleep`,
+        # which then lingers for the whole budget (a 15-minute zombie per stage).
+        pkill -P "${wd_pid}" 2>/dev/null || true
+        kill "${wd_pid}" 2>/dev/null || true
+        wait "${wd_pid}" 2>/dev/null || true
+
+        exit "${rc}"
+    ) 2>>"${wd_log}"
     local rc=$?
 
-    # Kill the sleeper FIRST: killing the subshell alone orphans its `sleep`,
-    # which then lingers for the whole budget (a 15-minute zombie per stage).
-    pkill -P "${wd_pid}" 2>/dev/null || true
-    kill "${wd_pid}" 2>/dev/null || true
-    wait "${wd_pid}" 2>/dev/null || true
+    # An empty watchdog log is the normal case; do not leave 5 of them per day.
+    [ -s "${wd_log}" ] || rm -f "${wd_log}"
 
     if [ -f "${RAW_DIR}/${DATE}.${label}.timeout" ]; then
         rm -f "${RAW_DIR}/${DATE}.${label}.timeout"
@@ -546,9 +574,26 @@ else
     elif [ ! -s "${BRIEF_FILE}" ]; then
         fail_stage stage3 "codex summarize produced no output at ${BRIEF_FILE}"
     else
+        # LATEST.md is the only undated artifact in the lane, which makes a
+        # STALE one invisible: if stage 3 fails or is skipped, yesterday's brief
+        # sits there reading exactly like today's. Stamp the date as the brief's
+        # first line before the copy, so every reader -- Anthony by hand, or the
+        # boot digest when it lands -- sees which day this is without stat(1).
+        brief_headline="$(head -1 "${BRIEF_FILE}")"
+        # Plain redirect, not mktemp: mktemp's 0600 would ride the `mv` into the
+        # brief and from there into LATEST.md. The name is fixed and per-date --
+        # the lock serialises runs -- and raw/ retention sweeps it if a run dies
+        # between the write and the rename.
+        stamped="${RAW_DIR}/${DATE}-brief-stamped.tmp"
+        if { printf 'Daily brief -- %s\n\n' "${DATE}"; cat "${BRIEF_FILE}"; } > "${stamped}"; then
+            mv -f "${stamped}" "${BRIEF_FILE}"
+        else
+            rm -f "${stamped}"
+            log "stage3 WARNING -- could not date-stamp ${BRIEF_FILE}; copying it unstamped"
+        fi
         cp "${BRIEF_FILE}" "${LATEST_FILE}"
         log "stage3 OK -- brief at ${BRIEF_FILE}; LATEST.md updated"
-        log "headline: $(head -1 "${BRIEF_FILE}")"
+        log "headline: ${brief_headline}"
     fi
 fi
 
