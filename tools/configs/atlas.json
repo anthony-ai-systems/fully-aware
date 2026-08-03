@@ -5,7 +5,7 @@
   "canonical": true,
   "role": "Personal-infra Atlas-v2 knowledge graph / staleness oracle. Rich-lineage fork; default branch is master.",
   "default_branch": "master",
-  "gh_repo": "tonyflo79/atlas",
+  "gh_repo": "anthony-ai-systems/atlas",
   "cold_load": [
     {
       "claim_template": "HEAD is {value}",

@@ -5,7 +5,7 @@
   "canonical": true,
   "role": "Personal-infra memory + taste system: ingest quarantine, entity registry, operator data root. Rich-lineage fork.",
   "default_branch": "main",
-  "gh_repo": "tonyflo79/imprint",
+  "gh_repo": "anthony-ai-systems/imprint",
   "cold_load": [
     {
       "claim_template": "HEAD is {value}",

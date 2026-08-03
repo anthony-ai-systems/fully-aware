@@ -5,7 +5,7 @@
   "canonical": true,
   "role": "SAGA mission-control UI: run boards, spine relay surfaces, operator dashboards.",
   "default_branch": "main",
-  "gh_repo": "tonyflo79/saga-mission-control",
+  "gh_repo": "anthony-ai-systems/saga-mission-control",
   "cold_load": [
     {
       "claim_template": "HEAD is {value}",
