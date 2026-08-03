@@ -25,7 +25,7 @@ repo-fact ``as_of`` is the deterministic HEAD committer date (%cI). Two runs on 
 unchanged repo are byte-identical after carving those volatiles.
 
 Probe vocabulary (spec SS1.2 whitelist -- no arbitrary shell):
-  git             rev-parse / log / status / rev-list HEAD..origin/main --count
+  git             rev-parse / log / status / rev-list HEAD..origin/<default> --count
                   (currency read from EXISTING refs; the generator never fetches).
   gh              pr list (degrades gracefully if gh is missing/unauthenticated).
   file-exists     existence test of a repo-relative path.
@@ -133,15 +133,18 @@ def git_default_branch(repo, declared):
     return ""
 
 
-def git_behind_origin_main(repo):
-    """Count commits HEAD is behind origin/main using EXISTING refs (no fetch).
+def git_behind_origin_default(repo, branch):
+    """Count commits HEAD is behind origin/<default branch> using EXISTING refs
+    (no fetch). Returns an int, or a degraded marker if the ref is absent.
 
-    Returns an int, or a degraded marker if the origin/main ref is absent.
+    The surface key this feeds stays named behind_origin_main -- that name is
+    part of the frozen surface/pack shape -- but the ref it counts against is
+    the repo's declared default branch, not a hardcoded main (Atlas is master).
     """
-    ref = "refs/remotes/origin/main"
+    ref = "refs/remotes/origin/%s" % (branch or "main")
     rc, out, err = run(["git", "-C", repo, "rev-parse", "--verify", "--quiet", ref])
     if rc != 0 or not out.strip():
-        return _degraded("no %s ref (repo not fetched, or non-main default)" % ref)
+        return _degraded("no %s ref (repo not fetched, or wrong declared default)" % ref)
     rc, out, err = run(
         ["git", "-C", repo, "rev-list", "--count", "HEAD..%s" % ref])
     if rc != 0 or not out.strip().isdigit():
@@ -247,7 +250,7 @@ def resolve_cold_probe(repo, probe, ctx):
             return _degraded("git log HEAD %cI failed")
         return {"value": v, "source": "git", "as_of": ctx["commit_time"]}
     if kind == "git-behind":
-        v = git_behind_origin_main(repo)
+        v = git_behind_origin_default(repo, ctx.get("default_branch"))
         if _is_degraded(v):
             return v
         return {"value": v, "source": "git", "as_of": ctx["commit_time"]}
@@ -414,17 +417,19 @@ def build_surface(repo, cfg):
     gh_repo = cfg.get("gh_repo", "")
     open_prs = gh_open_prs(gh_repo, now)
 
+    default_branch = git_default_branch(repo, cfg.get("default_branch", ""))
+
     ctx = {"head_sha": head_sha, "commit_time": commit_time, "now": now,
-           "open_prs": open_prs}
+           "open_prs": open_prs, "default_branch": default_branch}
 
     identity = {
         "repo_path": cfg.get("repo_path", repo),
         "canonical": bool(cfg.get("canonical", True)),
         "role": cfg.get("role", ""),
-        "default_branch": git_default_branch(repo, cfg.get("default_branch", "")),
+        "default_branch": default_branch,
         "head_sha": head_sha if head_sha is not None
         else _degraded("git rev-parse HEAD failed"),
-        "behind_origin_main": git_behind_origin_main(repo),
+        "behind_origin_main": git_behind_origin_default(repo, default_branch),
         "source": "git",
         "as_of": commit_time if commit_time is not None else now,
     }
