@@ -155,7 +155,7 @@ class AttentionLines(unittest.TestCase):
             _surface("synth-healthy", behind=0),
             _surface("synth-behind", behind=8)]))
         self.assertIn("ATTENTION (1):", md)
-        self.assertIn("- synth-behind: 8 behind origin/main", md)
+        self.assertIn("- synth-behind: 8 behind origin default", md)
         self.assertNotIn("synth-healthy", md)
 
     def test_queue_items_pull_a_healthy_repo_in(self):
@@ -169,7 +169,7 @@ class AttentionLines(unittest.TestCase):
         md = bd.build_digest(NOW, _pack(
             surfaces=[_surface("synth-both", behind=1)],
             queue_items=[{"summary": "a", "source": "next-session:synth-both"}]))
-        self.assertIn("- synth-both: 1 behind origin/main, 1 decision-queue item(s)",
+        self.assertIn("- synth-both: 1 behind origin default, 1 decision-queue item(s)",
                       md)
 
     def test_degraded_behind_marker_is_not_a_behind_count(self):
@@ -236,7 +236,7 @@ class TokenCap(unittest.TestCase):
                 unittest.mock.patch.object(
                     bd, "PACK_POINTER", "Full pack: %s" % pack_md):
             md = bd.build_digest(NOW, self._fat_pack(), cap_tokens=120)
-        self.assertIn("- synth-00: 1 behind origin/main", md)
+        self.assertIn("- synth-00: 1 behind origin default", md)
 
     def test_a_normal_pack_stays_a_few_hundred_tokens(self):
         md = bd.build_digest(NOW, _pack(

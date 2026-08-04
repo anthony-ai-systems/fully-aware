@@ -29,7 +29,7 @@ failure.
 
 Content, in order: header (pack timestamp + age, ``STALE (>36h)`` when old),
 WARNINGS (count + one compressed line each), OPEN ITEMS (count + first sentence
-each), ATTENTION (only repos behind origin/main or carrying decision-queue
+each), ATTENTION (only repos behind their origin default branch or carrying decision-queue
 items -- healthy repos are skipped entirely), an optional daily-brief pointer,
 and the full-pack pointer.
 
@@ -189,7 +189,7 @@ def queue_counts(pack):
 
 
 def attention_lines(pack):
-    """One line per repo that is behind origin/main or carries queue items.
+    """One line per repo that is behind its origin default branch or carries queue items.
 
     Healthy repos are skipped ENTIRELY -- the digest exists to route attention,
     and a clean repo needs none. A degraded behind-count is not a number, so it
@@ -210,7 +210,7 @@ def attention_lines(pack):
             continue
         bits = []
         if behind > 0:
-            bits.append("%d behind origin/main" % behind)
+            bits.append("%d behind origin default" % behind)
         if pending > 0:
             bits.append("%d decision-queue item(s)" % pending)
         lines.append("- %s: %s" % (env, ", ".join(bits)))

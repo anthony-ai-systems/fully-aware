@@ -283,5 +283,37 @@ class GitignoreGuard(unittest.TestCase):
             gs.assert_gitignored(repo, os.path.join(tmp, "outside.json"))
 
 
+class BehindDefaultBranch(unittest.TestCase):
+    """behind_origin_main (frozen key name) must track the DECLARED default
+    branch, not a hardcoded origin/main -- Atlas's default is master and its
+    currency was invisible under the hardcoded ref."""
+
+    @staticmethod
+    def _sha(repo):
+        return subprocess.run(
+            ["git", "-C", repo, "rev-parse", "HEAD"], check=True,
+            capture_output=True, text=True).stdout.strip()
+
+    def test_counts_against_declared_master(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(tmp)
+            _git(repo, "commit", "--allow-empty", "-m", "second")
+            _git(repo, "update-ref", "refs/remotes/origin/master",
+                 self._sha(repo))
+            _git(repo, "reset", "--hard", "HEAD~1")
+            surface, _ = gs.build_surface(
+                repo, _base_config(repo, default_branch="master"))
+            self.assertEqual(surface["identity"]["behind_origin_main"], 1)
+
+    def test_missing_declared_ref_degrades(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(tmp)
+            surface, _ = gs.build_surface(
+                repo, _base_config(repo, default_branch="master"))
+            marker = surface["identity"]["behind_origin_main"]
+            self.assertTrue(isinstance(marker, dict) and marker.get("degraded"))
+            self.assertIn("origin/master", marker.get("reason", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
