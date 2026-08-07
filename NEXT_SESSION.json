@@ -1,0 +1,8 @@
+{
+  "schema": "next-session/v2",
+  "session_date": "2026-08-07",
+  "project": "fully-aware",
+  "state": "M4 armed (05:45 boot-pack LaunchAgent + SessionStart digest hook live). Iris-memory P1 lane in flight: imprint bulk export + IMPRINT digest section, intake staleness probe, daily-scan provenance note. This file also clears the repo's own next_session boot-probe degradation.",
+  "launch_one_liner": "Boot from state/BOOT-DIGEST.md; lane state lives in ~/code/NEXT_SESSION-iris-ecosystem.json and the vault audit build-plan.",
+  "next_action_for_agent": "Check open PRs on anthony-ai-systems/fully-aware before starting new surface/digest work; LaunchAgents run from this checkout's main -- never edit main directly, use a worktree."
+}

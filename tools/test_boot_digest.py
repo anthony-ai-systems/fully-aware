@@ -283,6 +283,90 @@ class DailyBrief(unittest.TestCase):
             self.assertNotIn("Daily brief:", md)
 
 
+class ImprintSection(unittest.TestCase):
+    """IMPRINT summary: counts + pointer, outside the token cap (audit P1-1)."""
+
+    EXPORT = (
+        "# Imprint\n\n"
+        "## Call\n\n"
+        "- **urn:imprint:call:aaa** [captured · valid 2026-07-20T03:50:00Z..current] correct\n"
+        "- **urn:imprint:call:bbb** [captured · valid 2026-08-01T00:00:00Z..current] prefer\n\n"
+        "## Verdict\n\n"
+        "- **urn:imprint:verdict:ccc** [captured · valid 2026-08-05T10:00:00Z..current] body follows\n"
+        "## What you do\n"
+        "- **urn:imprint:fake:ddd** this bullet sits under a record-body heading\n"
+    )
+
+    def _summary(self, tmp, text=None):
+        path = os.path.join(tmp, "imprint-store.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(self.EXPORT if text is None else text)
+        return bd.load_imprint(path)
+
+    def test_counts_newest_and_pointer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self._summary(tmp)
+            self.assertEqual(s["records"], 3)
+            self.assertEqual(s["newest"], "2026-08-05")
+            md = bd.build_digest(NOW, _pack(), imprint=bd.imprint_lines(s))
+            self.assertIn("IMPRINT (captured judgment", md)
+            self.assertIn("~3 records", md)
+            self.assertIn("newest capture 2026-08-05", md)
+            self.assertIn(s["path"], md)
+
+    def test_bare_urn_mentions_in_record_bodies_do_not_count(self):
+        """Only the entry idiom (urn immediately followed by the bracketed
+        metadata run) counts; a bare urn bullet inside a captured record body
+        does not."""
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self._summary(tmp)
+            self.assertEqual(s["records"], 3)  # the fake:ddd bullet is excluded
+
+    def test_missing_or_empty_export_omits_section(self):
+        self.assertIsNone(bd.load_imprint("/nonexistent/imprint-store.md"))
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(self._summary(tmp, text="# Imprint\n\nno records\n"))
+        md = bd.build_digest(NOW, _pack(), imprint=bd.imprint_lines(None))
+        self.assertNotIn("IMPRINT", md)
+
+    def test_exempt_from_token_cap_and_pointer_stays_last(self):
+        """A pack big enough to trigger shedding must shed the same lines with
+        or without the imprint section, and the pack pointer stays last."""
+        big = _pack(warnings=["w%d %s" % (i, "x" * 100) for i in range(40)])
+        with tempfile.TemporaryDirectory() as tmp:
+            lines = bd.imprint_lines(self._summary(tmp))
+            with_imprint = bd.build_digest(NOW, big, imprint=lines)
+            without = bd.build_digest(NOW, big)
+        self.assertIn("IMPRINT (captured judgment", with_imprint)
+        # identical core: the imprint section never pressures the shed loop
+        for line in without.splitlines():
+            self.assertIn(line, with_imprint)
+        self.assertEqual(with_imprint.splitlines()[-1], bd.PACK_POINTER)
+
+    def test_byte_cap_is_enforced(self):
+        huge = ["IMPRINT (captured judgment -- bulk channel):"] + \
+               ["- filler %s" % ("y" * 200) for _ in range(100)]
+        # imprint_lines caps whatever it renders; feed an oversized summary
+        # through the cap loop by rendering a synthetic huge export instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            text = "## Call\n" + "".join(
+                "- **urn:imprint:call:%d** [valid 2026-08-0%dT00:00:00Z..] x\n"
+                % (i, (i % 7) + 1) for i in range(5000))
+            lines = bd.imprint_lines(bd.load_imprint(
+                self._write(tmp, text)))
+        rendered = "\n".join(lines).encode("utf-8")
+        self.assertLessEqual(len(rendered), bd.IMPRINT_CAP_BYTES)
+        self.assertLessEqual(
+            len("\n".join(huge[:2]).encode("utf-8")), bd.IMPRINT_CAP_BYTES,
+            "sanity: cap leaves room for the header + one line")
+
+    def _write(self, tmp, text):
+        path = os.path.join(tmp, "imprint-store.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+
 class DegradeNotAbort(unittest.TestCase):
     """A missing/unusable pack writes NOTHING and exits 0."""
 
@@ -576,13 +660,18 @@ class HookBody(unittest.TestCase):
 
     def test_digest_output_is_bounded(self):
         """The hook consumes a file it does not control: head -c, never cat."""
-        rc, out = self._run("x" * 10000 + "\n")
+        rc, out = self._run("x" * 20000 + "\n")
         self.assertEqual(rc, 0)
-        self.assertEqual(len(out), 4000)
+        self.assertEqual(len(out), 12000)
         with open(_HOOK, "r", encoding="utf-8") as fh:
             body = fh.read()
-        self.assertIn("head -c 4000", body)
+        self.assertIn("head -c 12000", body)
         self.assertNotRegex(body, r"(?m)^\s*cat ")
+
+    def test_bound_covers_both_generator_caps(self):
+        """12000 >= core token cap (~2000 B) + IMPRINT_CAP_BYTES, with margin."""
+        self.assertGreaterEqual(
+            12000, bd.HARD_CAP_TOKENS * 4 + bd.IMPRINT_CAP_BYTES)
 
     def test_absent_digest_prints_nothing(self):
         rc, out = self._run(None)

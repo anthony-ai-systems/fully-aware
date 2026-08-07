@@ -374,6 +374,14 @@ codex_resume() {
 }
 
 # fable_review <prompt_file> <out_file> <raw_log>
+#
+# PROVENANCE (audit P1-6): `claude -p` boots with Anthony's user-level hooks --
+# including the imprint SessionStart injection and the fully-aware boot digest.
+# The review seat is therefore SEASONED with captured-judgment memory and boot
+# state, not a clean-room reader of the scan. Declared deliberately rather than
+# suppressed: the seat reviews Anthony's repos, and Anthony's captured judgment
+# is signal for that job. If a clean-room seat is ever wanted instead, strip
+# the hooks for this invocation rather than deleting this note.
 fable_review() {
     if [ "${STUB}" = "1" ]; then
         printf 'stub-fable-review\n' > "$3"

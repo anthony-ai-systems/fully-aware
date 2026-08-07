@@ -31,12 +31,21 @@ Content, in order: header (pack timestamp + age, ``STALE (>36h)`` when old),
 WARNINGS (count + one compressed line each), OPEN ITEMS (count + first sentence
 each), ATTENTION (only repos behind their origin default branch or carrying decision-queue
 items -- healthy repos are skipped entirely), an optional daily-brief pointer,
-and the full-pack pointer.
+an optional IMPRINT summary, and the full-pack pointer.
 
 Hard cap: 500 tokens (chars/4 estimate, the assembler's idiom). Overflow sheds
 lowest-priority content first -- open items, then warnings, then attention lines
 -- each with an explicit ``[truncated]`` marker. The header, the daily-brief
 pointer, and the full-pack pointer are NEVER shed.
+
+The IMPRINT section (audit P1-1) sits OUTSIDE the 500-token cap with its own
+independent byte cap. It summarizes ``state/imprint-store.md`` -- the bulk
+markdown export morning-pack.sh writes from the imprint store. The export is
+megabytes of URN-dense raw records (unfiltered by the pending capture-filter),
+so the digest deliberately carries a compact SUMMARY (approximate record count
++ newest capture timestamp) and the absolute pointer, never a head-slice of the
+content. Selection policy for actual record content at boot is an open ruling
+(audit R2); until it lands, the export file is the grep-on-demand channel.
 
 Determinism: wall-clock enters only through the pack-age arithmetic, and
 ``build_digest`` takes an injectable ``now``.
@@ -54,6 +63,11 @@ import sys
 PACK_SCHEMA = "boot-pack/v1"
 
 HARD_CAP_TOKENS = 500
+
+# Independent cap for the IMPRINT section (mirrors session-digest-hook.sh's
+# byte-cap idiom). The summary is ~5 lines in practice; the cap is a guard
+# against a pathological export, not a target.
+IMPRINT_CAP_BYTES = 4000
 
 # A pack older than this is stale enough that the session must not trust it
 # (the daily LaunchAgent runs at 05:45, so >36h means a missed run).
@@ -150,6 +164,70 @@ def load_pack(path):
         return None, ("boot pack at %s is schema %r, expected %s"
                       % (path, pack.get("schema"), PACK_SCHEMA))
     return pack, None
+
+
+# A record entry is a top-level bullet whose urn is immediately followed by the
+# bracketed metadata run (``** [captured · ... valid ...]``). Bare urn mentions
+# inside captured record BODIES lack the bracket and must not count. No
+# per-section attribution: record bodies embed arbitrary markdown, including
+# ``## ...`` headings indistinguishable from the export's own section headings,
+# so any section split would misattribute records (verified against the real
+# export). Total + newest is what survives that data.
+_IMPRINT_ENTRY_RE = re.compile(r"^- \*\*urn:imprint:[a-z]+:[0-9a-f-]+\*\* \[")
+_IMPRINT_VALID_RE = re.compile(r"valid (\d{4}-\d{2}-\d{2})")
+
+
+def load_imprint(path):
+    """Compact summary of the imprint markdown export, or None.
+
+    Returns ``{"records": n, "newest": "YYYY-MM-DD"|None, "bytes": n,
+    "path": abspath}``. The count is approximate by design: a captured record
+    body that QUOTES other records (handoffs, past exports) contributes their
+    bullets too. The digest says "~N records" accordingly.
+
+    Degrades to None on a missing/unreadable/record-free file -- the digest
+    simply omits the section; morning-pack already warned about a failed
+    export.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    records = 0
+    newest = None
+    try:
+        size = os.path.getsize(path)
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                if _IMPRINT_ENTRY_RE.match(raw):
+                    records += 1
+                    v = _IMPRINT_VALID_RE.search(raw)
+                    if v and (newest is None or v.group(1) > newest):
+                        newest = v.group(1)
+    except OSError:
+        return None
+    if not records:
+        return None
+    return {"records": records, "newest": newest, "bytes": size,
+            "path": os.path.abspath(path)}
+
+
+def imprint_lines(summary):
+    """Render the IMPRINT section lines from a load_imprint summary."""
+    if not summary:
+        return []
+    newest = summary["newest"] or "unknown"
+    mb = summary["bytes"] / (1024.0 * 1024.0)
+    lines = [
+        "IMPRINT (captured judgment -- bulk channel):",
+        "- ~%d records; newest capture %s" % (summary["records"], newest),
+        "- full export: %s (%.1f MB; grep on demand, `imprint history <urn>` "
+        "for provenance)" % (summary["path"], mb),
+        "",
+    ]
+    # Independent byte cap (defensive; the summary is ~5 lines in practice).
+    while len("\n".join(lines).encode("utf-8")) > IMPRINT_CAP_BYTES \
+            and len(lines) > 1:
+        lines.pop()
+    return lines
 
 
 def load_daily_brief(path):
@@ -273,8 +351,12 @@ def _section(lines, title, total, truncated):
     return out
 
 
-def render_md(model):
-    """Render the digest markdown from the model."""
+def render_md(model, imprint=None):
+    """Render the digest markdown from the model.
+
+    ``imprint`` is a pre-rendered line list (see ``imprint_lines``); it sits
+    between the daily-brief line and the pack pointer.
+    """
     if model["age_hours"] is None:
         age = "age unknown"
     else:
@@ -294,19 +376,31 @@ def render_md(model):
         lines.append("Daily brief: %s (%s)"
                      % (model["daily_brief"],
                         os.path.abspath(model["daily_brief_path"])))
+    if imprint:
+        if model["daily_brief"]:
+            lines.append("")
+        lines.extend(imprint)
     lines.append(PACK_POINTER)
     return "\n".join(lines) + "\n"
 
 
 def build_digest(now, pack, daily_brief=None, daily_brief_path=None,
-                 cap_tokens=HARD_CAP_TOKENS):
-    """Build the digest markdown. ``now`` is injectable for determinism."""
+                 cap_tokens=HARD_CAP_TOKENS, imprint=None):
+    """Build the digest markdown. ``now`` is injectable for determinism.
+
+    The 500-token shed loop runs WITHOUT the imprint section: the IMPRINT
+    summary rides outside the token cap on its own byte cap (see module
+    docstring), so it must never pressure the shed loop into dropping
+    warnings/attention lines that the cap exists to protect.
+    """
     model = collect(now, pack, daily_brief, daily_brief_path)
     md = render_md(model)
     while est_tokens(md) > cap_tokens:
         if not _shed_one(model):
             break  # header + pointers alone are already over cap; render honestly
         md = render_md(model)
+    if imprint:
+        md = render_md(model, imprint=imprint)
     return md
 
 
@@ -353,6 +447,10 @@ def main(argv=None):
     ap.add_argument("--daily-scan",
                     default=_default("state", "daily-scan", "LATEST.md"),
                     help="optional daily-scan brief to point at (absent -> no line)")
+    ap.add_argument("--imprint",
+                    default=_default("state", "imprint-store.md"),
+                    help="imprint markdown export to summarize (absent -> no "
+                         "IMPRINT section)")
     ap.add_argument("--out", default=_default("state", "BOOT-DIGEST.md"))
     ap.add_argument("--stdout", action="store_true",
                     help="write the digest to stdout (skips the file write)")
@@ -370,7 +468,8 @@ def main(argv=None):
     md = build_digest(now, pack,
                       daily_brief=load_daily_brief(args.daily_scan),
                       daily_brief_path=args.daily_scan,
-                      cap_tokens=args.cap_tokens)
+                      cap_tokens=args.cap_tokens,
+                      imprint=imprint_lines(load_imprint(args.imprint)))
 
     if args.stdout:
         sys.stdout.write(md)
