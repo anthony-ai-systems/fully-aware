@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    # Org standard runner; fall back to ubuntu-latest if Blacksmith doesn't pick the job up.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3.12 is the floor this suite was verified against (also passes on 3.11
+      # and 3.14); tools/ imports stdlib only, so nothing else is pinned.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The suite has no third-party imports beyond the runner itself.
+      - name: Install test runner
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Run tests
+        run: python -m pytest tools/
