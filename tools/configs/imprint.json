@@ -28,7 +28,18 @@
       "probe": {"kind": "file-exists", "path": "pyproject.toml"}
     }
   ],
-  "verification": [],
+  "verification": [
+    {
+      "name": "imprint health",
+      "notes": "imprint runtime (store/WAL/hooks) health -- exit code only, content-free; repo SHA says nothing about whether the memory system is capturing. Guards the silent-WAL-lockout failure mode (bit twice Jul 2026).",
+      "probe": {
+        "kind": "script-exit-code",
+        "script": "/Users/anthonyflores/.local/lib/imprint-local/venv/bin/imprint",
+        "args": ["health"],
+        "timeout": 30
+      }
+    }
+  ],
   "decisions": [],
   "next_lanes": [],
   "do_not_read": [
