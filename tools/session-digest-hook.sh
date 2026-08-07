@@ -26,9 +26,17 @@ STALE_SECONDS=$((36 * 3600))
 
 [ -f "${DIGEST}" ] || exit 0
 
-# BSD stat (macOS): -f %m is the mtime in epoch seconds.
-mtime="$(stat -f %m "${DIGEST}" 2>/dev/null)" || exit 0
-[ -n "${mtime}" ] || exit 0
+# mtime in epoch seconds. GNU coreutils spells it -c %Y; BSD stat (macOS, where
+# this hook is installed) spells it -f %m. Each rejects the other's flag -- and
+# GNU's -f means "filesystem status", so it prints unrelated fields on stdout
+# before failing. Hence: try both, and only accept an all-digits answer.
+mtime="$(stat -c %Y "${DIGEST}" 2>/dev/null)"
+case "${mtime}" in
+    ''|*[!0-9]*) mtime="$(stat -f %m "${DIGEST}" 2>/dev/null)" ;;
+esac
+case "${mtime}" in
+    ''|*[!0-9]*) exit 0 ;;
+esac
 
 age=$(( $(date +%s) - mtime ))
 if [ "${age}" -ge "${STALE_SECONDS}" ]; then
