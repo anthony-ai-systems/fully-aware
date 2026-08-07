@@ -28,7 +28,24 @@
       "probe": {"kind": "file-exists", "path": "knowledge-base/handoffs"}
     }
   ],
-  "verification": [],
+  "verification": [
+    {
+      "name": "granola intake freshness",
+      "notes": "IRIS granola-intake pulse liveness -- the consumer is an LLM automation (Codex thread 019fd4e5); if the thread dies, intake halts silently. Exit-code only, content-free. Stale = committed_at older than 24h.",
+      "probe": {
+        "kind": "script-exit-code",
+        "script": "/usr/bin/python3",
+        "args": [
+          "/Users/anthonyflores/code/fully-aware/tools/check-intake-staleness.py",
+          "--state",
+          "/Users/anthonyflores/Library/Application Support/IRIS/granola-intake/state.json",
+          "--max-age-hours",
+          "24"
+        ],
+        "timeout": 15
+      }
+    }
+  ],
   "decisions": [],
   "next_lanes": [],
   "do_not_read": [],
