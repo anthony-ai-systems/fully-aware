@@ -80,6 +80,26 @@ PYEOF
 done
 
 echo "morning-pack: surfaces regenerated -- ${ok} ok, ${failed} failed, ${skipped} non-repo config(s) skipped."
+
+# Imprint bulk export (audit P1-1): dump the captured-judgment store to a local
+# markdown file so sessions have an on-disk bulk channel (grep on demand) and
+# the digest step below can fold a compact IMPRINT summary in. The export
+# is megabytes of raw records -- it stays in gitignored state/, never in the
+# pack itself. Doctrine note: this is CONTENT alongside the surface/v1 +
+# next-session/v2 contract, an audit-sanctioned deviation (2026-08-07).
+#
+# Degrade-not-abort, same as the surface loop: a dead imprint venv or a failed
+# export logs a WARNING and the pack proceeds without a refreshed store file.
+IMPRINT_PY="/Users/anthonyflores/.local/lib/imprint-local/venv/bin/python"
+if [ -x "${IMPRINT_PY}" ]; then
+    echo "morning-pack: exporting imprint store"
+    "${IMPRINT_PY}" -m imprint.cli export --format markdown \
+        --output "${REPO_ROOT}/state/imprint-store.md" \
+        || echo "morning-pack: WARNING imprint export FAILED (exit $?); continuing" >&2
+else
+    echo "morning-pack: WARNING imprint venv missing (${IMPRINT_PY}); skipping imprint export" >&2
+fi
+
 echo "morning-pack: assembling boot pack"
 "${PY}" "${ASM}" "$@"
 asm_rc=$?

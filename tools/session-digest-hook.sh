@@ -36,10 +36,12 @@ if [ "${age}" -ge "${STALE_SECONDS}" ]; then
     exit 0
 fi
 
-# head -c, not cat: the generator caps the digest at ~500 tokens, but this hook
-# is a CONSUMER of a file it does not control (hand-edited, half-written, or a
-# future generator with a looser cap). 4000 bytes is ~8x the intended digest --
-# generous for anything legitimate, bounded against dumping a large file into
-# every session's opening context.
-head -c 4000 "${DIGEST}"
+# head -c, not cat: the generator caps the digest at ~500 tokens plus a
+# byte-capped IMPRINT section (<=4000 B, boot-digest.py IMPRINT_CAP_BYTES), but
+# this hook is a CONSUMER of a file it does not control (hand-edited,
+# half-written, or a future generator with a looser cap). 12000 bytes is ~2x
+# the summed generator caps (~2000 B core + 4000 B imprint) -- generous for
+# anything legitimate, bounded against dumping a large file into every
+# session's opening context.
+head -c 12000 "${DIGEST}"
 exit 0
