@@ -44,6 +44,22 @@
         ],
         "timeout": 15
       }
+    },
+    {
+      "name": "agent-sessions intake freshness",
+      "notes": "IRIS agent-sessions pulse liveness -- same consumer (Codex thread 019fd4e5) and same silent-failure mode as granola-intake. Exit-code only, content-free. Stale = committed_at older than 24h. Deferred by PR #10 until V0 (first pulse write); V0 landed 2026-08-07 13:09 PDT.",
+      "probe": {
+        "kind": "script-exit-code",
+        "script": "/usr/bin/python3",
+        "args": [
+          "/Users/anthonyflores/code/fully-aware/tools/check-intake-staleness.py",
+          "--state",
+          "/Users/anthonyflores/Library/Application Support/IRIS/agent-sessions/state.json",
+          "--max-age-hours",
+          "24"
+        ],
+        "timeout": 15
+      }
     }
   ],
   "decisions": [],
