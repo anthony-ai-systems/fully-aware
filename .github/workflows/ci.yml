@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,6 +17,7 @@ jobs:
   tests:
     # Org standard runner; fall back to ubuntu-latest if Blacksmith doesn't pick the job up.
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
