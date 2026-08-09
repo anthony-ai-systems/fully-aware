@@ -142,7 +142,8 @@ class Fixture(unittest.TestCase):
             fh.write("# pack\n")
 
     def build(self, runner=_fake_runner, now=NOW):
-        # A frozen clock: generated_at now travels inside pid claims too.
+        # A frozen clock: the HTML stamps generated_at onto pid claims, so the
+        # rendered assertions need a known value.
         return am.build_map(self.home, self.repo, runner=runner, now=now)
 
 
@@ -161,12 +162,13 @@ class TestProbes(Fixture):
         self.assertEqual(daemon["subtitle"], "keep-alive daemon")
         self.assertEqual(nodes["la:com.anthony.unloaded"]["status"], "unarmed")
 
-    def test_running_pid_claim_is_timestamped(self):
-        # A bare "running (pid N)" goes stale the moment the daemon restarts;
-        # the claim must carry the clock it was true at.
+    def test_running_pid_claim_is_bare_in_the_json(self):
+        # The claim goes stale the moment the daemon restarts, but the clock it
+        # was true at is generated_at -- the document's only wall-clock field.
+        # The HTML composes the stamped claim from it at render time.
         nodes = {n["id"]: n for n in self.build()["nodes"]}
         self.assertEqual(nodes["la:com.anthony.daemon"]["detail"]["status_note"],
-                         "running as of 2026-08-08T12:00:00+00:00 (pid 123)")
+                         "running (pid 123)")
 
     def test_saga_prefix_is_shown(self):
         nodes = {n["id"]: n for n in self.build()["nodes"]}
@@ -253,6 +255,21 @@ class TestProbes(Fixture):
         self.assertTrue(exc["degraded"])
         self.assertIn("launchctl_failed", exc["reason"])
         self.assertEqual(exc["count"], 0)
+
+    def test_unreadable_plist_is_drawn_and_not_also_counted_excluded(self):
+        # "Excluded" means loaded, non-furniture and NOT drawn. A loaded job
+        # whose plist is corrupt IS drawn (as a degraded node), so counting it
+        # excluded too would report the same job twice, in contradiction.
+        la = os.path.join(self.home, "Library", "LaunchAgents")
+        with open(os.path.join(la, "com.anthony.daemon.plist"), "wb") as fh:
+            fh.write(b"\x00 not a plist \x00")
+        data = self.build()
+        node = {n["id"]: n for n in data["nodes"]}["la:com.anthony.daemon"]
+        self.assertTrue(node["degraded"])
+        self.assertEqual(node["subtitle"], "unreadable plist")
+        exc = data["launchd_excluded"]
+        self.assertNotIn("com.anthony.daemon", exc["labels"])
+        self.assertEqual(exc["count"], 2)
 
     def test_third_party_agents_filtered_by_default(self):
         la = os.path.join(self.home, "Library", "LaunchAgents")
@@ -352,6 +369,18 @@ class TestAssembly(Fixture):
         self.assertEqual(json.dumps(a, sort_keys=True),
                          json.dumps(b, sort_keys=True))
 
+    def test_two_different_clocks_carve_to_the_same_document(self):
+        # The determinism contract: generated_at is the ONLY wall-clock field,
+        # so carving it alone must make two runs identical. Two DIFFERENT
+        # clocks are what makes this a guard -- a timestamp that leaked into
+        # any node field survives the carve and fails here.
+        a = self.build(now=NOW)
+        b = self.build(now=NOW + datetime.timedelta(hours=7, seconds=13))
+        self.assertNotEqual(a["generated_at"], b["generated_at"])
+        a["generated_at"] = b["generated_at"] = "CARVED"
+        self.assertEqual(json.dumps(a, sort_keys=True),
+                         json.dumps(b, sort_keys=True))
+
     def test_schema_and_lanes(self):
         data = self.build()
         self.assertEqual(data["schema"], "automation-map/v1")
@@ -371,6 +400,24 @@ class TestHtml(Fixture):
         embedded = page.split("id='map-data'>")[1].split("</script>")[0]
         self.assertEqual(json.loads(embedded.replace("<\\/", "</"))["schema"],
                          "automation-map/v1")
+
+    def test_html_stamps_the_clock_onto_pid_claims_only(self):
+        data = self.build()
+        page = am.render_html(data)
+        embedded = json.loads(page.split("id='map-data'>")[1]
+                              .split("</script>")[0].replace("<\\/", "</"))
+        notes = {n["id"]: (n.get("detail") or {}).get("status_note")
+                 for n in embedded["nodes"]}
+        self.assertEqual(notes["la:com.anthony.daemon"],
+                         "running as of 2026-08-08T12:00:00+00:00 (pid 123)")
+        # notes that make no pid claim are left alone...
+        self.assertEqual(notes["la:com.anthony.broken"], "loaded, last exit 1")
+        self.assertEqual(notes["la:com.anthony.unloaded"],
+                         "not loaded in launchctl")
+        # ...and rendering never edits the document it was handed.
+        self.assertEqual(
+            {n["id"]: n for n in data["nodes"]}["la:com.anthony.daemon"]
+            ["detail"]["status_note"], "running (pid 123)")
 
     def test_html_footnotes_the_launchd_exclusions(self):
         markup = am.render_html(self.build()).split("id='map-data'>")[0]
@@ -398,6 +445,20 @@ class TestHtml(Fixture):
         markup = page.split("id='map-data'>")[0]
         self.assertNotIn("<img src=x", markup)
         self.assertIn("&lt;img src=x", markup)
+
+
+class TestSummary(Fixture):
+
+    def test_summary_counts_the_exclusions(self):
+        line = am._stderr_summary(self.build(), "/tmp/map.html")
+        self.assertIn("2 launchd jobs excluded", line)
+
+    def test_summary_says_unknown_when_the_probe_degraded(self):
+        # count is 0 when launchctl failed, but 0 is not the truth -- the
+        # truth is that nothing is known about what was excluded.
+        line = am._stderr_summary(self.build(_failing_runner), "/tmp/map.html")
+        self.assertIn("launchd exclusions unknown", line)
+        self.assertNotIn("0 launchd jobs excluded", line)
 
 
 if __name__ == "__main__":

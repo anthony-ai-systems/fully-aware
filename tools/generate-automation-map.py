@@ -20,8 +20,10 @@ Provenance: every node carries ``source`` (the path or command probed) and a
 ``{"degraded": true, "reason": ...}`` -- probes are NEVER silently omitted.
 Every loaded launchd job the map does not draw is counted and NAMED in the
 top-level ``launchd_excluded`` field and footnoted in the HTML: no silent caps.
-Live claims that decay (a running pid) are stamped with ``generated_at`` in
-the claim text, so a stale map reads as stale rather than as fact.
+Live claims that decay (a running pid) are stamped with ``generated_at`` when
+RENDERED -- the HTML composes "running as of <generated_at> (pid N)" out of the
+document's own clock -- so a stale map reads as stale rather than as fact
+without a second wall-clock field entering the JSON.
 
 Determinism: nodes sorted by (lane, id); ``generated_at`` is the only
 wall-clock field and is CARVED before any diff comparison. Two runs on an
@@ -213,9 +215,8 @@ def _load_plist(path):
         return plistlib.loads(out.stdout)
 
 
-def probe_launchagents(home, runner, all_agents=False, generated_at=""):
-    """-> (nodes, launchd_excluded). ``generated_at`` timestamps live-pid
-    claims, which go stale the moment a daemon restarts."""
+def probe_launchagents(home, runner, all_agents=False):
+    """-> (nodes, launchd_excluded)."""
     la_dir = os.path.join(home, "Library", "LaunchAgents")
     loaded = _launchctl_state(runner)
     loaded_degraded = isinstance(loaded, dict) and loaded.get("degraded")
@@ -227,13 +228,18 @@ def probe_launchagents(home, runner, all_agents=False, generated_at=""):
         try:
             pl = _load_plist(path)
         except Exception as exc:  # noqa: BLE001
+            # No Label to read, so fall back to the filename stem (launchd's
+            # own convention). It counts as rendered: the job IS drawn here,
+            # and "excluded" means loaded, non-furniture and NOT drawn.
+            label = os.path.basename(path)[:-6]
             nodes.append({
-                "id": "la:" + os.path.basename(path),
-                "lane": "launchd", "title": os.path.basename(path),
+                "id": "la:" + label,
+                "lane": "launchd", "title": label,
                 "subtitle": "unreadable plist", "executor": "script",
                 "status": "unknown", "source": path,
                 "degraded": True, "reason": str(exc),
             })
+            rendered_labels.add(label)
             continue
         label = pl.get("Label", os.path.basename(path)[:-6])
         args = pl.get("ProgramArguments") or [pl.get("Program", "?")]
@@ -243,10 +249,9 @@ def probe_launchagents(home, runner, all_agents=False, generated_at=""):
             if label in loaded:
                 pid, last_exit = loaded[label]
                 if pid is not None:
-                    # The pid is only true as of the probe; carry the clock.
-                    status = "ok"
-                    status_note = "running as of %s (pid %s)" % (generated_at,
-                                                                 pid)
+                    # Deterministic here; the HTML stamps the document's
+                    # generated_at onto this claim at render time.
+                    status, status_note = "ok", "running (pid %s)" % pid
                 elif last_exit in (None, "0"):
                     status, status_note = "ok", "loaded, last exit 0"
                 else:
@@ -444,7 +449,7 @@ def build_map(home, repo_root, runner=_default_runner, now=None,
     generated_at = (now or datetime.datetime.now(datetime.timezone.utc)
                     ).isoformat(timespec="seconds")
     la_nodes, launchd_excluded = probe_launchagents(
-        home, runner, all_agents=all_agents, generated_at=generated_at)
+        home, runner, all_agents=all_agents)
     nodes = (probe_claude_hooks(home) + la_nodes +
              probe_codex_automations(home) + probe_artifacts(home) +
              probe_environments(repo_root) + probe_skills(home))
@@ -625,7 +630,32 @@ def _excluded_footnote(exc):
                html.escape("*, ".join(LAUNCHD_PREFIXES))))
 
 
+_PID_CLAIM = re.compile(r"^running \(pid (\S+)\)$")
+
+
+def _stamped_nodes(data):
+    """Nodes with live-pid claims stamped with the document's own clock.
+
+    A pid is true only as of the probe, so the rendered claim has to carry the
+    time it was true at; the JSON keeps the bare, deterministic note so
+    ``generated_at`` stays the document's single wall-clock field. Only notes
+    that actually make a pid claim are stamped -- nothing else is a live claim.
+    """
+    out = []
+    for n in data["nodes"]:
+        m = _PID_CLAIM.match((n.get("detail") or {}).get("status_note") or "")
+        if not m:
+            out.append(n)
+            continue
+        node = dict(n, detail=dict(n["detail"]))
+        node["detail"]["status_note"] = "running as of %s (pid %s)" % (
+            data["generated_at"], m.group(1))
+        out.append(node)
+    return out
+
+
 def render_html(data):
+    data = dict(data, nodes=_stamped_nodes(data))
     lanes_html = []
     for lane in data["lanes"]:
         cards = []
@@ -676,6 +706,19 @@ def render_html(data):
 # CLI
 # --------------------------------------------------------------------------- #
 
+def _stderr_summary(data, out_html):
+    """The one-line run summary. A degraded exclusion probe reports the truth
+    (unknown), never 0 -- the same rule the HTML footnote follows."""
+    exc = data["launchd_excluded"]
+    excluded = ("launchd exclusions unknown" if exc.get("degraded")
+                else "%d launchd jobs excluded" % exc["count"])
+    degraded = sum(1 for n in data["nodes"] if n.get("degraded"))
+    failing = sum(1 for n in data["nodes"] if n["status"] == "failing")
+    return ("automation-map: %d nodes, %d edges, %d degraded, %d failing, "
+            "%s -> %s\n" % (len(data["nodes"]), len(data["edges"]), degraded,
+                            failing, excluded, out_html))
+
+
 def main(argv=None):
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -705,13 +748,7 @@ def main(argv=None):
         fh.write("\n")
     with open(args.out_html, "w", encoding="utf-8") as fh:
         fh.write(render_html(data))
-    degraded = sum(1 for n in data["nodes"] if n.get("degraded"))
-    failing = sum(1 for n in data["nodes"] if n["status"] == "failing")
-    sys.stderr.write("automation-map: %d nodes, %d edges, %d degraded, "
-                     "%d failing, %d launchd jobs excluded -> %s\n"
-                     % (len(data["nodes"]), len(data["edges"]), degraded,
-                        failing, data["launchd_excluded"]["count"],
-                        args.out_html))
+    sys.stderr.write(_stderr_summary(data, args.out_html))
     return 0
 
 
