@@ -479,22 +479,57 @@ def adapt_E(records: List[Dict[str, Any]], environment: str,
     return v2
 
 
+# Free-form field names seen in files that carry the v2 schema tag but not the
+# v2 field set. Their presence with an empty summary triggers the gap fill.
+_V2_FALLBACK_KEYS = ("session_date", "state", "launch_one_liner",
+                     "next_action_for_agent")
+
+
 def adapt_v2(data: Dict[str, Any], environment: str) -> Dict[str, Any]:
-    """Passthrough + validation for an already-v2 object."""
+    """Passthrough + validation for an already-v2 object.
+
+    Several on-disk files are tagged ``next-session/v2`` but actually carry the
+    free-form fallback field set (session_date / state / launch_one_liner /
+    next_action_for_agent). Passthrough alone normalizes those to an empty
+    summary, so their authored content never reaches a reader. When the summary
+    comes out empty and fallback-shape keys are present, the gaps are filled
+    with the same mappings ``adapt_fallback`` uses. Files that genuinely conform
+    to v2 are untouched.
+    """
     out = dict(data)
     out["schema"] = V2_SCHEMA
     if not _s(out.get("environment")):
         out["environment"] = environment
-    if out.get("status") not in V2_STATUS:
-        out["status"] = _norm_status(out.get("status")) or "parked"
+    status = (out.get("status") if out.get("status") in V2_STATUS
+              else _norm_status(out.get("status")))
     na = out.get("next_action")
     if not isinstance(na, dict):
-        out["next_action"] = {"who": "", "what": _s(na)}
+        na = {"who": "", "what": _s(na)}
     else:
+        na = dict(na)
         na.setdefault("who", "")
         na.setdefault("what", "")
+    out["next_action"] = na
     out.setdefault("written_at", "")
     out.setdefault("summary", "")
+
+    if not _s(out["summary"]) and any(k in out for k in _V2_FALLBACK_KEYS):
+        out["summary"] = _first_nonempty(out.get("state"), out.get("reason"),
+                                         out.get("project"), out.get("lane"))
+        if status is None:
+            status = _norm_status(out.get("state"), out.get("lane"),
+                                  out.get("reason"))
+        if not _s(out["written_at"]):
+            out["written_at"] = _first_nonempty(out.get("written"),
+                                                out.get("date"),
+                                                out.get("session_date"))
+        if not _s(na["what"]):
+            na["what"] = _first_nonempty(
+                out.get("next_action_for_agent"), out.get("launch_one_liner"),
+                "; ".join(_strlist(out.get("next"))),
+                "; ".join(_strlist(out.get("next_actions"))))
+
+    out["status"] = status if status in V2_STATUS else "parked"
     return out
 
 

@@ -54,6 +54,18 @@ The parser ships one adapter per legacy schema. Mapping (per M1 spec §1.3):
 
 Anything not in the table above lands under `legacy` verbatim.
 
+### v2-tagged files that carry the free-form shape — gap fill
+Several on-disk files declare `"schema": "next-session/v2"` but hold the
+free-form fallback field set (`session_date` / `state` / `launch_one_liner` /
+`next_action_for_agent`) instead of the v2 fields. Plain passthrough normalized
+those to an **empty summary**, so their authored content — including parked
+directives — never reached a reader. `adapt_v2` therefore gap-fills: when the
+summary comes out empty **and** a fallback-shape key is present, the missing
+fields are filled with the same mappings `adapt_fallback` uses (`state` →
+`summary`/`status`, `session_date` → `written_at`, `next_action_for_agent` (else
+`launch_one_liner`) → `next_action.what`). Files that genuinely conform to v2
+are untouched: their own non-empty values always win.
+
 ### Schema C — excluded by path rule
 Any file matching `*/tests/fixtures/heartbeat-bundle/NEXT_SESSION.json` is a
 committed test fixture and is **excluded** from normalization (emitted as

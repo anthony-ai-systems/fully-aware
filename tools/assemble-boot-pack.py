@@ -64,6 +64,9 @@ SURFACE_SCHEMA = "surface/v1"
 
 HARD_CAP_TOKENS = 50000
 
+# Per-repo next-session line: one line, hard-truncated (token-budget discipline).
+NEXT_SESSION_SUMMARY_CHARS = 200
+
 # Staleness thresholds (seconds).
 STALE_TOPOLOGY = 7 * 24 * 3600
 STALE_SURFACES = 24 * 3600
@@ -541,6 +544,40 @@ def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir):
     }
 
 
+def _oneline(v):
+    """Coerce a value to a single whitespace-collapsed line ("" for None)."""
+    if v is None:
+        return ""
+    return " ".join(str(v).split())
+
+
+def _project_next_session(data):
+    """Reduce surface.next_session to {status, summary, as_of, source} or None.
+
+    A degraded probe is already reported in the WARNING block, so only a parsed
+    record projects. The summary is collapsed to a single line and hard-cut at
+    NEXT_SESSION_SUMMARY_CHARS: this tier is one line per repo, never a block.
+    """
+    block = data.get("next_session")
+    if not isinstance(block, dict) or block.get("degraded"):
+        return None
+    norm = block.get("normalized")
+    if not isinstance(norm, dict):
+        return None
+    status = _oneline(norm.get("status"))
+    summary = _oneline(norm.get("summary"))
+    if not status and not summary:
+        return None
+    if len(summary) > NEXT_SESSION_SUMMARY_CHARS:
+        summary = summary[:NEXT_SESSION_SUMMARY_CHARS - 3].rstrip() + "..."
+    return {
+        "status": status,
+        "summary": summary,
+        "as_of": _oneline(block.get("as_of")) or _oneline(norm.get("written_at")),
+        "source": _oneline(block.get("source")) or "next_session.py",
+    }
+
+
 def _project_surface(env, data, path):
     """Reduce a surface/v1 doc to the boot-pack's per-repo projection."""
     ident = data.get("identity", {}) if isinstance(data.get("identity"), dict) else {}
@@ -565,6 +602,7 @@ def _project_surface(env, data, path):
         "open_prs": prs,
         "verification": ver,
         "decisions": decisions,
+        "next_session": _project_next_session(data),
         "next_lanes": next_lanes,
         "next_lanes_truncated": 0,
     }
@@ -622,6 +660,11 @@ def render_surfaces(model, now):
                 lines.append("    - %s %s"
                              % (c.get("claim", ""),
                                 tag(c.get("source", ""), c.get("as_of", ""))))
+        nxt = s.get("next_session")
+        if nxt:
+            lines.append("    - next-session[%s]: %s %s"
+                         % (nxt["status"] or "?", nxt["summary"] or "(no summary)",
+                            tag(nxt["source"], nxt["as_of"])))
         for p in s["open_prs"] if isinstance(s["open_prs"], list) else []:
             if isinstance(p, dict) and not p.get("degraded"):
                 lines.append("    - PR #%s %s -> %s %s"
