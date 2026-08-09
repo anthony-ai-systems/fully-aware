@@ -284,7 +284,14 @@ class DailyBrief(unittest.TestCase):
 
 
 class ImprintSection(unittest.TestCase):
-    """IMPRINT summary: counts + pointer, outside the token cap (audit P1-1)."""
+    """IMPRINT summary: counts + pointer, outside the token cap (audit P1-1).
+
+    Every render passes an explicit ``db_path``: the live imprint store exists
+    on Anthony's box and not in CI, and a test that reads whichever it lands on
+    is a test that reports the machine, not the code.
+    """
+
+    NO_DB = "/nonexistent/imprint.db"
 
     EXPORT = (
         "# Imprint\n\n"
@@ -297,22 +304,30 @@ class ImprintSection(unittest.TestCase):
         "- **urn:imprint:fake:ddd** this bullet sits under a record-body heading\n"
     )
 
-    def _summary(self, tmp, text=None):
+    def _summary(self, tmp, text=None, age_hours=0):
         path = os.path.join(tmp, "imprint-store.md")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(self.EXPORT if text is None else text)
+        # NOW is a fixed synthetic clock; age the export relative to IT so the
+        # freshness arithmetic never depends on the real wall clock.
+        stamp = NOW.timestamp() - age_hours * 3600
+        os.utime(path, (stamp, stamp))
         return bd.load_imprint(path)
+
+    def _lines(self, summary, db_path=None):
+        return bd.imprint_lines(summary, now=NOW, db_path=db_path or self.NO_DB)
 
     def test_counts_newest_and_pointer(self):
         with tempfile.TemporaryDirectory() as tmp:
             s = self._summary(tmp)
             self.assertEqual(s["records"], 3)
             self.assertEqual(s["newest"], "2026-08-05")
-            md = bd.build_digest(NOW, _pack(), imprint=bd.imprint_lines(s))
+            md = bd.build_digest(NOW, _pack(), imprint=self._lines(s))
             self.assertIn("IMPRINT (captured judgment", md)
             self.assertIn("~3 records", md)
             self.assertIn("newest capture 2026-08-05", md)
             self.assertIn(s["path"], md)
+            self.assertNotIn("WARNING", md)
 
     def test_bare_urn_mentions_in_record_bodies_do_not_count(self):
         """Only the entry idiom (urn immediately followed by the bracketed
@@ -322,19 +337,68 @@ class ImprintSection(unittest.TestCase):
             s = self._summary(tmp)
             self.assertEqual(s["records"], 3)  # the fake:ddd bullet is excluded
 
-    def test_missing_or_empty_export_omits_section(self):
+    def test_missing_export_omits_the_section(self):
         self.assertIsNone(bd.load_imprint("/nonexistent/imprint-store.md"))
-        with tempfile.TemporaryDirectory() as tmp:
-            self.assertIsNone(self._summary(tmp, text="# Imprint\n\nno records\n"))
-        md = bd.build_digest(NOW, _pack(), imprint=bd.imprint_lines(None))
+        md = bd.build_digest(NOW, _pack(), imprint=self._lines(None))
         self.assertNotIn("IMPRINT", md)
+
+    def test_present_but_unparseable_export_warns_instead_of_vanishing(self):
+        """Audit 2026-08-08: zero regex matches silently dropped the section,
+        so a line-format drift in the export read as "no imprint configured"."""
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self._summary(tmp, text="# Imprint\n\n* urn:imprint:call:aaa\n")
+            self.assertIsNotNone(s)
+            self.assertEqual(s["records"], 0)
+            md = bd.build_digest(NOW, _pack(), imprint=self._lines(s))
+            self.assertIn("IMPRINT (captured judgment", md)
+            self.assertIn("WARNING: imprint export present but unparseable "
+                          "(line-format drift?)", md)
+            self.assertNotIn("records;", md)
+
+    def test_export_older_than_26h_is_flagged_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md = bd.build_digest(NOW, _pack(),
+                                 imprint=self._lines(self._summary(tmp, age_hours=30)))
+            self.assertIn("WARNING: imprint export STALE: 30h old -- 05:45 "
+                          "export may have failed", md)
+
+    def test_export_at_the_26h_boundary_is_not_flagged(self):
+        """Exclusive, like the pack's own 36h boundary: 26h clean, past it stale."""
+        with tempfile.TemporaryDirectory() as tmp:
+            at = self._lines(self._summary(tmp, age_hours=26))
+            self.assertNotIn("STALE", "\n".join(at))
+            past = self._lines(self._summary(tmp, age_hours=26.5))
+            self.assertIn("STALE", "\n".join(past))
+
+    def test_live_store_lag_line_when_the_db_is_readable(self):
+        """Export-vs-store lag has to be visible, not inferred."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "imprint.db")
+            with open(db, "w", encoding="utf-8") as fh:
+                fh.write("sqlite stand-in")
+            stamp = NOW.timestamp() - 3 * 3600
+            os.utime(db, (stamp, stamp))
+            lines = self._lines(self._summary(tmp), db_path=db)
+            self.assertIn("- live store last written 3h ago", lines)
+
+    def test_absent_live_store_drops_only_that_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lines = self._lines(self._summary(tmp))
+            self.assertNotIn("live store", "\n".join(lines))
+            self.assertIn("- ~3 records; newest capture 2026-08-05", lines)
+
+    def test_relative_age_rendering(self):
+        self.assertEqual(bd._ago(90), "1m ago")
+        self.assertEqual(bd._ago(3 * 3600 + 60), "3h ago")
+        self.assertEqual(bd._ago(50 * 3600), "2d ago")
+        self.assertEqual(bd._ago(-5), "0m ago")  # clock skew is not negative age
 
     def test_exempt_from_token_cap_and_pointer_stays_last(self):
         """A pack big enough to trigger shedding must shed the same lines with
         or without the imprint section, and the pack pointer stays last."""
         big = _pack(warnings=["w%d %s" % (i, "x" * 100) for i in range(40)])
         with tempfile.TemporaryDirectory() as tmp:
-            lines = bd.imprint_lines(self._summary(tmp))
+            lines = self._lines(self._summary(tmp))
             with_imprint = bd.build_digest(NOW, big, imprint=lines)
             without = bd.build_digest(NOW, big)
         self.assertIn("IMPRINT (captured judgment", with_imprint)
@@ -352,8 +416,7 @@ class ImprintSection(unittest.TestCase):
             text = "## Call\n" + "".join(
                 "- **urn:imprint:call:%d** [valid 2026-08-0%dT00:00:00Z..] x\n"
                 % (i, (i % 7) + 1) for i in range(5000))
-            lines = bd.imprint_lines(bd.load_imprint(
-                self._write(tmp, text)))
+            lines = self._lines(bd.load_imprint(self._write(tmp, text)))
         rendered = "\n".join(lines).encode("utf-8")
         self.assertLessEqual(len(rendered), bd.IMPRINT_CAP_BYTES)
         self.assertLessEqual(
@@ -365,6 +428,101 @@ class ImprintSection(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
         return path
+
+
+class LaunchdProbe(unittest.TestCase):
+    """launchctl exit-code surfacing: canned output into the PURE parser.
+
+    No test shells out to the real launchctl -- the parser is the contract, and
+    the probe around it is exercised with an injected runner.
+    """
+
+    FAILING = (
+        "PID\tStatus\tLabel\n"
+        "-\t78\tcom.anthonyflores.fully-aware.daily-scan\n"
+        "912\t0\tcom.anthonyflores.fully-aware.boot-pack\n"
+        "-\t1\tcom.saga.watchdog\n"
+        "-\t127\tcom.adobe.updater\n"
+        "-\t-\tcom.anthonyflores.iris-client-work-board\n"
+    )
+    CLEAN = (
+        "PID\tStatus\tLabel\n"
+        "912\t0\tcom.anthonyflores.fully-aware.boot-pack\n"
+        "-\t0\tcom.anthonyflores.fully-aware.daily-scan\n"
+        "-\t-\tcom.saga.watchdog\n"
+    )
+
+    def test_failing_jobs_are_parsed_with_their_exit_codes(self):
+        self.assertEqual(
+            bd.parse_launchctl(self.FAILING),
+            [("com.anthonyflores.fully-aware.daily-scan", 78),
+             ("com.saga.watchdog", 1)])
+
+    def test_clean_output_yields_nothing(self):
+        self.assertEqual(bd.parse_launchctl(self.CLEAN), [])
+
+    def test_foreign_labels_and_non_numeric_status_are_ignored(self):
+        """A third-party updater's exit 127 is noise; '-' is 'never exited'."""
+        labels = [lbl for lbl, _ in bd.parse_launchctl(self.FAILING)]
+        self.assertNotIn("com.adobe.updater", labels)
+        self.assertNotIn("com.anthonyflores.iris-client-work-board", labels)
+
+    def test_malformed_output_is_survived(self):
+        for text in ("", None, "garbage without tabs\n", "a\tb\n", "\t\t\t\n"):
+            with self.subTest(text=text):
+                self.assertEqual(bd.parse_launchctl(text), [])
+
+    def test_warnings_render_into_the_digest_warnings_section(self):
+        warnings = bd.launchctl_warnings(runner=lambda: self.FAILING)
+        md = bd.build_digest(NOW, _pack(warnings=["pack said something"]),
+                             extra_warnings=warnings)
+        self.assertIn("WARNINGS (3):", md)
+        self.assertIn("- WARNING: launchd job "
+                      "com.anthonyflores.fully-aware.daily-scan last exit 78", md)
+        self.assertIn("- WARNING: launchd job com.saga.watchdog last exit 1", md)
+
+    def test_locally_probed_warnings_outlive_pack_warnings_under_the_cap(self):
+        """The shed loop pops from the tail: a dead job is what a session most
+        needs, so it leads the section.
+
+        Same stable synthetic pointer as ``test_attention_is_shed_last``, so
+        the priority does not change with the checkout's path length.
+        """
+        pack = _pack(warnings=["pack warning %d %s" % (i, "x" * 100)
+                               for i in range(40)])
+        pack_md = "/synthetic/BOOT-PACK.md"
+        with unittest.mock.patch.object(bd, "PACK_MD", pack_md), \
+                unittest.mock.patch.object(
+                    bd, "PACK_POINTER", "Full pack: %s" % pack_md):
+            md = bd.build_digest(NOW, pack, cap_tokens=120,
+                                 extra_warnings=bd.launchctl_warnings(
+                                     runner=lambda: self.FAILING))
+        self.assertIn("com.anthonyflores.fully-aware.daily-scan last exit 78", md)
+        self.assertIn("[truncated]", md)
+
+    def test_clean_launchctl_adds_no_warnings_section(self):
+        md = bd.build_digest(NOW, _pack(), extra_warnings=bd.launchctl_warnings(
+            runner=lambda: self.CLEAN))
+        self.assertNotIn("WARNINGS", md)
+
+    def test_missing_launchctl_binary_is_a_clean_skip(self):
+        """CI runs on Linux: no binary, no probe, no noise."""
+        with unittest.mock.patch.object(bd.shutil, "which", return_value=None):
+            self.assertEqual(bd.launchctl_warnings(), [])
+
+    def test_probe_failure_degrades_to_silence(self):
+        def boom():
+            raise OSError("launchctl exploded")
+        self.assertEqual(bd.launchctl_warnings(runner=boom), [])
+
+    def test_probe_is_read_only(self):
+        """D30: this generator reads launchd state and never acts on it."""
+        with open(os.path.join(_HERE, "boot-digest.py"), encoding="utf-8") as fh:
+            body = fh.read()
+        self.assertIn('["launchctl", "list"]', body)
+        for verb in ("load", "unload", "bootstrap", "bootout", "kickstart",
+                     "enable", "disable", "remove"):
+            self.assertNotIn('"launchctl", "%s"' % verb, body)
 
 
 class DegradeNotAbort(unittest.TestCase):
@@ -610,7 +768,7 @@ class WrapperExecution(unittest.TestCase):
 class HookBody(unittest.TestCase):
     """session-digest-hook.sh: fresh -> cat, stale -> one line, absent -> silence."""
 
-    def _run(self, digest_text=None, age_hours=0):
+    def _run(self, digest_text=None, age_hours=0, brief_text=None):
         with tempfile.TemporaryDirectory() as tmp:
             digest = os.path.join(tmp, "BOOT-DIGEST.md")
             if digest_text is not None:
@@ -619,13 +777,21 @@ class HookBody(unittest.TestCase):
                 if age_hours:
                     old = os.path.getmtime(digest) - age_hours * 3600
                     os.utime(digest, (old, old))
-            # The shipped hook hardcodes an absolute path (asserted separately);
+            brief = os.path.join(tmp, "LATEST.md")
+            if brief_text is not None:
+                with open(brief, "w", encoding="utf-8") as fh:
+                    fh.write(brief_text)
+            # The shipped hook hardcodes absolute paths (asserted separately);
             # exercise its LOGIC against a fixture copy pointed at the tempdir.
+            # BOTH paths are redirected -- a test that reads the real
+            # state/daily-scan/LATEST.md reports this machine, not the hook.
             with open(_HOOK, "r", encoding="utf-8") as fh:
                 body = fh.read()
             body = body.replace(
                 '"/Users/anthonyflores/code/fully-aware/state/BOOT-DIGEST.md"',
-                '"%s"' % digest)
+                '"%s"' % digest).replace(
+                '"/Users/anthonyflores/code/fully-aware/state/daily-scan/LATEST.md"',
+                '"%s"' % brief)
             script = os.path.join(tmp, "hook.sh")
             with open(script, "w", encoding="utf-8") as fh:
                 fh.write(body)
@@ -684,6 +850,54 @@ class HookBody(unittest.TestCase):
         self.assertIn(
             "/Users/anthonyflores/code/fully-aware/state/BOOT-DIGEST.md", body)
         self.assertNotRegex(body, r"set -e(?:[^a-zA-Z]|$)")
+
+    def test_live_daily_brief_line_follows_the_digest(self):
+        """05:45 digest vs 06:15 scan: quote the LIVE brief at consumption time.
+
+        Its first line is the brief's own date stamp, so a scan that did not
+        run today is visible in the session's opening context.
+        """
+        rc, out = self._run("# digest body\n",
+                            brief_text="Daily brief -- 2026-08-08\n\nheadline\n")
+        self.assertEqual(rc, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[-1], "Daily brief (live): Daily brief -- 2026-08-08")
+        self.assertLess(lines.index("# digest body"), len(lines) - 1)
+        self.assertNotIn("headline", out)
+
+    def test_absent_live_brief_adds_no_line(self):
+        rc, out = self._run("# digest body\n")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "# digest body\n")
+
+    def test_empty_live_brief_adds_no_line(self):
+        rc, out = self._run("# digest body\n", brief_text="\n")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "# digest body\n")
+
+    def test_live_brief_line_is_bounded(self):
+        rc, out = self._run("# digest body\n", brief_text="z" * 5000 + "\n")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(out.splitlines()[-1]), len("Daily brief (live): ") + 200)
+
+    def test_stale_digest_still_prints_only_its_one_line(self):
+        """The stale branch exits before the digest is emitted; it stays one line."""
+        rc, out = self._run("# stale content\n", age_hours=40,
+                            brief_text="Daily brief -- 2026-08-08\n")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(out.strip().splitlines()), 1)
+        self.assertIn("stale (>36h)", out)
+
+    def test_ships_the_absolute_daily_scan_path(self):
+        with open(_HOOK, "r", encoding="utf-8") as fh:
+            body = fh.read()
+        self.assertIn(
+            "/Users/anthonyflores/code/fully-aware/state/daily-scan/LATEST.md",
+            body)
+        # Same portability discipline as the mtime read (PR #12): no GNU-only
+        # flags, no process substitution, no `cat`.
+        self.assertNotRegex(body, r"(?m)^\s*cat ")
+        self.assertNotIn("head -1", body)  # POSIX spelling is head -n 1
 
 
 def _git(*args, **kwargs):
