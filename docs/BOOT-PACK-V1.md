@@ -61,7 +61,12 @@ Every entry is tagged `[source | as_of]`.
    a supported per-repo fallback that no repo here exercises (no `.macro/`
    directory exists on this machine). A missing/invalid surface for a manifest
    repo is a **degraded-source WARNING**, never a crash. Staleness threshold
-   **24h** (on the surface's `generated_at`).
+   **24h** (on the surface's `generated_at`). Each repo's block also renders its
+   `next_session` payload as **one** line — `next-session[<status>]: <summary>
+   [<parser source> | <as_of>]` — hard-truncated at 200 summary chars, so an
+   authored handoff (e.g. a `PARKED pending ruling` directive) reaches the
+   reader instead of dead-ending in the surface. A degraded `next_session` probe
+   projects nothing; it is already reported in the WARNING block.
 3. **Unified decision queue** -- a **PROJECTION** (routes, never absorbs
    ratification) over three feeds, rendered as one ordered inbox (oldest waiting
    first) with per-item age + provenance:
