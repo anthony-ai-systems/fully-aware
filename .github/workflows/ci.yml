@@ -19,7 +19,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 3.12 is the floor this suite was verified against (also passes on 3.11
       # and 3.14); tools/ imports stdlib only, so nothing else is pinned.
