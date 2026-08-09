@@ -10,6 +10,7 @@ filename has hyphens, so it is loaded via importlib. Run with:
     python3 -m unittest test_generate_automation_map -v
 """
 
+import datetime
 import importlib.util
 import json
 import os
@@ -35,7 +36,14 @@ LAUNCHCTL_OUT = (
     "PID\tStatus\tLabel\n"
     "123\t0\tcom.anthony.daemon\n"
     "-\t0\tcom.anthonyflores.fully-aware.boot-pack\n"
-    "-\t1\tcom.anthony.broken\n")
+    "-\t1\tcom.anthony.broken\n"
+    "234\t0\tcom.saga.mission-control\n"
+    "-\t0\tcom.apple.dock.extra\n"               # OS furniture: never counted
+    "-\t0\tapplication.com.apple.Safari.1.2\n"   # GUI-app service job: ditto
+    "789\t0\tcom.anthony.granola-ingest\n"       # prefixed but plist-less
+    "456\t0\tcom.google.keystone.agent\n")       # loaded, off-map -> named
+
+NOW = datetime.datetime(2026, 8, 8, 12, 0, tzinfo=datetime.timezone.utc)
 
 
 def _fake_runner(argv):
@@ -78,6 +86,10 @@ class Fixture(unittest.TestCase):
             plistlib.dump({"Label": "com.anthony.unloaded",
                            "ProgramArguments": ["/bin/true"],
                            "RunAtLoad": True}, fh)
+        with open(os.path.join(la, "com.saga.mission-control.plist"), "wb") as fh:
+            plistlib.dump({"Label": "com.saga.mission-control",
+                           "ProgramArguments": ["/bin/cat"],
+                           "KeepAlive": True}, fh)
 
         cx = os.path.join(self.home, ".codex", "automations",
                           "iris-client-work-pulse")
@@ -96,7 +108,13 @@ class Fixture(unittest.TestCase):
             json.dump({"hooks": {
                 "Stop": [{"hooks": [
                     {"type": "command",
-                     "command": "python3 /x/agent_session_pulse.py"}]}],
+                     "command": "python3 /x/agent_session_pulse.py"},
+                    {"type": "command",
+                     "command": "/venv/bin/python /imprint/hooks/stop_capture.py"}]}],
+                "UserPromptSubmit": [{"hooks": [
+                    {"type": "command",
+                     "command": "/venv/bin/python "
+                                "/imprint/hooks/user_prompt_submit.py"}]}],
                 "PreToolUse": [{"matcher": "Task|Agent", "hooks": [
                     {"type": "command",
                      "command": "python3 /x/pin_guard.py"}]}],
@@ -104,9 +122,18 @@ class Fixture(unittest.TestCase):
 
         cfg = os.path.join(self.repo, "tools", "configs")
         os.makedirs(cfg)
-        for env in ("atlas", "imprint", "ratification-backlog", "seed-manifest"):
-            with open(os.path.join(cfg, env + ".json"), "w") as fh:
-                json.dump({"environment": env, "repo": "~/code/" + env}, fh)
+        # surface-config/v1 spells the repo key "repo_path"...
+        with open(os.path.join(cfg, "atlas.json"), "w") as fh:
+            json.dump({"schema": "surface-config/v1", "environment": "atlas",
+                       "repo_path": "/Users/x/code/atlas"}, fh)
+        # ...legacy spellings and a config with neither still degrade sanely.
+        with open(os.path.join(cfg, "imprint.json"), "w") as fh:
+            json.dump({"environment": "imprint", "repo": "~/code/imprint"}, fh)
+        with open(os.path.join(cfg, "keyless.json"), "w") as fh:
+            json.dump({"environment": "keyless"}, fh)
+        for meta in ("ratification-backlog", "seed-manifest"):
+            with open(os.path.join(cfg, meta + ".json"), "w") as fh:
+                json.dump({"environment": meta}, fh)
 
         # One artifact that exists (boot pack), the rest missing.
         state = os.path.join(self.home, "code", "fully-aware", "state")
@@ -114,8 +141,9 @@ class Fixture(unittest.TestCase):
         with open(os.path.join(state, "BOOT-PACK.md"), "w") as fh:
             fh.write("# pack\n")
 
-    def build(self, runner=_fake_runner):
-        return am.build_map(self.home, self.repo, runner=runner)
+    def build(self, runner=_fake_runner, now=NOW):
+        # A frozen clock: generated_at now travels inside pid claims too.
+        return am.build_map(self.home, self.repo, runner=runner, now=now)
 
 
 class TestProbes(Fixture):
@@ -132,6 +160,17 @@ class TestProbes(Fixture):
         self.assertEqual(daemon["status"], "ok")          # running pid 123
         self.assertEqual(daemon["subtitle"], "keep-alive daemon")
         self.assertEqual(nodes["la:com.anthony.unloaded"]["status"], "unarmed")
+
+    def test_running_pid_claim_is_timestamped(self):
+        # A bare "running (pid N)" goes stale the moment the daemon restarts;
+        # the claim must carry the clock it was true at.
+        nodes = {n["id"]: n for n in self.build()["nodes"]}
+        self.assertEqual(nodes["la:com.anthony.daemon"]["detail"]["status_note"],
+                         "running as of 2026-08-08T12:00:00+00:00 (pid 123)")
+
+    def test_saga_prefix_is_shown(self):
+        nodes = {n["id"]: n for n in self.build()["nodes"]}
+        self.assertEqual(nodes["la:com.saga.mission-control"]["status"], "ok")
 
     def test_launchctl_failure_degrades_not_raises(self):
         nodes = {n["id"]: n for n in self.build(_failing_runner)["nodes"]}
@@ -161,6 +200,15 @@ class TestProbes(Fixture):
         self.assertNotIn("env:ratification-backlog", ids)
         self.assertNotIn("env:seed-manifest", ids)
 
+    def test_environment_subtitle_reads_repo_path_key(self):
+        nodes = {n["id"]: n for n in self.build()["nodes"]}
+        # surface-config/v1 key wins...
+        self.assertEqual(nodes["env:atlas"]["subtitle"], "/Users/x/code/atlas")
+        # ...legacy "repo" still resolves...
+        self.assertEqual(nodes["env:imprint"]["subtitle"], "~/code/imprint")
+        # ...and only a config with no path at all falls back to the label.
+        self.assertEqual(nodes["env:keyless"]["subtitle"], "surface config")
+
     def test_artifact_existence_probed(self):
         nodes = {n["id"]: n for n in self.build()["nodes"]}
         self.assertEqual(nodes["art:boot-pack"]["status"], "ok")
@@ -175,6 +223,36 @@ class TestProbes(Fixture):
         sk = nodes["skills:all"]
         self.assertEqual(sk["detail"]["skills"], ["saga", "session-log"])
         self.assertIn("2 installed", sk["title"])
+
+    def test_launchd_exclusions_are_counted_and_named(self):
+        exc = self.build()["launchd_excluded"]
+        # Off-map because of the prefix filter (keystone) or because nothing in
+        # ~/Library/LaunchAgents backs it (granola-ingest) -- both must be named.
+        # Apple and GUI-app service jobs are furniture, not hidden automation.
+        self.assertEqual(exc["labels"], ["com.anthony.granola-ingest",
+                                         "com.google.keystone.agent"])
+        self.assertEqual(exc["count"], 2)
+        self.assertNotIn("com.apple", json.dumps(exc))
+        self.assertNotIn("application.", json.dumps(exc))
+
+    def test_all_launchagents_does_not_report_rendered_jobs_as_excluded(self):
+        la = os.path.join(self.home, "Library", "LaunchAgents")
+        with open(os.path.join(la, "com.google.keystone.agent.plist"), "wb") as fh:
+            plistlib.dump({"Label": "com.google.keystone.agent",
+                           "ProgramArguments": ["/bin/true"]}, fh)
+        data = am.build_map(self.home, self.repo, runner=_fake_runner,
+                            now=NOW, all_agents=True)
+        self.assertIn("la:com.google.keystone.agent",
+                      {n["id"] for n in data["nodes"]})
+        # keystone is on the map now; granola-ingest still has no plist at all.
+        self.assertEqual(data["launchd_excluded"],
+                         {"count": 1, "labels": ["com.anthony.granola-ingest"]})
+
+    def test_launchctl_failure_degrades_the_exclusion_field(self):
+        exc = self.build(_failing_runner)["launchd_excluded"]
+        self.assertTrue(exc["degraded"])
+        self.assertIn("launchctl_failed", exc["reason"])
+        self.assertEqual(exc["count"], 0)
 
     def test_third_party_agents_filtered_by_default(self):
         la = os.path.join(self.home, "Library", "LaunchAgents")
@@ -242,6 +320,31 @@ class TestAssembly(Fixture):
         froms = {e["from"] for e in data["edges"]}
         self.assertNotIn("la:com.anthonyflores.fully-aware.daily-scan", froms)
 
+    def test_imprint_topology_follows_the_real_data_flow(self):
+        data = self.build()
+        edges = {(e["from"], e["to"]) for e in data["edges"]}
+        boot = "la:com.anthonyflores.fully-aware.boot-pack"
+        # hooks write the live db; the 05:45 agent exports it; digest reads it.
+        for edge in (("hook:stop_capture.py", "art:imprint-db"),
+                     ("hook:user_prompt_submit.py", "art:imprint-db"),
+                     ("art:imprint-db", boot),
+                     (boot, "art:imprint-store"),
+                     ("art:imprint-store", "art:boot-digest")):
+            self.assertIn(edge, edges)
+        # the hooks never touch the export, and the export never feeds the agent
+        self.assertNotIn(("hook:stop_capture.py", "art:imprint-store"), edges)
+        self.assertNotIn(("hook:user_prompt_submit.py", "art:imprint-store"), edges)
+        self.assertNotIn(("art:imprint-store", boot), edges)
+
+    def test_imprint_db_node_probes_the_live_store(self):
+        nodes = {n["id"]: n for n in self.build()["nodes"]}
+        db = nodes["art:imprint-db"]
+        self.assertEqual(db["source"],
+                         os.path.join(self.home, ".local", "share", "imprint",
+                                      "anthony", "imprint.db"))
+        self.assertEqual(db["status"], "failing")     # absent in the fixture
+        self.assertEqual(db["reason"], "missing_path")
+
     def test_deterministic_after_carving_generated_at(self):
         a, b = self.build(), self.build()
         a["generated_at"] = b["generated_at"] = "CARVED"
@@ -268,6 +371,22 @@ class TestHtml(Fixture):
         embedded = page.split("id='map-data'>")[1].split("</script>")[0]
         self.assertEqual(json.loads(embedded.replace("<\\/", "</"))["schema"],
                          "automation-map/v1")
+
+    def test_html_footnotes_the_launchd_exclusions(self):
+        markup = am.render_html(self.build()).split("id='map-data'>")[0]
+        self.assertIn("2 loaded jobs not shown", markup)
+        self.assertIn("com.google.keystone.agent", markup)   # title attribute
+
+    def test_html_footnote_states_when_nothing_is_hidden(self):
+        data = self.build()
+        data["launchd_excluded"] = {"count": 0, "labels": []}
+        markup = am.render_html(data).split("id='map-data'>")[0]
+        self.assertIn("every loaded job outside Apple", markup)
+
+    def test_html_footnote_reports_a_degraded_probe(self):
+        markup = am.render_html(self.build(_failing_runner)
+                                ).split("id='map-data'>")[0]
+        self.assertIn("launchd exclusions unknown", markup)
 
     def test_html_escapes_titles(self):
         # A hostile title must be escaped in the card MARKUP. It may appear

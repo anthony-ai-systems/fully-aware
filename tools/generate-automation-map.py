@@ -18,6 +18,10 @@ mutates, commits, or pushes anything in any repo.
 Provenance: every node carries ``source`` (the path or command probed) and a
 ``status``; a probe that fails yields a node or field with
 ``{"degraded": true, "reason": ...}`` -- probes are NEVER silently omitted.
+Every loaded launchd job the map does not draw is counted and NAMED in the
+top-level ``launchd_excluded`` field and footnoted in the HTML: no silent caps.
+Live claims that decay (a running pid) are stamped with ``generated_at`` in
+the claim text, so a stale map reads as stale rather than as fact.
 
 Determinism: nodes sorted by (lane, id); ``generated_at`` is the only
 wall-clock field and is CARVED before any diff comparison. Two runs on an
@@ -78,7 +82,9 @@ ARTIFACTS = [
      "~/code/fully-aware/state/BOOT-DIGEST.md"),
     ("art:surfaces", "surfaces cache", "per-repo surface/v1 JSON",
      "~/code/fully-aware/state/surfaces"),
-    ("art:imprint-store", "imprint store export", "captured judgment (bulk channel)",
+    ("art:imprint-db", "imprint store (live)", "captured judgment, hook-written",
+     "~/.local/share/imprint/anthony/imprint.db"),
+    ("art:imprint-store", "imprint store export", "markdown export of the db (bulk channel)",
      "~/code/fully-aware/state/imprint-store.md"),
     ("art:iris-events", "agent-sessions events", "IRIS events.jsonl (session pulses)",
      "~/Library/Application Support/IRIS/agent-sessions/events.jsonl"),
@@ -94,9 +100,13 @@ FLOWS = [
     ("art:iris-events", "cx:iris-client-work-pulse"),
     ("cx:iris-client-work-pulse", "art:client-work-board"),
     ("la:com.anthonyflores.iris-client-work-board", "art:client-work-board"),
-    ("hook:stop_capture.py", "art:imprint-store"),
-    ("hook:user_prompt_submit.py", "art:imprint-store"),
-    ("art:imprint-store", "la:com.anthonyflores.fully-aware.boot-pack"),
+    # Imprint: the hooks write the live db; the 05:45 boot-pack agent reads it
+    # via `imprint.cli export` and writes the markdown export the digest reads.
+    ("hook:stop_capture.py", "art:imprint-db"),
+    ("hook:user_prompt_submit.py", "art:imprint-db"),
+    ("art:imprint-db", "la:com.anthonyflores.fully-aware.boot-pack"),
+    ("la:com.anthonyflores.fully-aware.boot-pack", "art:imprint-store"),
+    ("art:imprint-store", "art:boot-digest"),
     ("env:*", "art:surfaces"),
     ("art:surfaces", "la:com.anthonyflores.fully-aware.boot-pack"),
     ("la:com.anthonyflores.fully-aware.boot-pack", "art:boot-pack"),
@@ -164,7 +174,31 @@ def _fmt_schedule(pl):
 
 # Personal-agent prefixes shown by default; third-party updaters (Adobe,
 # Google, ...) are noise for this map. --all-launchagents lifts the filter.
-LAUNCHD_PREFIXES = ("com.anthony",)
+# Whatever the filter drops is COUNTED and NAMED in launchd_excluded -- a cap
+# the map does not admit to is the same defect as a wrong edge.
+LAUNCHD_PREFIXES = ("com.anthony", "com.saga")
+
+# OS furniture, never "excluded automation": Apple's own jobs, and the
+# per-GUI-app service jobs launchd keys as application.<bundle-id>.<pid ints>
+# (that family covers Apple apps too, e.g. application.com.apple.Safari.*).
+LAUNCHD_FURNITURE = ("com.apple.", "application.")
+
+
+def _launchd_excluded(loaded, rendered_labels):
+    """Loaded launchd jobs this map does not render, counted and NAMED.
+
+    Superset of "dropped by LAUNCHD_PREFIXES": also catches loaded jobs with no
+    plist under ~/Library/LaunchAgents (observed live: com.anthony.granola-ingest
+    is loaded but unbacked there) -- those are equally absent from the map, and
+    a prefix-only definition would keep hiding them.
+    """
+    if isinstance(loaded, dict) and loaded.get("degraded"):
+        return {"count": 0, "labels": [], "degraded": True,
+                "reason": loaded["reason"]}
+    labels = sorted(lbl for lbl in loaded
+                    if not lbl.startswith(LAUNCHD_FURNITURE)
+                    and lbl not in rendered_labels)
+    return {"count": len(labels), "labels": labels}
 
 
 def _load_plist(path):
@@ -179,11 +213,13 @@ def _load_plist(path):
         return plistlib.loads(out.stdout)
 
 
-def probe_launchagents(home, runner, all_agents=False):
+def probe_launchagents(home, runner, all_agents=False, generated_at=""):
+    """-> (nodes, launchd_excluded). ``generated_at`` timestamps live-pid
+    claims, which go stale the moment a daemon restarts."""
     la_dir = os.path.join(home, "Library", "LaunchAgents")
     loaded = _launchctl_state(runner)
     loaded_degraded = isinstance(loaded, dict) and loaded.get("degraded")
-    nodes = []
+    nodes, rendered_labels = [], set()
     for path in sorted(glob.glob(os.path.join(la_dir, "*.plist"))):
         if not all_agents and not os.path.basename(path).startswith(
                 LAUNCHD_PREFIXES):
@@ -207,7 +243,10 @@ def probe_launchagents(home, runner, all_agents=False):
             if label in loaded:
                 pid, last_exit = loaded[label]
                 if pid is not None:
-                    status, status_note = "ok", "running (pid %s)" % pid
+                    # The pid is only true as of the probe; carry the clock.
+                    status = "ok"
+                    status_note = "running as of %s (pid %s)" % (generated_at,
+                                                                 pid)
                 elif last_exit in (None, "0"):
                     status, status_note = "ok", "loaded, last exit 0"
                 else:
@@ -223,13 +262,14 @@ def probe_launchagents(home, runner, all_agents=False):
                        "stderr": pl.get("StandardErrorPath")},
         }
         nodes.append(node)
+        rendered_labels.add(label)
     if not nodes:
         nodes.append({"id": "la:none", "lane": "launchd",
                       "title": "no LaunchAgents found", "subtitle": la_dir,
                       "executor": "script", "status": "unknown",
                       "source": la_dir, "degraded": True,
                       "reason": "empty_or_missing_dir"})
-    return nodes
+    return nodes, _launchd_excluded(loaded, rendered_labels)
 
 
 _TOML_KEY = re.compile(r'^\s*(name|model|status|schedule|rrule|enabled)\s*=\s*"?([^"\n]*)"?\s*$')
@@ -364,7 +404,9 @@ def probe_environments(repo_root):
         try:
             with open(path, encoding="utf-8") as fh:
                 cfg = json.load(fh)
-            repo = cfg.get("repo") or cfg.get("path") or ""
+            # surface-config/v1 spells it repo_path; the rest are legacy spellings.
+            repo = (cfg.get("repo_path") or cfg.get("repo")
+                    or cfg.get("path") or "")
         except Exception:  # noqa: BLE001
             repo = ""
         nodes.append({"id": "env:" + env, "lane": "envs", "title": env,
@@ -399,8 +441,11 @@ def _default_runner(argv):
 
 def build_map(home, repo_root, runner=_default_runner, now=None,
               all_agents=False):
-    nodes = (probe_claude_hooks(home) +
-             probe_launchagents(home, runner, all_agents=all_agents) +
+    generated_at = (now or datetime.datetime.now(datetime.timezone.utc)
+                    ).isoformat(timespec="seconds")
+    la_nodes, launchd_excluded = probe_launchagents(
+        home, runner, all_agents=all_agents, generated_at=generated_at)
+    nodes = (probe_claude_hooks(home) + la_nodes +
              probe_codex_automations(home) + probe_artifacts(home) +
              probe_environments(repo_root) + probe_skills(home))
     for n in nodes:
@@ -415,12 +460,11 @@ def build_map(home, repo_root, runner=_default_runner, now=None,
         for s in srcs:
             if s in ids and dst in ids:
                 edges.append({"from": s, "to": dst})
-    generated_at = (now or datetime.datetime.now(datetime.timezone.utc)
-                    ).isoformat(timespec="seconds")
     return {"schema": SCHEMA, "generated_at": generated_at,
             "advisory": "ADVISORY STATE, NOT LAW — read-only map of observed "
                         "automation surfaces; probes degrade, never guess.",
             "lanes": [{"key": k, "title": t} for k, t in LANES],
+            "launchd_excluded": launchd_excluded,
             "nodes": nodes, "edges": edges}
 
 
@@ -481,6 +525,7 @@ h1 span { color:var(--ai); }
   letter-spacing:.1em; margin-top:12px; }
 #panel dd { margin-top:2px; word-break:break-all; white-space:pre-wrap; }
 #panel .gatenote { margin-top:14px; color:var(--gate); font-size:12px; }
+.footnote { color:var(--dim); font-size:11.5px; padding:0 28px 30px; }
 """
 
 _JS = """
@@ -563,6 +608,23 @@ draw();
 """
 
 
+def _excluded_footnote(exc):
+    """One line naming what the launchd filter dropped. Never silent."""
+    if exc.get("degraded"):
+        return ('<div class="footnote">launchd exclusions unknown — %s</div>'
+                % html.escape(exc.get("reason", "launchctl probe degraded")))
+    if not exc["count"]:
+        return ('<div class="footnote">launchd: every loaded job outside '
+                'Apple&#39;s own is on this map.</div>')
+    return ('<div class="footnote" title="%s">launchd: %d loaded job%s not '
+            'shown — outside the %s* filter, or unbacked by a '
+            '~/Library/LaunchAgents plist (Apple and GUI-app service jobs are '
+            'not counted). Labels: launchd_excluded in the JSON sidecar.</div>'
+            % (html.escape(", ".join(exc["labels"]), quote=True), exc["count"],
+               "" if exc["count"] == 1 else "s",
+               html.escape("*, ".join(LAUNCHD_PREFIXES))))
+
+
 def render_html(data):
     lanes_html = []
     for lane in data["lanes"]:
@@ -596,6 +658,7 @@ def render_html(data):
             "<div class='meta'>generated %s · %s · advisory, read-only</div></header>"
             "<div class='legend'>%s</div>"
             "<div id='wrap'><svg id='svg'></svg><div id='lanes'>%s</div></div>"
+            "%s"
             "<div id='panel'><span class='close' id='p-close'>&times;</span>"
             "<h3 id='p-title'></h3><div class='meta' id='p-sub'></div>"
             "<dl id='p-dl'></dl><div class='gatenote' id='p-gate'></div></div>"
@@ -603,6 +666,8 @@ def render_html(data):
             "<script>%s</script></body></html>"
             % (_CSS, html.escape(data["generated_at"]), SCHEMA, legend,
                "".join(lanes_html),
+               _excluded_footnote(data.get("launchd_excluded")
+                                  or {"count": 0, "labels": []}),
                json.dumps(data, ensure_ascii=False).replace("</", "<\\/"),
                _JS))
 
@@ -643,9 +708,10 @@ def main(argv=None):
     degraded = sum(1 for n in data["nodes"] if n.get("degraded"))
     failing = sum(1 for n in data["nodes"] if n["status"] == "failing")
     sys.stderr.write("automation-map: %d nodes, %d edges, %d degraded, "
-                     "%d failing -> %s\n" % (len(data["nodes"]),
-                                             len(data["edges"]), degraded,
-                                             failing, args.out_html))
+                     "%d failing, %d launchd jobs excluded -> %s\n"
+                     % (len(data["nodes"]), len(data["edges"]), degraded,
+                        failing, data["launchd_excluded"]["count"],
+                        args.out_html))
     return 0
 
 
