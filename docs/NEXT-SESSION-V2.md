@@ -13,7 +13,7 @@ v2.
 | Consumer | State | How it reads v2 |
 |----------|-------|-----------------|
 | boot-pack assembler | **wired** | `assemble-boot-pack.py` imports this module in-repo and projects each manifest repo's `human_only[]` into the unified decision queue. |
-| Iris | **wired**, indirectly | The Iris console reads the boot pack's JSON sidecar, so it sees v2 through the assembler rather than calling the parser itself. |
+| Iris | **archived**, no live consumer | The Iris console read the boot pack's JSON sidecar (v2 reached it through the assembler, never a direct parser call). It was archived 2026-08-04 — anthony-wiki-vault `c54cb6c`, now under `IRIS-archive/control-center`. Contract retained for revival; nothing external reads v2 today. |
 | mission-control | **intended**, not yet wired | No mission-control code reads v2 today. A design target, not a live consumer. |
 
 ## Field table

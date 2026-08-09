@@ -11,9 +11,12 @@ Consumers
   boot-pack assembler  WIRED, in-repo. ``assemble-boot-pack.py`` imports this
                        module and projects each repo's ``human_only[]`` into the
                        unified decision queue.
-  Iris                 WIRED, indirectly. The Iris console reads the boot pack's
-                       JSON sidecar, so it sees v2 through the assembler rather
-                       than calling this parser itself.
+  Iris                 ARCHIVED 2026-08-04, no live external consumer. The Iris
+                       console read the boot pack's JSON sidecar (v2 reached it
+                       through the assembler, never a direct parser call); it now
+                       sits unrun under anthony-wiki-vault IRIS-archive/
+                       control-center (vault commit c54cb6c). The contract is
+                       retained for revival.
   mission-control      INTENDED, not yet wired. No mission-control code reads
                        v2 today; treat it as a design target, not a live
                        consumer.
