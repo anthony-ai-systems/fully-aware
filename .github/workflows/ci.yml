@@ -27,6 +27,11 @@ jobs:
         with:
           python-version: '3.12'
 
+      # plistlib is stricter than launchd's own parser (e.g. rejects '--'
+      # inside XML comments), so this catches drift plutil would let slide.
+      - name: Lint launchd plists
+        run: python -c 'import plistlib,glob; ps=sorted(glob.glob("launchd/*.plist")); assert ps, "no plists found"; [plistlib.load(open(p,"rb")) for p in ps]; print(len(ps), "plists OK")'
+
       # The suite has no third-party imports beyond the runner itself.
       - name: Install test runner
         run: python -m pip install --upgrade pip pytest

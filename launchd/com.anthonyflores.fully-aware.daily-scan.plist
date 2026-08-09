@@ -3,7 +3,7 @@
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Fully Aware daily-scan LaunchAgent: run the Codex-managed scan pipeline every
-  day at 06:15 local -- 30 minutes after the 05:45 boot-pack agent, so the pack
+  day at 06:15 local, 30 minutes after the 05:45 boot-pack agent, so the pack
   the scanner reads is already fresh (stage 0 re-runs morning-pack.sh only if it
   somehow is not).
 
@@ -15,7 +15,7 @@
   /bin/bash -lc is deliberate. The runner shells out to `codex`, `claude`, `gh`
   and `git`; launchd hands the agent a stripped PATH, and a login shell gives it
   the same environment Anthony's own terminal has. (run-daily-scan.sh also sets
-  an explicit PATH itself -- belt and braces, same lesson as the SAGA agents.)
+  an explicit PATH itself; belt and braces, same lesson as the SAGA agents.)
   `gh` matters here: the sandboxed scanner is offline, so the RUNNER collects
   open-PR state and feeds it to the model as data.
 
@@ -35,7 +35,7 @@
   whose pid file names the owner. If that pid is alive when this job fires, the
   new run logs and exits 0 rather than racing it. If the owner died without
   releasing (kill -9, reboot), the firing run CLEARS the lock and still exits
-  without scanning -- the next fire, or a second manual run, does the scan. The
+  without scanning; the next fire, or a second manual run, does the scan. The
   breaker is never the runner; that is what holds an 8-way race to one winner.
 -->
 <plist version="1.0">
