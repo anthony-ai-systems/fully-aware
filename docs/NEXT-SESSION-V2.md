@@ -13,7 +13,7 @@ v2.
 | Consumer | State | How it reads v2 |
 |----------|-------|-----------------|
 | boot-pack assembler | **wired** | `assemble-boot-pack.py` imports this module in-repo and projects each manifest repo's `human_only[]` into the unified decision queue. |
-| Iris | **wired**, indirectly | The Iris console reads the boot pack's JSON sidecar, so it sees v2 through the assembler rather than calling the parser itself. |
+| Iris | **archived**, no live consumer | The Iris console read the boot pack's JSON sidecar (v2 reached it through the assembler, never a direct parser call). It was archived 2026-08-04 — anthony-wiki-vault `c54cb6c`, now under `IRIS-archive/control-center`. Contract retained for revival; nothing external reads v2 today. |
 | mission-control | **intended**, not yet wired | No mission-control code reads v2 today. A design target, not a live consumer. |
 
 ## Field table
@@ -53,6 +53,18 @@ The parser ships one adapter per legacy schema. Mapping (per M1 spec §1.3):
 | `evidence` | `commands_run` | — | `evidence` | `gates_passed` + `verification` + `pull_request` |
 
 Anything not in the table above lands under `legacy` verbatim.
+
+### v2-tagged files that carry the free-form shape — gap fill
+Several on-disk files declare `"schema": "next-session/v2"` but hold the
+free-form fallback field set (`session_date` / `state` / `launch_one_liner` /
+`next_action_for_agent`) instead of the v2 fields. Plain passthrough normalized
+those to an **empty summary**, so their authored content — including parked
+directives — never reached a reader. `adapt_v2` therefore gap-fills: when the
+summary comes out empty **and** a fallback-shape key is present, the missing
+fields are filled with the same mappings `adapt_fallback` uses (`state` →
+`summary`/`status`, `session_date` → `written_at`, `next_action_for_agent` (else
+`launch_one_liner`) → `next_action.what`). Files that genuinely conform to v2
+are untouched: their own non-empty values always win.
 
 ### Schema C — excluded by path rule
 Any file matching `*/tests/fixtures/heartbeat-bundle/NEXT_SESSION.json` is a

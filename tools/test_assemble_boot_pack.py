@@ -58,7 +58,18 @@ def _backlog(items=None, as_of="2026-07-01"):
                  "source": "ratification-backlog.json"}]}
 
 
-def _surface(env, generated_at, decisions=None, next_lanes=None, cold=None):
+def _next_session(status="parked", summary="a synthetic parked handoff",
+                  as_of="2026-07-22T00:00:00+00:00"):
+    """A surface next_session probe carrying a normalized v2 record."""
+    return {"source": "next_session.py:v2", "as_of": as_of,
+            "normalized": {"schema": "next-session/v2", "written_at": as_of,
+                           "environment": "synth-a", "status": status,
+                           "summary": summary,
+                           "next_action": {"who": "", "what": "wait"}}}
+
+
+def _surface(env, generated_at, decisions=None, next_lanes=None, cold=None,
+             next_session=None):
     return {
         "schema": "surface/v1",
         "environment": env,
@@ -75,7 +86,8 @@ def _surface(env, generated_at, decisions=None, next_lanes=None, cold=None):
         "decisions": decisions or [],
         "next_lanes": next_lanes or [],
         "do_not_read": [], "pitfalls": [],
-        "next_session": {"degraded": True, "reason": "none"},
+        "next_session": next_session if next_session is not None
+        else {"degraded": True, "reason": "none"},
     }
 
 
@@ -665,6 +677,119 @@ class NamedDegradedProbes(unittest.TestCase):
         probes = dict(ab.collect_degraded_probes(data))
         self.assertEqual(probes["a"], "ra")
         self.assertEqual(probes["b.c[0]"], "rc")
+
+
+# --------------------------------------------------------------------------- #
+# Fix 5: surface.next_session projected into the pack (one line per repo)
+# --------------------------------------------------------------------------- #
+class NextSessionProjection(unittest.TestCase):
+    def _build(self, tmp, surface):
+        cache = os.path.join(tmp, "surfaces")
+        _write_surface(cache, surface)
+        return ab.build_pack(NOW, _manifest(), _backlog(), cache, None)
+
+    def _ns_lines(self, md):
+        surf = md[md.index("## 2."):md.index("## 3.")]
+        return [l for l in surf.splitlines() if "next-session[" in l]
+
+    def test_projected_into_md_and_sidecar(self):
+        # The proof case: a parked directive that used to dead-end at the
+        # surface must now be readable in the pack itself.
+        with tempfile.TemporaryDirectory() as tmp:
+            md, sidecar = self._build(tmp, _surface(
+                "synth-a", NOW.isoformat(),
+                next_session=_next_session(
+                    status="parked",
+                    summary="PARKED pending a synthetic ruling -- do not "
+                            "install anything")))
+            lines = self._ns_lines(md)
+            self.assertEqual(len(lines), 1, md)
+            self.assertIn("next-session[parked]: PARKED pending a synthetic "
+                          "ruling -- do not install anything", lines[0])
+            self.assertIn("[next_session.py:v2 | 2026-07-22T00:00:00+00:00]",
+                          lines[0])
+            proj = sidecar["sections"]["surfaces"][0]["next_session"]
+            self.assertEqual(proj["status"], "parked")
+            self.assertIn("PARKED pending", proj["summary"])
+            self.assertEqual(proj["as_of"], "2026-07-22T00:00:00+00:00")
+
+    def test_absent_when_probe_degraded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md, sidecar = self._build(tmp, _surface(
+                "synth-a", NOW.isoformat(),
+                next_session={"degraded": True,
+                              "reason": "no root-level NEXT_SESSION.json"}))
+            self.assertEqual(self._ns_lines(md), [])
+            self.assertIsNone(sidecar["sections"]["surfaces"][0]["next_session"])
+            # the degradation is still reported, just not as a projection
+            self.assertTrue(any("degraded probe next_session" in w
+                                for w in sidecar["warnings"]))
+
+    def test_absent_when_surface_has_no_next_session_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            surf = _surface("synth-a", NOW.isoformat())
+            del surf["next_session"]
+            md, sidecar = self._build(tmp, surf)
+            self.assertEqual(self._ns_lines(md), [])
+            self.assertIsNone(sidecar["sections"]["surfaces"][0]["next_session"])
+
+    def test_absent_when_record_carries_no_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md, sidecar = self._build(tmp, _surface(
+                "synth-a", NOW.isoformat(),
+                next_session={"source": "next_session.py:v2", "as_of": "",
+                              "normalized": {"status": "", "summary": ""}}))
+            self.assertEqual(self._ns_lines(md), [])
+            self.assertIsNone(sidecar["sections"]["surfaces"][0]["next_session"])
+
+    def test_long_summary_hard_truncated_to_one_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            long_summary = ("synthetic sentence number %02d with padding text\n"
+                            % 0) + " ".join(
+                "synthetic sentence number %02d with padding text" % i
+                for i in range(1, 20))
+            md, sidecar = self._build(tmp, _surface(
+                "synth-a", NOW.isoformat(),
+                next_session=_next_session(status="blocked",
+                                           summary=long_summary)))
+            proj = sidecar["sections"]["surfaces"][0]["next_session"]
+            self.assertLessEqual(len(proj["summary"]),
+                                 ab.NEXT_SESSION_SUMMARY_CHARS)
+            self.assertTrue(proj["summary"].endswith("..."))
+            self.assertNotIn("\n", proj["summary"])
+            lines = self._ns_lines(md)
+            self.assertEqual(len(lines), 1)
+            self.assertIn("next-session[blocked]:", lines[0])
+
+    def test_short_summary_not_truncated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, sidecar = self._build(tmp, _surface(
+                "synth-a", NOW.isoformat(),
+                next_session=_next_session(summary="a short synthetic recap")))
+            proj = sidecar["sections"]["surfaces"][0]["next_session"]
+            self.assertEqual(proj["summary"], "a short synthetic recap")
+
+    def test_end_to_end_from_v2_tagged_fallback_shape_file(self):
+        # generate-surface's probe shape, fed by the M1 parser: a v2-TAGGED
+        # file carrying the free-form field set still reaches the pack.
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = ab.ns.normalize_file(_write(
+                os.path.join(tmp, "repo-a", "NEXT_SESSION.json"),
+                {"schema": "next-session/v2", "session_date": "2026-07-22",
+                 "project": "synth-a",
+                 "state": "PARKED pending a synthetic ruling; nothing installed.",
+                 "launch_one_liner": "Parked -- read the ruling first.",
+                 "next_action_for_agent": "Do not build until the ruling lands."}))
+            md, _ = self._build(tmp, _surface(
+                "synth-a", NOW.isoformat(),
+                next_session={"source": "next_session.py:%s"
+                                        % rec["detected_schema"],
+                              "as_of": NOW.isoformat(),
+                              "normalized": rec["normalized"]}))
+            lines = self._ns_lines(md)
+            self.assertEqual(len(lines), 1)
+            self.assertIn("next-session[parked]: PARKED pending a synthetic "
+                          "ruling; nothing installed.", lines[0])
 
 
 # --------------------------------------------------------------------------- #

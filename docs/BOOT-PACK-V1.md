@@ -21,26 +21,39 @@ non-enforcing, report-only, manually invoked. It performs **no git operations an
 no network**. The only files it writes are its own `state/` outputs, and it
 refuses to write a non-gitignored path.
 
-## Consumer contract -- `boot-pack/v1` has a LIVE external consumer
+## Consumer contract -- `boot-pack/v1` has ZERO live external consumers
 
-`boot-pack/v1` is **not** an internal-only shape. The Iris console server
-(`_awareness_digest`, in the vault's Iris runtime checkout) reads the JSON
-sidecar directly, from the **hardcoded absolute default path**
-`/Users/anthonyflores/code/fully-aware/state/boot-pack.json`, and **hard-validates**
-it: `schema == "boot-pack/v1"`, `generated_at`, `token_estimate`, `warnings[]`
-and `open_items[]` as arrays, and `sections.decision_queue.items[]` as an array.
-Anything else raises.
+The sole external consumer, the Iris console server (`_awareness_digest`), was
+**ARCHIVED 2026-08-04** -- anthony-wiki-vault commit `c54cb6c` (the coo-system ->
+`IRIS-archive/` migration); the runtime now sits, unrun, under
+`IRIS-archive/control-center/console/server.py`. Nothing listens on its port and
+no LaunchAgent starts it. As of today `boot-pack/v1` has **zero live external
+consumers**; the only readers are in-repo.
+
+The contract is **preserved intact for revival**, not relaxed. The archived
+server read the JSON sidecar directly, from the **hardcoded absolute default
+path** `/Users/anthonyflores/code/fully-aware/state/boot-pack.json`, and
+**hard-validated** it: `schema == "boot-pack/v1"`, `generated_at`,
+`token_estimate`, `warnings[]` and `open_items[]` as arrays, and
+`sections.decision_queue.items[]` as an array -- anything else raised. It then
+bounded the slice it kept to an **8KB digest cap** (`AWARENESS_DIGEST_MAX_BYTES
+= 8 * 1024`, first 20 decision-queue items), shedding list entries and setting
+`truncated` rather than exceeding it. Today's sidecar still passes that
+validation predicate unchanged.
 
 Two consequences:
 
-- **Any change to the sidecar schema MUST be reviewed against Iris first** --
-  renaming or retyping one of those fields silently breaks its awareness
-  context.
-- **Breakage is silent.** Iris wraps the whole read in an `except Exception`
-  guard (awareness must never abort packet or chat construction), so a missing,
-  moved, or schema-drifted pack degrades to `{"available": false, "reason": ...}`
-  with only a log line -- never an error the operator sees. Do not rely on Iris
-  to fail loudly.
+- **Any change to the sidecar schema MUST still be reviewed against that
+  predicate** -- renaming or retyping one of those fields is what would make a
+  revival dead on arrival, and with no live consumer today, nothing on this
+  machine would surface the drift.
+- **Breakage is silent, and now doubly so.** The archived server wrapped the
+  whole read in an `except Exception` guard (awareness must never abort packet
+  or chat construction), so a missing, moved, or schema-drifted pack degrades to
+  `{"available": false, "reason": ...}` with only a log line -- never an error
+  the operator sees. Do not rely on a revived Iris to fail loudly, and do not
+  read "nothing is complaining" as evidence the contract still holds: verify the
+  sidecar against the predicate above by hand.
 
 ## The four sections
 
@@ -61,7 +74,12 @@ Every entry is tagged `[source | as_of]`.
    a supported per-repo fallback that no repo here exercises (no `.macro/`
    directory exists on this machine). A missing/invalid surface for a manifest
    repo is a **degraded-source WARNING**, never a crash. Staleness threshold
-   **24h** (on the surface's `generated_at`).
+   **24h** (on the surface's `generated_at`). Each repo's block also renders its
+   `next_session` payload as **one** line — `next-session[<status>]: <summary>
+   [<parser source> | <as_of>]` — hard-truncated at 200 summary chars, so an
+   authored handoff (e.g. a `PARKED pending ruling` directive) reaches the
+   reader instead of dead-ending in the surface. A degraded `next_session` probe
+   projects nothing; it is already reported in the WARNING block.
 3. **Unified decision queue** -- a **PROJECTION** (routes, never absorbs
    ratification) over three feeds, rendered as one ordered inbox (oldest waiting
    first) with per-item age + provenance:

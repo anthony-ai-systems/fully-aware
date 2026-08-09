@@ -16,8 +16,8 @@ Stdlib only, Python 3.9+. NO git operations beyond the gitignore write-guard, NO
 network, and exactly one read-only shell-out: ``launchctl list`` (see
 ``launchctl_warnings`` -- this generator never loads, unloads, or kickstarts a
 job). It CONSUMES ``state/boot-pack.json`` (schema ``boot-pack/v1``) and never
-writes, rewrites, or reshapes the pack -- the pack has external consumers, and
-its schema is the contract. The only file this writes is its ``--out`` path
+writes, rewrites, or reshapes the pack -- its sole consumer archived 2026-08-04;
+the schema is a revival contract. The only file this writes is its ``--out`` path
 (written atomically via a sibling ``.tmp`` + ``os.replace``, so the hook never
 reads a half-written digest).
 
@@ -187,7 +187,7 @@ def _rel(path):
 
 
 # --------------------------------------------------------------------------- #
-# inputs -- the pack is READ ONLY; its schema is an external contract
+# inputs -- the pack is READ ONLY; its schema is a revival contract
 # --------------------------------------------------------------------------- #
 def load_pack(path):
     """Load the boot-pack sidecar, or None with a reason on any problem."""

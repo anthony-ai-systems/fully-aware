@@ -172,6 +172,29 @@ FIX_V2 = {
     "evidence": {"ci": "green"},
 }
 
+# The real-world shape (NOT the real content) of the v2-TAGGED files on this
+# machine: the v2 schema tag over the free-form fallback field set. Passthrough
+# alone left these with an empty summary, so authored content -- including a
+# parked directive -- never reached a reader.
+FIX_V2_FALLBACK_SHAPE = {
+    "schema": "next-session/v2",
+    "session_date": "2026-01-11",
+    "project": "demo-parked",
+    "state": "PARKED pending a synthetic ruling: nothing built here, no daemons "
+             "installed. No build work until the ruling lands.",
+    "launch_one_liner": "Parked -- consult the synthetic ruling first.",
+    "next_action_for_agent": "Read the synthetic ruling doc. Do not install "
+                             "anything or build until it lands.",
+}
+
+FIX_V2_FALLBACK_NO_ACTION = {
+    "schema": "next-session/v2",
+    "session_date": "2026-01-12",
+    "project": "demo-live",
+    "state": "Synthetic live lane, work in progress on the demo widget.",
+    "launch_one_liner": "Check the synthetic queue before building.",
+}
+
 FIX_FALLBACK = {
     "session_date": "2026-01-10",
     "project": "Synthetic free-form project line.",
@@ -277,6 +300,47 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(v2["environment"], "demo-env")  # keeps its own
         self.assertEqual(v2["status"], "in-progress")
         self.assertEqual(v2["next_action"]["then"], "delegate")
+
+    def test_v2_tagged_fallback_shape_is_gap_filled(self):
+        v2 = ns.adapt_v2(FIX_V2_FALLBACK_SHAPE, "demo-env")
+        self._require(v2)
+        self.assertTrue(v2["summary"], "v2-tagged fallback shape lost its summary")
+        self.assertIn("PARKED pending a synthetic ruling", v2["summary"])
+        self.assertEqual(v2["status"], "parked")
+        self.assertEqual(v2["written_at"], "2026-01-11")
+        self.assertIn("Read the synthetic ruling doc", v2["next_action"]["what"])
+
+    def test_v2_tagged_fallback_falls_back_to_launch_one_liner(self):
+        v2 = ns.adapt_v2(FIX_V2_FALLBACK_NO_ACTION, "demo-env")
+        self._require(v2)
+        self.assertEqual(v2["next_action"]["what"],
+                         "Check the synthetic queue before building.")
+        self.assertEqual(v2["status"], "in-progress")  # from state prose
+        self.assertEqual(v2["written_at"], "2026-01-12")
+
+    def test_v2_gap_fill_leaves_conforming_v2_untouched(self):
+        conforming = ns.adapt_v2(FIX_V2, "other-env")
+        self.assertEqual(conforming["summary"], "A synthetic v2 handoff.")
+        self.assertEqual(conforming["status"], "in-progress")
+        self.assertEqual(conforming["written_at"], "2026-01-09T00:00:00Z")
+        self.assertEqual(conforming["next_action"]["what"],
+                         "review the synthetic diff")
+        # A v2 file that also carries a fallback key keeps its own fields.
+        mixed = dict(FIX_V2)
+        mixed["state"] = "some stray prose that must not win"
+        mixed["session_date"] = "1999-01-01"
+        out = ns.adapt_v2(mixed, "other-env")
+        self.assertEqual(out["summary"], "A synthetic v2 handoff.")
+        self.assertEqual(out["written_at"], "2026-01-09T00:00:00Z")
+        self.assertEqual(out["status"], "in-progress")
+
+    def test_v2_tagged_fallback_shape_through_normalize_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = _write(os.path.join(d, "NEXT_SESSION.json"),
+                       json.dumps(FIX_V2_FALLBACK_SHAPE))
+            rec = ns.normalize_file(p)
+            self.assertEqual(rec["detected_schema"], "v2")
+            self.assertIn("PARKED", rec["normalized"]["summary"])
 
     def test_fallback(self):
         v2 = ns.adapt_fallback(FIX_FALLBACK, "demo-env")
