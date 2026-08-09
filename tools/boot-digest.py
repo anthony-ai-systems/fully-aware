@@ -13,7 +13,9 @@ this generator -- the only caller is the morning-pack wrapper Anthony armed by
 hand.
 
 Stdlib only, Python 3.9+. NO git operations beyond the gitignore write-guard, NO
-network. It CONSUMES ``state/boot-pack.json`` (schema ``boot-pack/v1``) and never
+network, and exactly one read-only shell-out: ``launchctl list`` (see
+``launchctl_warnings`` -- this generator never loads, unloads, or kickstarts a
+job). It CONSUMES ``state/boot-pack.json`` (schema ``boot-pack/v1``) and never
 writes, rewrites, or reshapes the pack -- the pack has external consumers, and
 its schema is the contract. The only file this writes is its ``--out`` path
 (written atomically via a sibling ``.tmp`` + ``os.replace``, so the hook never
@@ -28,10 +30,19 @@ already flags a stale one) and exits 0. Only a refused write path is a hard
 failure.
 
 Content, in order: header (pack timestamp + age, ``STALE (>36h)`` when old),
-WARNINGS (count + one compressed line each), OPEN ITEMS (count + first sentence
-each), ATTENTION (only repos behind their origin default branch or carrying decision-queue
-items -- healthy repos are skipped entirely), an optional daily-brief pointer,
-an optional IMPRINT summary, and the full-pack pointer.
+WARNINGS (count + one compressed line each, led by this run's own launchd
+probe), OPEN ITEMS (count + first sentence each), ATTENTION (only repos behind
+their origin default branch or carrying decision-queue items -- healthy repos
+are skipped entirely), an optional daily-brief pointer, an optional IMPRINT
+summary, and the full-pack pointer.
+
+Staleness is LOUD (2026-08-08 audit: silent staleness is this system's dominant
+failure mode -- every gate checked one file's own mtime, so a dead upstream job
+read as a healthy quiet one). Three additions carry that: an imprint export that
+parses to zero records warns instead of vanishing, an export older than 26h says
+so (with the live store's own last-write time beside it, making export-vs-store
+lag visible), and any ``com.anthonyflores.*`` / ``com.saga.*`` launchd job whose
+last run exited nonzero is named in WARNINGS.
 
 Hard cap: 500 tokens (chars/4 estimate, the assembler's idiom). Overflow sheds
 lowest-priority content first -- open items, then warnings, then attention lines
@@ -58,6 +69,8 @@ import datetime
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 
 PACK_SCHEMA = "boot-pack/v1"
@@ -72,6 +85,20 @@ IMPRINT_CAP_BYTES = 4000
 # A pack older than this is stale enough that the session must not trust it
 # (the daily LaunchAgent runs at 05:45, so >36h means a missed run).
 STALE_PACK = 36 * 3600
+
+# The imprint export is rewritten by the same 05:45 run, so anything past a day
+# plus the slack a late run needs means that step failed and the summary below
+# describes yesterday's judgment.
+STALE_EXPORT = 26 * 3600
+
+# The live store the markdown export is dumped from. Existence-guarded and
+# READ-ONLY (mtime only): this box has it, CI does not, and its absence costs
+# only the export-vs-store lag line.
+IMPRINT_DB = os.path.expanduser("~/.local/share/imprint/anthony/imprint.db")
+
+# launchd labels this system owns. A third-party updater's failure is noise; a
+# failure under these prefixes is a dead automation the session must hear about.
+LAUNCHD_PREFIXES = ("com.anthonyflores.", "com.saga.")
 
 # One compressed line per warning / open item; long lines are clipped, never
 # wrapped (a digest line is a pointer, the pack holds the full text).
@@ -135,6 +162,19 @@ def _parse_iso(token):
     return dt.astimezone(datetime.timezone.utc)
 
 
+def _ago(seconds):
+    """Coarse relative age: ``42m ago`` / ``3h ago`` / ``2d ago``.
+
+    A clock-skewed (future) mtime reads as ``0m ago`` rather than a negative.
+    """
+    seconds = max(0, int(seconds))
+    if seconds < 3600:
+        return "%dm ago" % (seconds // 60)
+    if seconds < 86400:
+        return "%dh ago" % (seconds // 3600)
+    return "%dd ago" % (seconds // 86400)
+
+
 def _rel(path):
     """Render an in-repo path repo-relative; anything else stays absolute."""
     ap = os.path.abspath(path)
@@ -181,20 +221,22 @@ def load_imprint(path):
     """Compact summary of the imprint markdown export, or None.
 
     Returns ``{"records": n, "newest": "YYYY-MM-DD"|None, "bytes": n,
-    "path": abspath}``. The count is approximate by design: a captured record
-    body that QUOTES other records (handoffs, past exports) contributes their
-    bullets too. The digest says "~N records" accordingly.
+    "mtime": epoch, "path": abspath}``. The count is approximate by design: a
+    captured record body that QUOTES other records (handoffs, past exports)
+    contributes their bullets too. The digest says "~N records" accordingly.
 
-    Degrades to None on a missing/unreadable/record-free file -- the digest
-    simply omits the section; morning-pack already warned about a failed
-    export.
+    Degrades to None only on a MISSING or unreadable file. A file that is
+    present but yields zero records comes back with ``records == 0``, not None:
+    that is the export drifting away from the line format above, and the
+    2026-08-08 audit found this exact case silently deleting the whole section
+    -- an unparseable export must be loud (see ``imprint_lines``).
     """
     if not path or not os.path.isfile(path):
         return None
     records = 0
     newest = None
     try:
-        size = os.path.getsize(path)
+        st = os.stat(path)
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for raw in fh:
                 if _IMPRINT_ENTRY_RE.match(raw):
@@ -204,30 +246,112 @@ def load_imprint(path):
                         newest = v.group(1)
     except OSError:
         return None
-    if not records:
+    return {"records": records, "newest": newest, "bytes": st.st_size,
+            "mtime": st.st_mtime, "path": os.path.abspath(path)}
+
+
+def live_store_mtime(path=IMPRINT_DB):
+    """Last-write time of the live imprint store, or None if unreadable.
+
+    Never raises: the store is a machine-local file the digest merely peeks at,
+    so an absent one (CI, another box) drops the lag line and nothing else.
+    """
+    try:
+        if not os.path.isfile(path) or not os.access(path, os.R_OK):
+            return None
+        return os.path.getmtime(path)
+    except OSError:
         return None
-    return {"records": records, "newest": newest, "bytes": size,
-            "path": os.path.abspath(path)}
 
 
-def imprint_lines(summary):
-    """Render the IMPRINT section lines from a load_imprint summary."""
+def imprint_lines(summary, now=None, db_path=IMPRINT_DB):
+    """Render the IMPRINT section lines from a load_imprint summary.
+
+    Loud on both failure modes the audit found silent: an export that parses to
+    zero records (line-format drift), and an export the 05:45 run did not
+    refresh. The live store's own last-write time rides alongside so
+    export-vs-store lag is visible rather than inferred. ``now`` is injectable
+    for determinism (the module docstring's only wall-clock rule).
+    """
     if not summary:
         return []
-    newest = summary["newest"] or "unknown"
-    mb = summary["bytes"] / (1024.0 * 1024.0)
-    lines = [
-        "IMPRINT (captured judgment -- bulk channel):",
-        "- ~%d records; newest capture %s" % (summary["records"], newest),
-        "- full export: %s (%.1f MB; grep on demand, `imprint history <urn>` "
-        "for provenance)" % (summary["path"], mb),
-        "",
-    ]
+    now_ts = (now or datetime.datetime.now(datetime.timezone.utc)).timestamp()
+    lines = ["IMPRINT (captured judgment -- bulk channel):"]
+    if summary["records"]:
+        lines.append("- ~%d records; newest capture %s"
+                     % (summary["records"], summary["newest"] or "unknown"))
+    else:
+        lines.append("- WARNING: imprint export present but unparseable "
+                     "(line-format drift?)")
+    age = now_ts - summary["mtime"]
+    if age > STALE_EXPORT:
+        lines.append("- WARNING: imprint export STALE: %dh old -- 05:45 export "
+                     "may have failed" % (age // 3600))
+    lines.append("- full export: %s (%.1f MB; grep on demand, `imprint history "
+                 "<urn>` for provenance)"
+                 % (summary["path"], summary["bytes"] / (1024.0 * 1024.0)))
+    live = live_store_mtime(db_path)
+    if live is not None:
+        lines.append("- live store last written %s" % _ago(now_ts - live))
+    lines.append("")
     # Independent byte cap (defensive; the summary is ~5 lines in practice).
+    # Shedding from the tail keeps the warnings, which are the point.
     while len("\n".join(lines).encode("utf-8")) > IMPRINT_CAP_BYTES \
             and len(lines) > 1:
         lines.pop()
     return lines
+
+
+def parse_launchctl(text):
+    """``[(label, exit_code), ...]`` for OUR launchd jobs that last exited nonzero.
+
+    Pure, so the raw text is the whole contract and tests inject canned output.
+    ``launchctl list`` prints a header row then three TAB-separated columns --
+    PID, last exit status, label -- where ``-`` means "not applicable" (not
+    running / never exited). A non-numeric status is not a failure signal, so
+    it is skipped rather than guessed at.
+    """
+    failing = []
+    for line in (text or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        _pid, status, label = (p.strip() for p in parts)
+        if not label.startswith(LAUNCHD_PREFIXES):
+            continue
+        try:
+            code = int(status)
+        except ValueError:
+            continue  # '-' (never exited), or the header row's "Status"
+        if code != 0:
+            failing.append((label, code))
+    return failing
+
+
+def _launchctl_list():
+    """``launchctl list`` output. READ-ONLY -- never load/unload/kickstart."""
+    return subprocess.run(["launchctl", "list"], capture_output=True, text=True,
+                          timeout=10, check=True).stdout
+
+
+def launchctl_warnings(runner=None):
+    """WARNING lines for our launchd jobs whose last run exited nonzero.
+
+    A dead scheduled job is invisible to every mtime-based freshness check --
+    its artifacts simply stop moving -- so the digest asks launchd directly.
+    Returns [] when launchctl is absent (Linux CI) or the probe fails: a digest
+    that cannot reach launchd says nothing about launchd rather than guessing.
+    """
+    if runner is None:
+        if not shutil.which("launchctl"):
+            return []
+        runner = _launchctl_list
+    try:
+        text = runner()
+    except Exception:  # noqa: BLE001 - a dead probe degrades, never aborts
+        return []
+    return ["- WARNING: launchd job %s last exit %d" % (label, code)
+            for label, code in parse_launchctl(text)]
 
 
 def load_daily_brief(path):
@@ -299,20 +423,29 @@ def attention_lines(pack):
     return lines
 
 
-def collect(now, pack, daily_brief=None, daily_brief_path=None):
-    """Fold the pack into the digest model (plain lists, shed-able)."""
+def collect(now, pack, daily_brief=None, daily_brief_path=None,
+            extra_warnings=None):
+    """Fold the pack into the digest model (plain lists, shed-able).
+
+    ``extra_warnings`` are pre-rendered lines from THIS run's own probes (the
+    launchd exit-code sweep), not from the pack. They lead the section: the
+    shed loop pops from the tail, so a locally-observed dead job outlives the
+    pack's own warnings under cap pressure.
+    """
     generated_at = pack.get("generated_at") or ""
     gen = _parse_iso(generated_at)
     age_hours = None
     if gen is not None:
         age_hours = max(0, int((now - gen).total_seconds()) // 3600)
     attention = attention_lines(pack)
+    warnings = list(extra_warnings or []) + \
+        ["- " + compress(w) for w in pack.get("warnings") or []]
     return {
         "generated_at": generated_at or "unknown",
         "age_hours": age_hours,
         "stale": gen is not None and (now - gen).total_seconds() > STALE_PACK,
-        "warnings": ["- " + compress(w) for w in pack.get("warnings") or []],
-        "warnings_total": len(pack.get("warnings") or []),
+        "warnings": warnings,
+        "warnings_total": len(warnings),
         "warnings_truncated": 0,
         "open_items": ["- " + first_sentence(o) for o in pack.get("open_items") or []],
         "open_items_total": len(pack.get("open_items") or []),
@@ -385,7 +518,8 @@ def render_md(model, imprint=None):
 
 
 def build_digest(now, pack, daily_brief=None, daily_brief_path=None,
-                 cap_tokens=HARD_CAP_TOKENS, imprint=None):
+                 cap_tokens=HARD_CAP_TOKENS, imprint=None,
+                 extra_warnings=None):
     """Build the digest markdown. ``now`` is injectable for determinism.
 
     The 500-token shed loop runs WITHOUT the imprint section: the IMPRINT
@@ -393,7 +527,7 @@ def build_digest(now, pack, daily_brief=None, daily_brief_path=None,
     docstring), so it must never pressure the shed loop into dropping
     warnings/attention lines that the cap exists to protect.
     """
-    model = collect(now, pack, daily_brief, daily_brief_path)
+    model = collect(now, pack, daily_brief, daily_brief_path, extra_warnings)
     md = render_md(model)
     while est_tokens(md) > cap_tokens:
         if not _shed_one(model):
@@ -419,7 +553,6 @@ def assert_gitignored(out_path):
     """Refuse an in-repo output path unless git ignores it (D30 state discipline)."""
     if not _inside(out_path, _REPO_ROOT):
         return
-    import subprocess
     env = dict(os.environ)
     env["LC_ALL"] = "C"
     proc = subprocess.run(
@@ -469,7 +602,8 @@ def main(argv=None):
                       daily_brief=load_daily_brief(args.daily_scan),
                       daily_brief_path=args.daily_scan,
                       cap_tokens=args.cap_tokens,
-                      imprint=imprint_lines(load_imprint(args.imprint)))
+                      imprint=imprint_lines(load_imprint(args.imprint), now=now),
+                      extra_warnings=launchctl_warnings())
 
     if args.stdout:
         sys.stdout.write(md)

@@ -22,6 +22,7 @@
 set -uo pipefail  # NOT -e: every path here must still exit 0.
 
 DIGEST="/Users/anthonyflores/code/fully-aware/state/BOOT-DIGEST.md"
+SCAN_LATEST="/Users/anthonyflores/code/fully-aware/state/daily-scan/LATEST.md"
 STALE_SECONDS=$((36 * 3600))
 
 [ -f "${DIGEST}" ] || exit 0
@@ -52,4 +53,20 @@ fi
 # anything legitimate, bounded against dumping a large file into every
 # session's opening context.
 head -c 12000 "${DIGEST}"
+
+# Ordering gap (2026-08-08 audit): the digest is written at 05:45 and the daily
+# scan lands at 06:15, so the "Daily brief:" line baked into the digest is
+# always the PREVIOUS day's -- and reads exactly like today's. Close it at the
+# point of consumption by quoting the live LATEST.md here. Its first line is the
+# brief's own date stamp (docs/DAILY-SCAN.md), so a date before today is the
+# stale-scan signal, visible without opening the file.
+#
+# Same discipline as everything above: absolute path, bounded output, and every
+# path exits 0 -- a missing or unreadable brief prints nothing at all.
+if [ -f "${SCAN_LATEST}" ]; then
+    # head -n 1 | head -c: line-bounded AND byte-bounded, both POSIX. A file
+    # with no trailing newline still yields its one line.
+    brief="$(head -n 1 "${SCAN_LATEST}" 2>/dev/null | head -c 200)"
+    [ -n "${brief}" ] && echo "Daily brief (live): ${brief}"
+fi
 exit 0
