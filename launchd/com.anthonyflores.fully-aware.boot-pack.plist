@@ -14,7 +14,7 @@
   surfaces. Per-repo generation failure degrades (log + continue), never aborts.
 
   INSTALLED AND ARMED: this plist is live in ~/Library/LaunchAgents/ and fires
-  daily at 05:45. Editing this file changes nothing on its own -- re-run
+  daily at 05:45. Editing this file changes nothing on its own; re-run
   tools/install-launchagent.sh to copy + reload the edited plist.
 
   D30 discipline: generate-surface.py and assemble-boot-pack.py stay read-only;
