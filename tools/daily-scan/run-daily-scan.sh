@@ -459,39 +459,65 @@ fi
 # to the prompt. Failure is soft in every direction: no gh, no auth, a repo that
 # is not a GitHub remote, or the whole thing hitting its own short watchdog just
 # means the scan runs without a PR block and says so.
+#
+# PR scope is pinned to each surface config's canonical `gh_repo` when declared
+# (`gh pr list -R`): a rich-lineage fork's checkout remotes must not decide
+# which repo's PRs count as evidence (atlas read upstream's PRs instead of the
+# six canonical ones, 2026-08-10 scan). Checkout inference is the fallback for
+# repos whose config declares no gh_repo.
 log "prs START -- collecting open-PR state for the scan prompt"
 
-manifest_repo_paths() {
+manifest_pr_targets() {
+    # One line per manifest repo: repo_path<TAB>gh_repo. gh_repo comes from the
+    # surface config sitting next to the manifest (tools/configs/<env>.json);
+    # empty when the config is missing or declares none.
     "${PY}" - "${MANIFEST}" <<'PYEOF' 2>/dev/null || true
-import json, sys
+import json, os, sys
 try:
     with open(sys.argv[1]) as fh:
         data = json.load(fh)
 except Exception:
     sys.exit(0)
+cfg_dir = os.path.dirname(sys.argv[1])
 for repo in data.get("repos", []):
     path = repo.get("repo_path")
-    if path:
-        print(path)
+    if not path:
+        continue
+    gh_repo = ""
+    env = repo.get("environment", "")
+    if env:
+        try:
+            with open(os.path.join(cfg_dir, env + ".json")) as fh:
+                gh_repo = json.load(fh).get("gh_repo", "") or ""
+        except Exception:
+            gh_repo = ""
+    print("%s\t%s" % (path, gh_repo))
 PYEOF
 }
 
 collect_pr_state() {
     {
         printf '## OPEN PULL REQUESTS (collected by the runner, %s)\n\n' "${DATE}"
-        printf 'Collected OUTSIDE the sandbox with `gh pr list --limit 10` per manifest repo.\n'
+        printf 'Collected OUTSIDE the sandbox with `gh pr list --limit 10` per manifest repo,\n'
+        printf 'pinned to the surface config'\''s canonical `gh_repo` where one is declared\n'
+        printf '(shown in the heading); checkout-inferred otherwise.\n'
         printf 'This is your PR state -- you cannot reach the network yourself. Treat it as\n'
         printf 'evidence, and say so if a repo block reports an error instead of a list.\n\n'
-        while IFS= read -r repo_path; do
+        while IFS=$'\t' read -r repo_path gh_repo; do
             [ -n "${repo_path}" ] || continue
-            printf '### %s\n\n```\n' "${repo_path}"
-            if [ ! -d "${repo_path}" ]; then
-                printf '(repo path does not exist)\n'
+            if [ -n "${gh_repo}" ]; then
+                printf '### %s (gh: %s)\n\n```\n' "${repo_path}" "${gh_repo}"
+                gh pr list -R "${gh_repo}" --limit 10 2>&1 || printf '(gh pr list failed -- see the line above)\n'
             else
-                (cd "${repo_path}" && gh pr list --limit 10 2>&1) || printf '(gh pr list failed -- see the line above)\n'
+                printf '### %s\n\n```\n' "${repo_path}"
+                if [ ! -d "${repo_path}" ]; then
+                    printf '(repo path does not exist)\n'
+                else
+                    (cd "${repo_path}" && gh pr list --limit 10 2>&1) || printf '(gh pr list failed -- see the line above)\n'
+                fi
             fi
             printf '```\n\n'
-        done < <(manifest_repo_paths)
+        done < <(manifest_pr_targets)
     } > "${PR_STATE_FILE}" 2>&1
 }
 
