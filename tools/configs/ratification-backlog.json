@@ -2,7 +2,7 @@
   "schema": "ratification-backlog/v1",
   "provenance": "manual",
   "maintained_by": "Anthony",
-  "as_of": "2026-07-23",
+  "as_of": "2026-08-11",
   "readme": "Hand-maintained standing ratification backlog. Anthony maintains this file by hand; the boot-pack assembler only READS it and PROJECTS its items into the unified decision queue (section 3). The queue ROUTES attention -- it never absorbs, performs, or clears ratification. Merge is Anthony's. Add real standing items as they arise (WITHOUT the 'placeholder' flag) and delete items once ratified. Each item: {id, summary, kind (ratification|merge|ruling), waiting_since (ISO date), source, placeholder?}. OPTIONAL 'placeholder': set true ONLY on the seed shape below -- the assembler SKIPS placeholder entries (they never enter the live inbox) and instead records one provenance footer line in the queue section noting the seed was skipped. Real items must NOT carry this flag.",
   "items": [
     {
@@ -12,6 +12,34 @@
       "waiting_since": "2026-07-23",
       "source": "tools/configs/ratification-backlog.json",
       "placeholder": true
+    },
+    {
+      "id": "RB-2026-07-23-SCAN-IFACE",
+      "summary": "Approve the scan-artifacts format (scan-consumption-interface-v1): spec in saga-protocol still says PROPOSED while the pack's scan section claims ratified -- align the spec once answered. Answer sheet: ~/code/RATIFICATION-BATCH-2026-08-11.md item 1",
+      "kind": "ratification",
+      "waiting_since": "2026-07-23",
+      "source": "tools/configs/ratification-backlog.json"
+    },
+    {
+      "id": "RB-2026-07-23-TASTE-SCHEMA",
+      "summary": "Rule that imprint owns the judgment format taste.v1 (Studio demoted to producer) -- this GATES the judgment write-back build. Answer sheet: ~/code/RATIFICATION-BATCH-2026-08-11.md item 2",
+      "kind": "ruling",
+      "waiting_since": "2026-07-23",
+      "source": "tools/configs/ratification-backlog.json"
+    },
+    {
+      "id": "RB-2026-07-23-STUDIO-REPIN",
+      "summary": "Approve Studio's marketing-os re-pin (SKILLS_SOURCE.commit in rail.ts; drift guard RED since Jul 22 -- re-check current SHAs, July ones are stale). Answer sheet: ~/code/RATIFICATION-BATCH-2026-08-11.md item 3",
+      "kind": "ratification",
+      "waiting_since": "2026-07-23",
+      "source": "tools/configs/ratification-backlog.json"
+    },
+    {
+      "id": "RB-2026-07-23-APNS",
+      "summary": "Greenlight iPhone pushes (APNs): confirm Apple team 2RLC9Y5AYA active + approve pre-drafted rulings P2d-R1..R4 (iris-ios + coo-system). Answer sheet: ~/code/RATIFICATION-BATCH-2026-08-11.md item 4",
+      "kind": "ruling",
+      "waiting_since": "2026-07-23",
+      "source": "tools/configs/ratification-backlog.json"
     }
   ]
 }

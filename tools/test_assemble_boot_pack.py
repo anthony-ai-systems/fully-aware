@@ -793,6 +793,106 @@ class NextSessionProjection(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Feed d: atlas-v2 adjudication queues
+# --------------------------------------------------------------------------- #
+class AdjudicationFeed(unittest.TestCase):
+    _FINDING = "### `~/somefile.md:1` (pr_state, STALE)\n\nbody\n"
+    _BOXES_UNCHECKED = "- [ ] **APPLY**\n- [ ] **REJECT**\n- [ ] **DEFER**\n"
+    _BOXES_ONE_CHECKED = "- [x] **APPLY**\n- [ ] **REJECT**\n- [ ] **DEFER**\n"
+
+    def _queue_file(self, n_findings, checked=0):
+        parts = ["# Adjudication queue: synthetic\n"]
+        for i in range(n_findings):
+            parts.append(self._FINDING)
+            parts.append(self._BOXES_ONE_CHECKED if i < checked
+                         else self._BOXES_UNCHECKED)
+        return "".join(parts)
+
+    def _build(self, tmp, adjudication_dir):
+        cache = os.path.join(tmp, "surfaces")
+        _write_surface(cache, _surface("synth-a", NOW.isoformat()))
+        return ab.build_pack(NOW, _manifest(), _backlog(items=[]), cache, None,
+                             adjudication_dir=adjudication_dir)
+
+    def test_newest_file_per_prefix_wins_and_unrelated_files_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pend = os.path.join(tmp, "pending")
+            _write(os.path.join(pend, "AUTO-APPLY-2026-08-09.md"),
+                   self._queue_file(9))
+            _write(os.path.join(pend, "AUTO-APPLY-2026-08-10.md"),
+                   self._queue_file(3))
+            # the real pending dir also holds handoffs/memory files -- ignored
+            _write(os.path.join(pend, "handoff-2026-07-03-synthetic.md"),
+                   "### not a finding\n")
+            _write(os.path.join(pend, "memory-project_synth.md"),
+                   "- [x] not an actioned box\n")
+            md, sidecar = self._build(tmp, pend)
+            items = [i for i in sidecar["sections"]["decision_queue"]["items"]
+                     if i["kind"] == "adjudication"]
+            self.assertEqual(len(items), 1)
+            self.assertIn("AUTO-APPLY-2026-08-10.md", items[0]["summary"])
+            self.assertIn("3 finding(s)", items[0]["summary"])
+            self.assertEqual(items[0]["as_of"], "2026-08-10")
+
+    def test_finding_and_actioned_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pend = os.path.join(tmp, "pending")
+            _write(os.path.join(pend, "BACKLOG-2026-08-10.md"),
+                   self._queue_file(5, checked=2))
+            adj = ab.load_adjudication(pend)
+            self.assertTrue(adj["present"])
+            self.assertEqual(len(adj["queues"]), 1)
+            q = adj["queues"][0]
+            self.assertEqual(q["queue"], "review backlog")
+            self.assertEqual(q["findings"], 5)
+            self.assertEqual(q["actioned"], 2)
+            self.assertEqual(q["as_of"], "2026-08-10")
+
+    def test_feed_d_items_render_with_kind_source_and_queue_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pend = os.path.join(tmp, "pending")
+            _write(os.path.join(pend, "AUTO-APPLY-2026-08-10.md"),
+                   self._queue_file(2))
+            _write(os.path.join(pend, "BACKLOG-2026-08-10.md"),
+                   self._queue_file(4, checked=1))
+            _write(os.path.join(pend, "RIPPLE-2026-07-20.md"),
+                   self._queue_file(1))
+            md, sidecar = self._build(tmp, pend)
+            items = [i for i in sidecar["sections"]["decision_queue"]["items"]
+                     if i["kind"] == "adjudication"]
+            self.assertEqual(len(items), 3)
+            self.assertTrue(all(i["source"] == "adjudication:atlas-v2"
+                                for i in items))
+            q = md[md.index("## 3."):md.index("## 4.")]
+            self.assertIn("atlas-v2 mechanical auto-apply queue: 2 finding(s) "
+                          "awaiting checkbox pass (0 actioned) -- "
+                          "AUTO-APPLY-2026-08-10.md", q)
+            self.assertIn("atlas-v2 review backlog: 4 finding(s) awaiting "
+                          "checkbox pass (1 actioned) -- BACKLOG-2026-08-10.md",
+                          q)
+            self.assertIn("atlas-v2 ripple review: 1 finding(s) awaiting "
+                          "checkbox pass (0 actioned) -- RIPPLE-2026-07-20.md",
+                          q)
+
+    def test_unconfigured_dir_is_silently_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md, sidecar = self._build(tmp, None)
+            items = sidecar["sections"]["decision_queue"]["items"]
+            self.assertFalse(any(i["kind"] == "adjudication" for i in items))
+            self.assertFalse(any("adjudication" in w
+                                 for w in sidecar["warnings"]))
+
+    def test_configured_but_missing_dir_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md, sidecar = self._build(tmp, os.path.join(tmp, "no-such-pending"))
+            items = sidecar["sections"]["decision_queue"]["items"]
+            self.assertFalse(any(i["kind"] == "adjudication" for i in items))
+            self.assertTrue(any("adjudication" in w
+                                for w in sidecar["warnings"]),
+                            sidecar["warnings"])
+
+
+# --------------------------------------------------------------------------- #
 # Fix 4: scan-section absence copy (two variants)
 # --------------------------------------------------------------------------- #
 class ScanAbsenceCopy(unittest.TestCase):
