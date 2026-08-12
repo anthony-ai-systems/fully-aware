@@ -185,6 +185,14 @@ class AttentionLines(unittest.TestCase):
             queue_items=[{"summary": "a", "source": "next-session:synth-offpack"}]))
         self.assertIn("- synth-offpack: 1 decision-queue item(s)", md)
 
+    def test_adjudication_feed_attributes_to_atlas_v2(self):
+        md = bd.build_digest(NOW, _pack(
+            queue_items=[{"summary": "atlas-v2 review backlog: 4 finding(s)",
+                          "source": "adjudication:atlas-v2"},
+                         {"summary": "atlas-v2 auto-apply: 2 finding(s)",
+                          "source": "adjudication:atlas-v2"}]))
+        self.assertIn("- atlas-v2: 2 decision-queue item(s)", md)
+
     def test_unattributable_queue_source_makes_no_repo_line(self):
         md = bd.build_digest(NOW, _pack(
             queue_items=[{"summary": "a", "source": "ratification-backlog.json"}]))

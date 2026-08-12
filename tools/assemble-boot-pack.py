@@ -9,9 +9,11 @@ Fully Aware macro session loads regardless of cwd:
   2. State surfaces       -- the fold of every discoverable surface (surface/v1,
                              produced by generate-surface.py; normally state/surfaces/).
   3. Unified decision queue -- a PROJECTION (routes, never absorbs ratification)
-                             over three feeds: surface decisions[], next-session
-                             human_only[] (via the M1 next_session.py parser), and
-                             a hand-maintained ratification backlog.
+                             over four feeds: surface decisions[], next-session
+                             human_only[] (via the M1 next_session.py parser),
+                             a hand-maintained ratification backlog, and the
+                             atlas-v2 adjudication queues (checkbox files the
+                             nightly ripple sweep writes into the vault).
   4. Scan / priorities feed -- consumes scan-consumption-interface-v1 artifacts
                              (weights / scan-targets / suppression / optional
                              intentions) from a configurable --scan-consumption-dir.
@@ -222,6 +224,70 @@ def load_backlog(path):
             "source": os.path.relpath(path, _REPO_ROOT)}
 
 
+# Atlas-v2 adjudication queue prefixes -> plain queue names. The nightly ripple
+# sweep re-derives its FULL queue each run, so only the lexically last file per
+# prefix is current (ISO-dated filenames sort correctly); older ones are
+# superseded, never additive.
+ADJUDICATION_PREFIXES = (
+    ("AUTO-APPLY-", "mechanical auto-apply queue"),
+    ("BACKLOG-", "review backlog"),
+    ("RIPPLE-", "ripple review"),
+)
+
+# An actioned checkbox: "- [x]" / "- [X]" (findings carry APPLY/REJECT/DEFER
+# boxes; any checked box counts as actioned).
+_ADJUDICATION_ACTIONED_RE = re.compile(r"^\s*-\s*\[[xX]\]")
+
+
+def load_adjudication(pending_dir):
+    """Atlas-v2 adjudication queues are OPTIONAL and degrade to empty.
+
+    ``pending_dir=None`` means the feed is not configured: silently absent (no
+    warning -- mirrors an unconfigured scan dir). A configured-but-missing dir
+    returns ``present: False`` with a reason so collect() can warn. For each
+    queue prefix only the newest ``<prefix>*.md`` is read; findings are the
+    ``### `` heading lines, actioned boxes are checked checkboxes, and as_of is
+    the ISO date carved from the filename. READ-ONLY: the vault is never
+    written.
+    """
+    if not pending_dir:
+        return {"present": False, "queues": [], "reason": None}
+    if not os.path.isdir(pending_dir):
+        return {"present": False, "queues": [],
+                "reason": "adjudication pending dir does not exist: %s"
+                % pending_dir}
+    try:
+        names = os.listdir(pending_dir)
+    except OSError as exc:
+        return {"present": False, "queues": [],
+                "reason": "unreadable adjudication pending dir: %s" % exc}
+    queues = []
+    for prefix, queue_name in ADJUDICATION_PREFIXES:
+        matches = sorted(n for n in names
+                         if n.startswith(prefix) and n.endswith(".md"))
+        if not matches:
+            continue
+        fname = matches[-1]
+        findings = 0
+        actioned = 0
+        try:
+            with open(os.path.join(pending_dir, fname), "r",
+                      encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if line.startswith("### "):
+                        findings += 1
+                    elif _ADJUDICATION_ACTIONED_RE.match(line):
+                        actioned += 1
+        except OSError as exc:
+            queues.append({"file": fname, "queue": queue_name,
+                           "degraded": True, "reason": str(exc)})
+            continue
+        queues.append({"file": fname, "queue": queue_name,
+                       "findings": findings, "actioned": actioned,
+                       "as_of": fname[len(prefix):-len(".md")]})
+    return {"present": True, "queues": queues, "reason": None}
+
+
 # --------------------------------------------------------------------------- #
 # surfaces (artifact 1 fold)
 # --------------------------------------------------------------------------- #
@@ -408,8 +474,11 @@ def load_scan(scan_dir, now):
 # --------------------------------------------------------------------------- #
 # model assembly
 # --------------------------------------------------------------------------- #
-def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir):
+def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
+            adjudication=None):
     """Build the section data model + warnings + open-items. Pure data (no md)."""
+    adjudication = adjudication or {"present": False, "queues": [],
+                                    "reason": None}
     warnings = []
     manifest_as_of = manifest.get("as_of", "")
 
@@ -500,6 +569,25 @@ def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir):
         "source": backlog.get("source", "ratification-backlog.json"),
         "as_of": backlog.get("as_of", ""),
     }
+    # feed d: atlas-v2 adjudication queues (one item per current queue file;
+    # the loader already reduced each queue to its newest file + counts).
+    if adjudication.get("reason"):
+        warnings.append("adjudication feed unavailable: %s"
+                        % adjudication["reason"])
+    for aq in adjudication.get("queues", []):
+        if aq.get("degraded"):
+            warnings.append("adjudication queue %s unreadable: %s"
+                            % (aq.get("file"), aq.get("reason")))
+            continue
+        queue.append({
+            "summary": "atlas-v2 %s: %d finding(s) awaiting checkbox pass "
+                       "(%d actioned) -- %s"
+                       % (aq["queue"], aq["findings"], aq["actioned"],
+                          aq["file"]),
+            "kind": "adjudication",
+            "source": "adjudication:atlas-v2",
+            "as_of": aq["as_of"],
+        })
     # deterministic order: oldest waiting first (missing as_of sorts last),
     # tie-break by source then summary.
     def _qkey(q):
@@ -525,9 +613,10 @@ def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir):
         "specified by SS3.1 as a projection over the COS v2 event contract, with "
         "mission-control as a second head over the same projection. No concrete "
         "COS v2 event SOURCE exists on disk yet, so this assembler projects over "
-        "the three available feeds (surface decisions[], next-session "
-        "human_only[], ratification backlog) instead. Wire the COS v2 event "
-        "source into this projection when it lands -- do NOT invent a reader.",
+        "the four available feeds (surface decisions[], next-session "
+        "human_only[], ratification backlog, atlas-v2 adjudication) instead. "
+        "Wire the COS v2 event source into this projection when it lands -- do "
+        "NOT invent a reader.",
     ]
 
     return {
@@ -692,8 +781,9 @@ def render_surfaces(model, now):
 def render_queue(model, now):
     lines = ["## 3. Unified decision queue (projection -- routes, never absorbs)",
              "_one ordered inbox, oldest waiting first; projection over surface "
-             "decisions[], next-session human_only[], and the ratification "
-             "backlog. See OPEN-ITEMS for COS v2 wiring._", ""]
+             "decisions[], next-session human_only[], the ratification "
+             "backlog, and the atlas-v2 adjudication queues. See OPEN-ITEMS "
+             "for COS v2 wiring._", ""]
     if not model["queue"]:
         lines.append("- (empty) no decisions, human-only items, or backlog "
                      "entries across the manifest.")
@@ -813,9 +903,10 @@ def _drop_one_next_lane(model):
 
 
 def build_pack(now, manifest, backlog, surfaces_cache_dir, scan_dir,
-               cap_tokens=HARD_CAP_TOKENS):
+               adjudication_dir=None, cap_tokens=HARD_CAP_TOKENS):
     """Assemble (markdown, sidecar_dict). ``now`` is injectable for determinism."""
-    model = collect(now, manifest, backlog, surfaces_cache_dir, scan_dir)
+    model = collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
+                    adjudication=load_adjudication(adjudication_dir))
 
     # truncation loop: shed lowest-priority next_lanes until under the cap.
     md = render_md(model, now)
@@ -910,6 +1001,12 @@ def main(argv=None):
     ap.add_argument("--scan-consumption-dir", default=None,
                     help="scan-consumption-interface-v1 artifact dir "
                          "(absent -> section renders 'no scan artifacts found')")
+    ap.add_argument("--adjudication-dir",
+                    default=os.path.expanduser(
+                        "~/code/anthony-wiki-vault/adjudication/pending"),
+                    help="atlas-v2 adjudication pending dir (read-only; the "
+                         "newest AUTO-APPLY-/BACKLOG-/RIPPLE-*.md per prefix "
+                         "feeds the decision queue)")
     ap.add_argument("--out-md", default=_default("state", "BOOT-PACK.md"))
     ap.add_argument("--out-json", default=_default("state", "boot-pack.json"))
     ap.add_argument("--stdout", action="store_true",
@@ -922,7 +1019,8 @@ def main(argv=None):
         now = datetime.datetime.now(datetime.timezone.utc)
         md, sidecar = build_pack(now, manifest, backlog,
                                  args.surfaces_cache_dir,
-                                 args.scan_consumption_dir)
+                                 args.scan_consumption_dir,
+                                 adjudication_dir=args.adjudication_dir)
         if args.stdout:
             sys.stdout.write(md)
             _report(sys.stderr, sidecar, dest="stdout")

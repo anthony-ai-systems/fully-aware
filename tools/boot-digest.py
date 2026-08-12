@@ -115,9 +115,11 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACK_MD = os.path.join(_REPO_ROOT, "state", "BOOT-PACK.md")
 PACK_POINTER = "Full pack: %s" % PACK_MD
 
-# Decision-queue items carry a "<feed>:<environment>" source; these two feeds
-# are repo-attributable (a ratification-backlog item is not).
-_REPO_FEEDS = ("next-session:", "surface:")
+# Decision-queue items carry a "<feed>:<environment>" source; these feeds are
+# repo/system-attributable (a ratification-backlog item is not). The
+# adjudication feed attributes to "atlas-v2" -- a system, not a repo, but the
+# ATTENTION list is exactly where its unactioned queues belong.
+_REPO_FEEDS = ("next-session:", "surface:", "adjudication:")
 
 _SENTENCE_RE = re.compile(r"^(.*?[.!?])(?:\s|$)", re.DOTALL)
 _WS_RE = re.compile(r"\s+")
