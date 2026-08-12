@@ -1,0 +1,19 @@
+{
+  "schema": "entity-registry/v1",
+  "provenance": "manual",
+  "_comment": "PLACEHOLDERS ONLY. The live registry lives in imprint's operator data root (<data_root>/<operator>/macroseat/entity-registry.json) because it holds client names — P25: networked repos stay client-clean. kind: client|collaborator|partner. project_dir_globs match the session's cwd (full path or basename).",
+  "entities": [
+    {
+      "slug": "example-client",
+      "kind": "client",
+      "aliases": ["Example Client", "EC"],
+      "project_dir_globs": ["*/example-client-*", "*/client-work-ec*"]
+    },
+    {
+      "slug": "example-collaborator",
+      "kind": "collaborator",
+      "aliases": ["Ex Collaborator"],
+      "project_dir_globs": []
+    }
+  ]
+}
