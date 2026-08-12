@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -30,11 +30,55 @@ jobs:
       # plistlib is stricter than launchd's own parser (e.g. rejects '--'
       # inside XML comments), so this catches drift plutil would let slide.
       - name: Lint launchd plists
-        run: python -c 'import plistlib,glob; ps=sorted(glob.glob("launchd/*.plist")); assert ps, "no plists found"; [plistlib.load(open(p,"rb")) for p in ps]; print(len(ps), "plists OK")'
+        run: |
+          python - <<'PY'
+          import glob
+          import os
+          import plistlib
+
+          prefix = "/Users/anthonyflores/code/fully-aware/"
+          plists = sorted(glob.glob("launchd/*.plist"))
+          assert plists, "no plists found"
+          repo_path_arguments = 0
+
+          for plist_path in plists:
+              with open(plist_path, "rb") as handle:
+                  plist = plistlib.load(handle)
+              if "ProgramArguments" not in plist:
+                  raise AssertionError(f"{plist_path}: missing ProgramArguments")
+
+              for argument in plist["ProgramArguments"]:
+                  if not isinstance(argument, str) or not argument.startswith(prefix):
+                      continue
+                  relative_path = argument[len(prefix):]
+                  target_path = os.path.join(os.getcwd(), relative_path)
+                  if not os.path.isfile(target_path):
+                      raise AssertionError(f"{plist_path}: {argument}: missing/not file")
+                  if not os.access(target_path, os.X_OK):
+                      raise AssertionError(f"{plist_path}: {argument}: not executable")
+                  repo_path_arguments += 1
+
+          print(f"{len(plists)} plists OK; {repo_path_arguments} repo-path arguments verified")
+          PY
+
+      # Shellcheck is preinstalled on Ubuntu; -S error is a floor, so
+      # style/info findings do not gate CI.
+      - name: Shellcheck shell scripts
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          scripts=(tools/**/*.sh)
+          if (( ${#scripts[@]} == 0 )); then
+              echo "No shell scripts found under tools/" >&2
+              exit 1
+          fi
+          echo "Shellcheck files (${#scripts[@]}):"
+          printf '%s\n' "${scripts[@]}"
+          shellcheck -S error "${scripts[@]}"
 
       # The suite has no third-party imports beyond the runner itself.
       - name: Install test runner
-        run: python -m pip install --upgrade pip pytest
+        run: python -m pip install --upgrade pip 'pytest~=9.1'
 
       - name: Run tests
         run: python -m pytest tools/
