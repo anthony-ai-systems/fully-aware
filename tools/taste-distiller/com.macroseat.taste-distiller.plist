@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.macroseat.taste-distiller</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>-lc</string>
+		<string>exec python3 "$HOME/code/fully-aware/tools/taste-distiller/taste_distiller.py"</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>900</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/anthonyflores/.optimus/logs/taste-distiller.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/anthonyflores/.optimus/logs/taste-distiller.err.log</string>
+</dict>
+</plist>

@@ -23,15 +23,19 @@ stale pack.
   limited to read-only `gh` queries (open-PR counts, cold-load probes) —
   behind-origin counts therefore reflect the last out-of-band fetch, not live
   origin state.
-- **Two LaunchAgents are armed** — the tools above are scheduled, not only
+- **Three LaunchAgents are armed** — the tools above are scheduled, not only
   manual. `boot-pack` (05:45 daily, lane M4 §6.5) runs `tools/morning-pack.sh`:
   regenerates every surface into `state/surfaces/`, runs the imprint CLI bulk
   export to `state/imprint-store.md` (audit-sanctioned content channel,
   2026-08-07), assembles the pack, writes the digest. `daily-scan` (06:15
   daily) runs the Codex/Fable scan pipeline under `tools/daily-scan/`, which
-  spends model tokens and writes `state/daily-scan/`. Both write only
-  gitignored `state/` (plus the codex CLI's own `~/.codex` rollouts); neither
-  commits, pushes, or merges anything.
+  spends model tokens and writes `state/daily-scan/`. Those two write only
+  gitignored `state/` (plus the codex CLI's own `~/.codex` rollouts).
+  `com.macroseat.taste-distiller` (every 15 min, M3 §2, armed via
+  `tools/taste-distiller/arm-taste-distiller.sh` — Anthony-run) spends Haiku
+  tokens and writes imprint's ingest quarantine + its own `macroseat/` state
+  in imprint's data root; it only ever proposes (`ingest scan`), never
+  keeps/kills. None of the three commits, pushes, or merges anything.
 - **Merge is Anthony's.** Nothing here merges, pushes, or auto-ratifies. Refresh
   automation proposes PRs at most.
 - **`state/` is local-only** and gitignored (holds the boot pack, surfaces cache,
