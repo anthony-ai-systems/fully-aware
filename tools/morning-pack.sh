@@ -100,6 +100,16 @@ else
     echo "morning-pack: WARNING imprint venv missing (${IMPRINT_PY}); skipping imprint export" >&2
 fi
 
+# Imprint health persistence (xray finding 2026-08-16): the health verdict is
+# stdout-only inside imprint by design; this lane change persists it to the
+# gitignored state/ cache so external scanners (x-ray file_json probe) can read
+# it. Same degrade-not-abort contract as the export above.
+if [ -x "${IMPRINT_PY}" ]; then
+    echo "morning-pack: persisting imprint health JSON"
+    "${IMPRINT_PY}" -m imprint.cli health > "${REPO_ROOT}/state/imprint-health.json" \
+        || echo "morning-pack: WARNING imprint health persist FAILED (exit $?); continuing" >&2
+fi
+
 echo "morning-pack: assembling boot pack"
 "${PY}" "${ASM}" "$@"
 asm_rc=$?
