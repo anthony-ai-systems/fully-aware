@@ -27,7 +27,8 @@ import os
 import sys
 
 from taste_distiller import (load_imprint_config, load_ledger, ledger_path,
-                             macroseat_root, queue_path, read_queue)
+                             macroseat_root, open_private, queue_path,
+                             read_queue)
 
 PROJECTS = os.path.expanduser("~/.claude/projects")
 
@@ -104,7 +105,7 @@ def main(argv=None):
         return 0
 
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    with open(queue_path(root), "a", encoding="utf-8") as fh:
+    with open_private(queue_path(root), append=True) as fh:
         for session_id, path, project_dir in fresh:
             fh.write(json.dumps({
                 "session_id": session_id,

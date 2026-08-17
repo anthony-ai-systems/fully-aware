@@ -11,6 +11,7 @@ touched (model + ingest calls are mocked). Run with:
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -96,6 +97,61 @@ class HookTest(unittest.TestCase):
                               capture_output=True, text=True, env=env)
         self.assertEqual(proc.returncode, 0)
         self.assertFalse(os.path.exists(os.path.join(self.root, "distill-queue.ndjson")))
+
+
+class PrivateModeTest(unittest.TestCase):
+    """Every creation site must be owner-only regardless of umask: this state
+    lives inside imprint's data root, whose health scan degrades on any
+    group/world bit (the 2026-08-16 unsafe_permissions flag was our ledger)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old_umask = os.umask(0o022)
+
+    def tearDown(self):
+        os.umask(self.old_umask)
+        shutil.rmtree(self.tmp)
+
+    def _mode(self, path):
+        return stat.S_IMODE(os.lstat(path).st_mode)
+
+    def test_save_ledger_creates_owner_only(self):
+        path = os.path.join(self.tmp, "distill-ledger.json")
+        td.save_ledger(path, {"s1": {"status": "done"}})
+        self.assertEqual(self._mode(path), 0o600)
+
+    def test_open_private_append_creates_owner_only(self):
+        path = os.path.join(self.tmp, "q.ndjson")
+        with td.open_private(path, append=True) as fh:
+            fh.write("a\n")
+        with td.open_private(path, append=True) as fh:
+            fh.write("b\n")
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "a\nb\n")
+        self.assertEqual(self._mode(path), 0o600)
+
+    def test_hook_creates_owner_only_state(self):
+        cfg_path, root = _make_operator_root(self.tmp)
+        env = dict(os.environ, IMPRINT_CONFIG=cfg_path)
+        event = {"session_id": "s1", "transcript_path": "/tmp/t.jsonl"}
+        proc = subprocess.run([sys.executable, HOOK], input=json.dumps(event),
+                              capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(self._mode(root), 0o700)
+        self.assertEqual(
+            self._mode(os.path.join(root, "distill-queue.ndjson")), 0o600)
+
+    def test_tighten_modes_heals_loose_state(self):
+        root = os.path.join(self.tmp, "macroseat")
+        os.makedirs(root)
+        os.chmod(root, 0o755)
+        loose = os.path.join(root, "distill-queue.ndjson")
+        with open(loose, "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        os.chmod(loose, 0o644)
+        td.tighten_modes(root)
+        self.assertEqual(self._mode(root), 0o700)
+        self.assertEqual(self._mode(loose), 0o600)
 
 
 class QueueLedgerTest(unittest.TestCase):
