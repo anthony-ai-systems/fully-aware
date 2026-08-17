@@ -97,6 +97,24 @@ def registry_path(root):
     return os.path.join(root, "entity-registry.json")
 
 
+def open_private(path, append=False):
+    """Owner-only create (0600 regardless of umask). This state lives inside
+    imprint's data root, whose health scan degrades on any group/world bit;
+    a plain open() creates 0644 under the default umask."""
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC)
+    return os.fdopen(os.open(path, flags, 0o600), "w", encoding="utf-8")
+
+
+def tighten_modes(root):
+    """Self-heal owner-only modes on state created by pre-fix writers (the
+    hook's queue-create and this worker's ledger were umask-loose once)."""
+    os.chmod(root, 0o700)
+    for name in os.listdir(root):
+        path = os.path.join(root, name)
+        if os.path.isfile(path) and not os.path.islink(path):
+            os.chmod(path, 0o600)
+
+
 def read_queue(path):
     """Lenient NDJSON read: malformed lines are reported, never fatal."""
     entries, bad = [], 0
@@ -135,7 +153,7 @@ def load_ledger(path):
 
 def save_ledger(path, ledger):
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    with open_private(tmp) as fh:
         json.dump(ledger, fh, indent=1, sort_keys=True)
     os.replace(tmp, path)
 
@@ -565,10 +583,11 @@ def main(argv=None):
 
     data_root, operator = load_imprint_config()
     root = macroseat_root(data_root, operator)
-    os.makedirs(root, exist_ok=True)
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    tighten_modes(root)
 
     # Single-instance lock: overlapping ticks exit quietly (not an error).
-    lock = open(os.path.join(root, "worker.lock"), "w", encoding="utf-8")
+    lock = open_private(os.path.join(root, "worker.lock"))
     try:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

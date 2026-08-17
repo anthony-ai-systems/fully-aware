@@ -30,15 +30,18 @@ def main():
         with open(cfg_path, encoding="utf-8") as fh:
             cfg = json.load(fh)
         root = os.path.join(cfg["data_root"], cfg["operator_slug"], "macroseat")
-        os.makedirs(root, exist_ok=True)
+        os.makedirs(root, mode=0o700, exist_ok=True)
         line = json.dumps({
             "session_id": session_id,
             "transcript_path": transcript,
             "project_dir": event.get("cwd", ""),
             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }, separators=(",", ":"))
-        with open(os.path.join(root, "distill-queue.ndjson"), "a",
-                  encoding="utf-8") as fh:
+        # 0600 create — this tree sits inside imprint's data root, whose
+        # health scan degrades on any group/world-accessible path.
+        fd = os.open(os.path.join(root, "distill-queue.ndjson"),
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(line + "\n")
     except Exception:  # noqa: BLE001 — fail-open by contract
         pass
