@@ -707,6 +707,35 @@ else
             [ -n "${stamped}" ] && rm -f "${stamped}"
             log "stage3 WARNING -- could not date-stamp ${BRIEF_FILE}; copying it unstamped"
         fi
+        # W9: top-10 hard cap + dead-man lanes section (AUTONOMY-AUDIT-2026-08-18).
+        # Deterministic post-processing, no model in the loop. Failure is soft
+        # but LOUD: a broken cap degrades to an uncapped brief; a broken
+        # dead-man check degrades to an explicit failure marker IN the brief.
+        # The section may never be absent, and never silently green.
+        DEADMAN_PY="${PROMPT_DIR}/deadman_lanes.py"
+        if "${PY}" "${DEADMAN_PY}" cap --brief "${BRIEF_FILE}" --max-items 10 2>>"${LOG}"; then
+            log "stage3 -- top-10 cap applied to ${BRIEF_FILE}"
+        else
+            log "stage3 WARNING -- top-10 cap failed; brief left uncapped"
+        fi
+        # Capture to a tmp first: a helper that crashes mid-print must not
+        # leave half a section in the brief. mktemp in raw/ per the stamped-tmp
+        # rationale above; the retention sweep ages out any orphan.
+        deadman_out="$(mktemp "${RAW_DIR}/${DATE}-deadman.XXXXXX" 2>/dev/null)"
+        if [ -n "${deadman_out}" ] \
+            && launchctl list 2>>"${LOG}" \
+               | "${PY}" "${DEADMAN_PY}" deadman \
+                     --map "${REPO_ROOT}/state/automation-map.json" \
+                     --launchctl-list - > "${deadman_out}" 2>>"${LOG}" \
+            && [ -s "${deadman_out}" ]; then
+            { printf '\n'; cat "${deadman_out}"; } >> "${BRIEF_FILE}"
+            log "stage3 -- dead-man lanes section appended"
+        else
+            printf '\n### LANES THAT DID NOT RUN\n\nDEAD-MAN CHECK FAILED — see daily-scan log.\n' >> "${BRIEF_FILE}"
+            log "stage3 WARNING -- dead-man check failed; explicit failure marker appended to the brief"
+        fi
+        [ -n "${deadman_out}" ] && rm -f "${deadman_out}" 2>/dev/null
+
         cp "${BRIEF_FILE}" "${LATEST_FILE}"
         log "stage3 OK -- brief at ${BRIEF_FILE}; LATEST.md updated"
         log "headline: ${brief_headline}"
