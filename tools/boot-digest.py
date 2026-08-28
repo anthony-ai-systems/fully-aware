@@ -29,7 +29,9 @@ writes NOTHING (any existing digest is left untouched -- the SessionStart hook
 already flags a stale one) and exits 0. Only a refused write path is a hard
 failure.
 
-Content, in order: header (pack timestamp + age, ``STALE (>36h)`` when old),
+Content, in order: DEFECTS (the register's one summary line plus up to three of
+Anthony's own items -- the first thing any session reads, and never shed),
+header (pack timestamp + age, ``STALE (>36h)`` when old),
 WARNINGS (count + one compressed line each, led by this run's own launchd
 probe), OPEN ITEMS (count + first sentence each), ATTENTION (only repos behind
 their origin default branch or carrying decision-queue items -- healthy repos
@@ -46,8 +48,8 @@ last run exited nonzero is named in WARNINGS.
 
 Hard cap: 500 tokens (chars/4 estimate, the assembler's idiom). Overflow sheds
 lowest-priority content first -- open items, then warnings, then attention lines
--- each with an explicit ``[truncated]`` marker. The header, the daily-brief
-pointer, and the full-pack pointer are NEVER shed.
+-- each with an explicit ``[truncated]`` marker. The DEFECTS lines, the header,
+the daily-brief pointer, and the full-pack pointer are NEVER shed.
 
 The IMPRINT section (audit P1-1) sits OUTSIDE the 500-token cap with its own
 independent byte cap. It summarizes ``state/imprint-store.md`` -- the bulk
@@ -91,6 +93,12 @@ STALE_PACK = 36 * 3600
 # describes yesterday's judgment.
 STALE_EXPORT = 26 * 3600
 
+# The defect status is rewritten by the same 05:45 run. The boot pack marks its
+# summary line STALE past 36h; the digest rebuilds that line from the same
+# counts, so it must carry the same mark or a session reads old numbers as new.
+STALE_DEFECTS = 36 * 3600
+DEFENSE_LINES_SENTINEL = object()
+
 # The live store the markdown export is dumped from. Existence-guarded and
 # READ-ONLY (mtime only): this box has it, CI does not, and its absence costs
 # only the export-vs-store lag line.
@@ -120,6 +128,10 @@ PACK_POINTER = "Full pack: %s" % PACK_MD
 # adjudication feed attributes to "atlas-v2" -- a system, not a repo, but the
 # ATTENTION list is exactly where its unactioned queues belong.
 _REPO_FEEDS = ("next-session:", "surface:", "adjudication:")
+
+# Defects (pack section 0) lead the digest: the count line, then at most this
+# many of Anthony's own items. These lines are NEVER shed -- see _shed_one.
+DEFECT_LINES = 3
 
 _SENTENCE_RE = re.compile(r"^(.*?[.!?])(?:\s|$)", re.DOTALL)
 _WS_RE = re.compile(r"\s+")
@@ -392,6 +404,96 @@ def queue_counts(pack):
     return counts
 
 
+def defects_summary_line(counts):
+    """The ONE defect line, built from the pack sidecar's counts block.
+
+    Deliberately duplicated in verify-defects.py and assemble-boot-pack.py
+    rather than imported: the three tools couple by the defect-status/v1 data
+    contract only.
+    """
+    counts = counts or {}
+    p0 = counts.get("P0") or {}
+    p1 = counts.get("P1") or {}
+    p2 = counts.get("P2") or {}
+    p0_open = int(p0.get("open") or 0)
+    oldest = " (oldest %dd)" % int(p0.get("oldest_days") or 0) if p0_open else ""
+    owners = counts.get("open_by_owner") or {}
+    return ("DEFECTS -- P0: %d%s · P1: %d · P2: %d · "
+            "fixed since yesterday: %d · yours today: %d · "
+            "no real check yet: %d"
+            % (p0_open, oldest, int(p1.get("open") or 0), int(p2.get("open") or 0),
+               int(counts.get("fixed_since_last") or 0),
+               int(owners.get("anthony") or 0),
+               int(counts.get("provisional") or 0)))
+
+
+def defect_items(section):
+    """``{id: record}`` for the defect items, so a line can carry its symptom.
+
+    The pack sidecar records ids and counts, not per-item prose, so the detail
+    comes from the status file the sidecar NAMES (``status_path``) -- read-only,
+    and optional: an unreadable or absent one costs the symptom text, never the
+    count line. A sidecar that inlines ``items`` (a future pack) is preferred.
+    """
+    inline = section.get("items")
+    records = inline if isinstance(inline, list) else None
+    if records is None:
+        path = section.get("status_path")
+        if not isinstance(path, str) or not os.path.isfile(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return {}
+        records = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(records, list):
+            return {}
+    return {r["id"]: r for r in records
+            if isinstance(r, dict) and isinstance(r.get("id"), str)}
+
+
+def defect_lines(now, pack, limit=DEFENSE_LINES_SENTINEL):
+    """The digest's opening lines: the defect count, then Anthony's items today.
+
+    A pack with no ``sections.defects`` (anything assembled before the register
+    existed) contributes NOTHING -- an old pack must not be made to say zero
+    defects. A pack that carries the section but no counts says so out loud.
+    A status older than 36h is prefixed STALE(<hours>h), exactly as the boot
+    pack prefixes it; a stamp that cannot be parsed is marked AS_OF-UNPARSEABLE.
+    """
+    if limit is DEFENSE_LINES_SENTINEL:
+        limit = DEFECT_LINES
+    section = (pack.get("sections") or {}).get("defects")
+    if not isinstance(section, dict):
+        return []
+    counts = section.get("counts")
+    if not isinstance(counts, dict) or not counts:
+        return ["DEFECTS -- no status yet (run tools/verify-defects.py)"]
+    prefix = ""
+    stamp = section.get("generated_at")
+    if stamp is not None:
+        gen = _parse_iso(stamp)
+        if gen is None:
+            prefix = "AS_OF-UNPARSEABLE "
+        else:
+            age = (now - gen).total_seconds()
+            if age > STALE_DEFECTS:
+                prefix = "STALE(%dh) " % (age // 3600)
+    lines = [prefix + defects_summary_line(counts)]
+    yours = [i for i in (section.get("yours_today") or []) if isinstance(i, str)]
+    by_id = defect_items(section)
+    for item_id in yours[:limit]:
+        rec = by_id.get(item_id) or {}
+        symptom = rec.get("symptom")
+        days = rec.get("days_open")
+        if symptom and days is not None:
+            lines.append(compress("- %s — %dd — %s" % (item_id, days, symptom)))
+        else:
+            lines.append("- %s — yours today" % item_id)
+    return lines
+
+
 def attention_lines(pack):
     """One line per repo that is behind its origin default branch or carries queue items.
 
@@ -443,6 +545,7 @@ def collect(now, pack, daily_brief=None, daily_brief_path=None,
     warnings = list(extra_warnings or []) + \
         ["- " + compress(w) for w in pack.get("warnings") or []]
     return {
+        "defects": defect_lines(now, pack),
         "generated_at": generated_at or "unknown",
         "age_hours": age_hours,
         "stale": gen is not None and (now - gen).total_seconds() > STALE_PACK,
@@ -464,8 +567,9 @@ def _shed_one(model):
     """Shed one line from the lowest-priority section that still has some.
 
     Priority (last to go): attention lines route today's work; warnings say the
-    pack itself is degraded; open items are standing design gaps. The header and
-    both pointers are never shed.
+    pack itself is degraded; open items are standing design gaps. The DEFECTS
+    lines, the header, and both pointers are never shed -- the defect count is
+    the whole point of the first line.
     """
     for key in ("open_items", "warnings", "attention"):
         if model[key]:
@@ -500,7 +604,11 @@ def render_md(model, imprint=None):
     if model["stale"]:
         header += " STALE (>36h)"
 
-    lines = [TITLE, header, ""]
+    lines = [TITLE]
+    if model.get("defects"):
+        lines.extend(model["defects"])
+        lines.append("")
+    lines.extend([header, ""])
     lines.extend(_section(model["warnings"], "WARNINGS",
                           model["warnings_total"], model["warnings_truncated"]))
     lines.extend(_section(model["open_items"], "OPEN ITEMS",

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Fully Aware nightly-fix LaunchAgent: the executor lane of the defect register.
+
+  At 02:30 local it runs tools/nightly-fix.sh, which takes the OLDEST small
+  defect the register marks nightly-eligible (owner codex, fix_scope repo-pr,
+  size S, a real verify, a remote), fixes it in a FRESH clone under
+  ~/code/.nightly-fix/ using the Codex CLI, proves it with the item's pr_check,
+  and opens ONE pull request. It never touches an existing checkout, never
+  pushes to a default branch, never force-pushes, and never merges.
+  Merge is Anthony's.
+
+  02:30 is deliberate: it finishes long before the 05:45 boot pack and the 06:15
+  daily scan, so the morning brief can report what the night did.
+
+  NOT ARMED. This file is inert until tools/install-nightly-fix.sh is run with
+  its apply option after the defect-register branch merges. Editing this plist
+  changes nothing on its own; the installed copy in
+  ~/Library/LaunchAgents/ is what launchd reads.
+
+  Writes land in gitignored state/ only (state/nightly-fix/ for prompts, logs
+  and attempts; state/logs/ for the launchd streams) plus the throwaway clone.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.anthonyflores.fully-aware.nightly-fix</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/anthonyflores/code/fully-aware/tools/nightly-fix.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/anthonyflores/code/fully-aware</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>2</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/anthonyflores/code/fully-aware/state/logs/nightly-fix.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/anthonyflores/code/fully-aware/state/logs/nightly-fix.err.log</string>
+</dict>
+</plist>
