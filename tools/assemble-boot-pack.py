@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """assemble-boot-pack.py -- D30-class boot-pack assembler (Fully Aware Artifact 3).
 
-Folds four sections into ``state/BOOT-PACK.md`` (human render) plus
+Folds five sections into ``state/BOOT-PACK.md`` (human render) plus
 ``state/boot-pack.json`` (machine sidecar), the single primary artifact a fresh
 Fully Aware macro session loads regardless of cwd:
 
+  0. Defects              -- the defect register's status (defect-status/v1,
+                             produced by verify-defects.py from
+                             registers/defects.json). Rendered FIRST, capped at
+                             a dozen lines: one summary line, then Anthony's
+                             items for today, then the oldest open P1s to fill.
   1. Topology manifest   -- hand-maintained seed (provenance: manual) until P21.
   2. State surfaces       -- the fold of every discoverable surface (surface/v1,
                              produced by generate-surface.py; normally state/surfaces/).
@@ -63,8 +68,16 @@ PACK_SCHEMA = "boot-pack/v1"
 MANIFEST_SCHEMA = "seed-manifest/v1"
 BACKLOG_SCHEMA = "ratification-backlog/v1"
 SURFACE_SCHEMA = "surface/v1"
+DEFECT_STATUS_SCHEMA = "defect-status/v1"
 
 HARD_CAP_TOKENS = 50000
+
+# Section 0 (defects) is the first thing a session reads, so it is deliberately
+# tiny: one summary line plus a handful of bullets, hard-capped by line count so
+# a growing register can never eat the pack's budget.
+DEFECTS_MAX_BULLETS = 8
+DEFECTS_SECTION_MAX_LINES = 12
+DEFECT_BULLET_CHARS = 120
 
 # Per-repo next-session line: one line, hard-truncated (token-budget discipline).
 NEXT_SESSION_SUMMARY_CHARS = 200
@@ -73,6 +86,9 @@ NEXT_SESSION_SUMMARY_CHARS = 200
 STALE_TOPOLOGY = 7 * 24 * 3600
 STALE_SURFACES = 24 * 3600
 STALE_DECISIONS = 1 * 3600
+# The defect loop runs inside the same 05:45 wrapper as this assembler, so a
+# status file older than a day-and-a-half means that step did not run.
+STALE_DEFECTS = 36 * 3600
 
 # Scan-consumption-interface-v1 required + optional artifacts (fixed order).
 SCAN_ARTIFACTS = [
@@ -289,6 +305,125 @@ def load_adjudication(pending_dir):
 
 
 # --------------------------------------------------------------------------- #
+# defects (section 0) -- consumes defect-status/v1 written by verify-defects.py
+# --------------------------------------------------------------------------- #
+def _valid_defect_counts(counts):
+    """The summary line's small, strict defect-status/v1 count shape."""
+    if not isinstance(counts, dict) or not counts:
+        return False
+    for severity in ("P0", "P1", "P2"):
+        block = counts.get(severity)
+        if not isinstance(block, dict):
+            return False
+        for key in ("open", "oldest_days"):
+            value = block.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                return False
+    for key in ("fixed_since_last", "provisional", "deferred", "error"):
+        value = counts.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return False
+    owners = counts.get("open_by_owner")
+    if not isinstance(owners, dict):
+        return False
+    return all(isinstance(owner, str) and owner
+               and isinstance(value, int) and not isinstance(value, bool)
+               and value >= 0 for owner, value in owners.items())
+
+
+def load_defects(path):
+    """Load the defect-status/v1 file. Never raises.
+
+    ``path=None`` means the feed is not configured: the section is silently
+    absent (the adjudication-feed precedent). A CONFIGURED path that is missing
+    or unusable comes back ``present: False`` with a reason, so section 0 still
+    renders one honest line and collect() raises a WARNING -- a defect register
+    nobody ran is exactly the silence this system exists to break.
+    """
+    if not path:
+        return {"configured": False, "present": False, "path": None,
+                "reason": None}
+    base = {"configured": True, "present": False, "path": path}
+    if not os.path.isfile(path):
+        base["reason"] = "no defect status at %s (run tools/verify-defects.py)" % path
+        return base
+    try:
+        data = _load_json(path)
+    except (OSError, ValueError) as exc:
+        base["reason"] = "unreadable defect status at %s: %s" % (path, exc)
+        return base
+    if not isinstance(data, dict) or data.get("schema") != DEFECT_STATUS_SCHEMA:
+        base["reason"] = ("defect status at %s is not schema %s"
+                          % (path, DEFECT_STATUS_SCHEMA))
+        return base
+    if not _valid_defect_counts(data.get("counts")):
+        base["reason"] = "defect status at %s carries an invalid counts block" % path
+        return base
+    base.update({
+        "present": True,
+        "reason": None,
+        "generated_at": data.get("generated_at", ""),
+        "register_updated": data.get("register_updated", ""),
+        "counts": data["counts"],
+        "yours_today": [i for i in (data.get("yours_today") or [])
+                        if isinstance(i, str)],
+        "items": [i for i in (data.get("items") or []) if isinstance(i, dict)],
+    })
+    return base
+
+
+def defects_summary_line(counts):
+    """The ONE defect line, built from the status file's counts block.
+
+    Deliberately duplicated in verify-defects.py and boot-digest.py rather than
+    imported: the three tools couple by the defect-status/v1 data contract only.
+    """
+    counts = counts or {}
+    p0 = counts.get("P0") or {}
+    p1 = counts.get("P1") or {}
+    p2 = counts.get("P2") or {}
+    p0_open = int(p0.get("open") or 0)
+    oldest = " (oldest %dd)" % int(p0.get("oldest_days") or 0) if p0_open else ""
+    owners = counts.get("open_by_owner") or {}
+    return ("DEFECTS -- P0: %d%s · P1: %d · P2: %d · "
+            "fixed since yesterday: %d · yours today: %d · "
+            "no real check yet: %d"
+            % (p0_open, oldest, int(p1.get("open") or 0), int(p2.get("open") or 0),
+               int(counts.get("fixed_since_last") or 0),
+               int(owners.get("anthony") or 0),
+               int(counts.get("provisional") or 0)))
+
+
+def _defect_bullet(rec):
+    line = "- %s — %dd — %s" % (rec.get("id", "?"),
+                                int(rec.get("days_open") or 0),
+                                _oneline(rec.get("symptom")) or "(no symptom)")
+    if len(line) > DEFECT_BULLET_CHARS:
+        line = line[:DEFECT_BULLET_CHARS - 3].rstrip() + "..."
+    return line
+
+
+def defect_bullets(defects, limit=DEFECTS_MAX_BULLETS):
+    """``(rendered_ids, lines)`` -- Anthony's items first, oldest open P1 to fill."""
+    if not defects.get("present"):
+        return [], []
+    by_id = {r.get("id"): r for r in defects.get("items", []) if r.get("id")}
+    chosen = []
+    for item_id in defects.get("yours_today", []):
+        rec = by_id.get(item_id)
+        if rec is not None and rec not in chosen:
+            chosen.append(rec)
+    fillers = [r for r in defects.get("items", [])
+               if r.get("status") == "open" and r.get("severity") == "P1"
+               and r not in chosen]
+    fillers.sort(key=lambda r: (-(r.get("days_open") or 0), r.get("id", "")))
+    chosen.extend(fillers)
+    chosen = chosen[:limit]
+    return ([r.get("id", "?") for r in chosen],
+            [_defect_bullet(r) for r in chosen])
+
+
+# --------------------------------------------------------------------------- #
 # surfaces (artifact 1 fold)
 # --------------------------------------------------------------------------- #
 def _has_degrade(obj):
@@ -475,12 +610,23 @@ def load_scan(scan_dir, now):
 # model assembly
 # --------------------------------------------------------------------------- #
 def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
-            adjudication=None):
+            adjudication=None, defects=None):
     """Build the section data model + warnings + open-items. Pure data (no md)."""
     adjudication = adjudication or {"present": False, "queues": [],
                                     "reason": None}
+    defects = defects or {"configured": False, "present": False, "path": None,
+                          "reason": None}
     warnings = []
     manifest_as_of = manifest.get("as_of", "")
+
+    # -- section 0: defects ---------------------------------------------------
+    if defects.get("configured") and not defects.get("present"):
+        warnings.append("defect status unavailable: %s"
+                        % defects.get("reason", "?"))
+    defects = dict(defects)
+    rendered_ids, defect_lines = defect_bullets(defects)
+    defects["rendered_ids"] = rendered_ids
+    defects["bullets"] = defect_lines
 
     # -- section 1: topology --------------------------------------------------
     topo_entries = []
@@ -622,6 +768,7 @@ def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
     return {
         "manifest_provenance": manifest.get("provenance", "manual"),
         "manifest_as_of": manifest_as_of,
+        "defects": defects,
         "topology": topo_entries,
         "surfaces": surface_repos,
         "queue": queue,
@@ -706,6 +853,31 @@ def _fmt_val(v):
     if isinstance(v, dict) and v.get("degraded"):
         return "DEGRADED(%s)" % v.get("reason", "?")
     return str(v)
+
+
+def render_defects(model, now):
+    """Section 0: the defect register's status, in at most a dozen lines.
+
+    First content line is the ONE summary line every session sees, carrying the
+    same STALE(<age>) prefix the rest of the pack uses when the morning loop did
+    not run. Then Anthony's items for today, oldest open P1s filling the rest.
+    """
+    defects = model.get("defects") or {}
+    if not defects.get("configured"):
+        return ""
+    lines = ["## 0. Defects (single register; verify exit 0 = fixed)"]
+    if not defects.get("present"):
+        lines.append("no defect status yet (run tools/verify-defects.py)")
+        lines.append("")
+        return "\n".join(lines)
+    lines.append(stale_prefix(now, defects.get("generated_at", ""), STALE_DEFECTS)
+                 + defects_summary_line(defects.get("counts")))
+    lines.extend(defects.get("bullets") or [])
+    # Hard line cap: the section may never grow into the pack's budget.
+    while len(lines) > DEFECTS_SECTION_MAX_LINES - 1:
+        lines.pop()
+    lines.append("")
+    return "\n".join(lines)
 
 
 def render_topology(model, now):
@@ -873,6 +1045,9 @@ def render_md(model, now):
             head.append("- OPEN-ITEM: %s" % o)
         head.append("")
     body = "\n".join(head) + "\n"
+    defects = render_defects(model, now)
+    if defects:
+        body += defects + "\n"
     body += render_topology(model, now) + "\n"
     body += render_surfaces(model, now) + "\n"
     body += render_queue(model, now) + "\n"
@@ -903,10 +1078,12 @@ def _drop_one_next_lane(model):
 
 
 def build_pack(now, manifest, backlog, surfaces_cache_dir, scan_dir,
-               adjudication_dir=None, cap_tokens=HARD_CAP_TOKENS):
+               adjudication_dir=None, cap_tokens=HARD_CAP_TOKENS,
+               defects_status_path=None):
     """Assemble (markdown, sidecar_dict). ``now`` is injectable for determinism."""
     model = collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
-                    adjudication=load_adjudication(adjudication_dir))
+                    adjudication=load_adjudication(adjudication_dir),
+                    defects=load_defects(defects_status_path))
 
     # truncation loop: shed lowest-priority next_lanes until under the cap.
     md = render_md(model, now)
@@ -923,6 +1100,25 @@ def build_pack(now, manifest, backlog, surfaces_cache_dir, scan_dir,
                   for s in model["surfaces"]
                   if not s.get("degraded") and s.get("next_lanes_truncated")]
 
+    sections = {}
+    if model["defects"].get("configured"):
+        sections["defects"] = {
+            "status_path": model["defects"].get("path"),
+            "generated_at": model["defects"].get("generated_at", ""),
+            "counts": model["defects"].get("counts", {}),
+            "yours_today": model["defects"].get("yours_today", []),
+            "rendered_ids": model["defects"].get("rendered_ids", []),
+        }
+    sections.update({
+        "topology": {"provenance": model["manifest_provenance"],
+                     "as_of": model["manifest_as_of"],
+                     "entries": model["topology"]},
+        "surfaces": model["surfaces"],
+        "decision_queue": {"projection": True, "absorbs_ratification": False,
+                           "items": model["queue"]},
+        "scan": model["scan"],
+    })
+
     sidecar = {
         "schema": PACK_SCHEMA,
         "generated_at": now.isoformat(timespec="seconds"),
@@ -933,15 +1129,7 @@ def build_pack(now, manifest, backlog, surfaces_cache_dir, scan_dir,
         "warnings": list(model["warnings"]),
         "open_items": list(model["open_items"]),
         "truncation": truncation,
-        "sections": {
-            "topology": {"provenance": model["manifest_provenance"],
-                         "as_of": model["manifest_as_of"],
-                         "entries": model["topology"]},
-            "surfaces": model["surfaces"],
-            "decision_queue": {"projection": True, "absorbs_ratification": False,
-                               "items": model["queue"]},
-            "scan": model["scan"],
-        },
+        "sections": sections,
     }
     return md, sidecar
 
@@ -1007,6 +1195,10 @@ def main(argv=None):
                     help="atlas-v2 adjudication pending dir (read-only; the "
                          "newest AUTO-APPLY-/BACKLOG-/RIPPLE-*.md per prefix "
                          "feeds the decision queue)")
+    ap.add_argument("--defects-status",
+                    default=_default("state", "defects-status.json"),
+                    help="defect-status/v1 file written by verify-defects.py "
+                         "(missing -> section 0 says so and a WARNING is raised)")
     ap.add_argument("--out-md", default=_default("state", "BOOT-PACK.md"))
     ap.add_argument("--out-json", default=_default("state", "boot-pack.json"))
     ap.add_argument("--stdout", action="store_true",
@@ -1020,7 +1212,8 @@ def main(argv=None):
         md, sidecar = build_pack(now, manifest, backlog,
                                  args.surfaces_cache_dir,
                                  args.scan_consumption_dir,
-                                 adjudication_dir=args.adjudication_dir)
+                                 adjudication_dir=args.adjudication_dir,
+                                 defects_status_path=args.defects_status)
         if args.stdout:
             sys.stdout.write(md)
             _report(sys.stderr, sidecar, dest="stdout")

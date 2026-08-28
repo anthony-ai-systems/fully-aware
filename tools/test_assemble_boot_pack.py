@@ -923,5 +923,211 @@ class ScanAbsenceCopy(unittest.TestCase):
             self.assertFalse(sidecar["sections"]["scan"]["present"])
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Section 0: defects (defect-status/v1 written by verify-defects.py)
+# --------------------------------------------------------------------------- #
+def _defect_item(item_id, severity="P1", owner="session", status="open",
+                 days=3, symptom=None):
+    return {"id": item_id, "severity": severity, "owner": owner,
+            "fix_scope": "local", "size": "S", "system": "synthetic system",
+            "symptom": symptom or "a synthetic thing is broken",
+            "fix_hint": "do the synthetic thing", "status": status,
+            "exit": 1 if status == "open" else 0,
+            "last_verified": "2026-07-23", "open_since": "2026-07-20",
+            "days_open": days if status == "open" else None,
+            "fixed_at": None, "duration_ms": 12, "stderr_tail": ""}
+
+
+# The summary line from the spec, verbatim -- the ONE line every session sees.
+EXPECTED_SUMMARY = ("DEFECTS -- P0: 3 (oldest 6d) · P1: 9 · P2: 7 · "
+                    "fixed since yesterday: 1 · yours today: 4 · "
+                    "no real check yet: 4")
+
+DEFAULT_COUNTS = {
+    "P0": {"open": 3, "oldest_days": 6},
+    "P1": {"open": 9, "oldest_days": 12},
+    "P2": {"open": 7, "oldest_days": 30},
+    "fixed_since_last": 1, "provisional": 4, "deferred": 0, "error": 0,
+    "open_by_owner": {"anthony": 4, "codex": 5, "session": 10},
+}
+
+
+def _defect_status(generated_at=None, counts=None, yours_today=None,
+                   items=None):
+    return {
+        "schema": "defect-status/v1",
+        "generated_at": generated_at or NOW.isoformat(timespec="seconds"),
+        "register_updated": "2026-07-23",
+        "counts": copy.deepcopy(counts if counts is not None else DEFAULT_COUNTS),
+        "yours_today": ["SYN-A1"] if yours_today is None else list(yours_today),
+        "nightly_eligible": [],
+        "items": items if items is not None else [
+            _defect_item("SYN-A1", severity="P0", owner="anthony", days=6),
+            _defect_item("SYN-P1a", days=12),
+            _defect_item("SYN-P1b", days=2),
+        ],
+    }
+
+
+class DefectsSection(unittest.TestCase):
+    def _build(self, tmp, status=None, path=None):
+        cache = os.path.join(tmp, "surfaces")
+        _write_surface(cache, _surface("synth-a", NOW.isoformat()))
+        status_path = path or os.path.join(tmp, "defects-status.json")
+        if status is not None:
+            _write(status_path, status)
+        return ab.build_pack(NOW, _manifest(), _backlog(), cache, None,
+                             defects_status_path=status_path)
+
+    def test_section_zero_is_rendered_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md, _ = self._build(tmp, _defect_status())
+            i0 = md.index("## 0. Defects (single register; verify exit 0 = fixed)")
+            self.assertLess(i0, md.index("## 1. Topology manifest"))
+            # ... and after the head block, never before the advisory banner.
+            self.assertLess(md.index("ADVISORY STATE, NOT LAW"), i0)
+
+    def test_first_content_line_is_the_summary_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md, _ = self._build(tmp, _defect_status())
+            section = md[md.index("## 0."):md.index("## 1.")]
+            first = section.splitlines()[1]
+            self.assertEqual(first, EXPECTED_SUMMARY)
+
+    def test_yours_today_leads_then_oldest_open_p1_fills(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md, sidecar = self._build(tmp, _defect_status())
+            section = md[md.index("## 0."):md.index("## 1.")]
+            bullets = [ln for ln in section.splitlines() if ln.startswith("- ")]
+            self.assertEqual([b.split(" ")[1] for b in bullets],
+                             ["SYN-A1", "SYN-P1a", "SYN-P1b"])
+            self.assertEqual(sidecar["sections"]["defects"]["rendered_ids"],
+                             ["SYN-A1", "SYN-P1a", "SYN-P1b"])
+
+    def test_bullets_are_compressed_to_120_chars(self):
+        long_symptom = "x" * 400
+        status = _defect_status(items=[
+            _defect_item("SYN-A1", severity="P0", owner="anthony", days=6,
+                         symptom=long_symptom)])
+        with tempfile.TemporaryDirectory() as tmp:
+            md, _ = self._build(tmp, status)
+            section = md[md.index("## 0."):md.index("## 1.")]
+            bullets = [ln for ln in section.splitlines() if ln.startswith("- ")]
+            self.assertEqual(len(bullets), 1)
+            self.assertLessEqual(len(bullets[0]), ab.DEFECT_BULLET_CHARS)
+            self.assertTrue(bullets[0].endswith("..."))
+
+    def test_missing_status_file_says_so_and_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md, sidecar = self._build(tmp, None)
+            section = md[md.index("## 0."):md.index("## 1.")]
+            self.assertIn("no defect status yet (run tools/verify-defects.py)",
+                          section)
+            self.assertTrue(any("defect status unavailable" in w
+                                for w in sidecar["warnings"]),
+                            sidecar["warnings"])
+            self.assertEqual(sidecar["sections"]["defects"]["counts"], {})
+            self.assertLess(md.index("## WARNINGS"), md.index("## OPEN-ITEMS"))
+            self.assertLess(md.index("## OPEN-ITEMS"), md.index("## 0. Defects"))
+            self.assertIn("- defect status unavailable:",
+                          md[md.index("## WARNINGS"):md.index("## OPEN-ITEMS")])
+
+    def test_unparseable_status_file_degrades_the_same_way(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "defects-status.json")
+            _write(path, "{not json")
+            md, sidecar = self._build(tmp, None, path=path)
+            self.assertIn("no defect status yet", md)
+            self.assertTrue(any("defect status unavailable" in w
+                                for w in sidecar["warnings"]),
+                            sidecar["warnings"])
+
+    def test_stale_status_carries_the_stale_prefix(self):
+        old = (NOW - datetime.timedelta(hours=40)).isoformat(timespec="seconds")
+        with tempfile.TemporaryDirectory() as tmp:
+            md, _ = self._build(tmp, _defect_status(generated_at=old))
+            section = md[md.index("## 0."):md.index("## 1.")]
+            first = section.splitlines()[1]
+            self.assertTrue(first.startswith("STALE(1d) "), first)
+            self.assertIn(EXPECTED_SUMMARY, first)
+
+    def test_fresh_status_has_no_stale_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md, _ = self._build(tmp, _defect_status())
+            section = md[md.index("## 0."):md.index("## 1.")]
+            self.assertNotIn("STALE(", section)
+
+    def test_status_becomes_stale_only_after_thirty_six_hours(self):
+        for seconds_old, stale in ((36 * 3600, False), (36 * 3600 + 1, True)):
+            with self.subTest(seconds_old=seconds_old):
+                generated = (NOW - datetime.timedelta(seconds=seconds_old)).isoformat(
+                    timespec="seconds")
+                with tempfile.TemporaryDirectory() as tmp:
+                    md, _ = self._build(
+                        tmp, _defect_status(generated_at=generated))
+                    section = md[md.index("## 0."):md.index("## 1.")]
+                    self.assertEqual("STALE(" in section, stale)
+
+    def test_section_never_exceeds_twelve_lines(self):
+        items = [_defect_item("SYN-A%d" % i, severity="P0", owner="anthony",
+                              days=i) for i in range(20)]
+        status = _defect_status(items=items,
+                                yours_today=[i["id"] for i in items])
+        with tempfile.TemporaryDirectory() as tmp:
+            md, sidecar = self._build(tmp, status)
+            section = md[md.index("## 0."):md.index("## 1.")].rstrip("\n")
+            self.assertLessEqual(len(section.splitlines()),
+                                 ab.DEFECTS_SECTION_MAX_LINES)
+            self.assertEqual(len(sidecar["sections"]["defects"]["rendered_ids"]),
+                             ab.DEFECTS_MAX_BULLETS)
+
+    def test_sidecar_records_the_defect_section_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, sidecar = self._build(tmp, _defect_status())
+            self.assertEqual(list(sidecar["sections"].keys()),
+                             ["defects", "topology", "surfaces",
+                              "decision_queue", "scan"])
+            d = sidecar["sections"]["defects"]
+            self.assertEqual(sorted(d.keys()),
+                             ["counts", "generated_at", "rendered_ids",
+                              "status_path", "yours_today"])
+            self.assertEqual(d["counts"], DEFAULT_COUNTS)
+            self.assertEqual(d["yours_today"], ["SYN-A1"])
+            self.assertTrue(d["status_path"].endswith("defects-status.json"))
+
+    def test_unconfigured_feed_renders_no_section_at_all(self):
+        """No --defects-status path -> silently absent (adjudication precedent)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = os.path.join(tmp, "surfaces")
+            _write_surface(cache, _surface("synth-a", NOW.isoformat()))
+            md, sidecar = ab.build_pack(NOW, _manifest(), _backlog(), cache, None)
+            self.assertNotIn("## 0. Defects", md)
+            self.assertNotIn("defects", sidecar["sections"])
+            self.assertFalse(any("defect" in w for w in sidecar["warnings"]))
+
+    def test_wrong_schema_is_not_trusted(self):
+        bad = _defect_status()
+        bad["schema"] = "defect-status/v2"
+        with tempfile.TemporaryDirectory() as tmp:
+            md, sidecar = self._build(tmp, bad)
+            self.assertIn("no defect status yet", md)
+            self.assertTrue(any("defect status unavailable" in w
+                                for w in sidecar["warnings"]))
+
+    def test_empty_or_malformed_counts_degrade_instead_of_rendering_zero(self):
+        for counts in ({}, {"P0": 7}):
+            with self.subTest(counts=counts):
+                bad = _defect_status(counts=counts)
+                with tempfile.TemporaryDirectory() as tmp:
+                    md, sidecar = self._build(tmp, bad)
+                    section = md[md.index("## 0."):md.index("## 1.")]
+                    self.assertIn("no defect status yet", section)
+                    self.assertNotIn("DEFECTS -- P0: 0", section)
+                    self.assertTrue(any("invalid counts block" in warning
+                                        for warning in sidecar["warnings"]))
+
+
 if __name__ == "__main__":
     unittest.main()

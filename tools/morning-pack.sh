@@ -81,6 +81,20 @@ done
 
 echo "morning-pack: surfaces regenerated -- ${ok} ok, ${failed} failed, ${skipped} non-repo config(s) skipped."
 
+# Defect register loop: run every verify in registers/defects.json and write
+# state/defects-status.json + state/DEFECTS.md. The assembler folds the status
+# into section 0 and the digest puts the count on its first line, so this step
+# runs BEFORE the assembler -- and on preview runs too, because it only ever
+# writes the two gitignored state/ files (a preview that skipped it would render
+# yesterday's counts).
+#
+# Degrade-not-abort, same contract as the surface loop: a broken register or a
+# crashed loop logs a WARNING and the pack proceeds over whatever status file
+# already exists. A FAILING verify is not a failure here -- it is the data.
+echo "morning-pack: verifying the defect register"
+"${PY}" "${REPO_ROOT}/tools/verify-defects.py" \
+    || echo "morning-pack: WARNING defect verify FAILED (exit $?); continuing" >&2
+
 # Imprint bulk export (audit P1-1): dump the captured-judgment store to a local
 # markdown file so sessions have an on-disk bulk channel (grep on demand) and
 # the digest step below can fold a compact IMPRINT summary in. The export

@@ -2,7 +2,7 @@
 
 Macro Seat spec v1, Artifact 3 (`build-plans/macro-seat-spec-2026-07-23.md`
 SS3.1-3.2). One shared, committed, D30-class assembler
-(`assemble-boot-pack.py`) folds four sections into `state/BOOT-PACK.md` (human
+(`assemble-boot-pack.py`) folds five sections into `state/BOOT-PACK.md` (human
 render) plus `state/boot-pack.json` (machine sidecar) -- the single primary
 artifact a fresh Fully Aware macro session loads regardless of cwd.
 
@@ -39,7 +39,11 @@ path** `/Users/anthonyflores/code/fully-aware/state/boot-pack.json`, and
 bounded the slice it kept to an **8KB digest cap** (`AWARENESS_DIGEST_MAX_BYTES
 = 8 * 1024`, first 20 decision-queue items), shedding list entries and setting
 `truncated` rather than exceeding it. Today's sidecar still passes that
-validation predicate unchanged.
+validation predicate unchanged. The `sections.defects` key added with section
+0 is **purely additive** -- it adds one key under `sections` and renames,
+retypes or removes nothing in `schema`, `generated_at`, `token_estimate`,
+`warnings[]`, `open_items[]` or `sections.decision_queue.items[]` -- so a
+revived Iris validates exactly as before.
 
 Two consequences:
 
@@ -55,10 +59,23 @@ Two consequences:
   read "nothing is complaining" as evidence the contract still holds: verify the
   sidecar against the predicate above by hand.
 
-## The four sections
+## The five sections
 
 Every entry is tagged `[source | as_of]`.
 
+0. **Defects** -- from `state/defects-status.json` (schema `defect-status/v1`,
+   produced by `tools/verify-defects.py` from `registers/defects.json`).
+   Rendered **first**, straight after the WARNINGS / OPEN-ITEMS head, under
+   `## 0. Defects (single register; verify exit 0 = fixed)`: the summary line
+   first, then Anthony's items for today, then the oldest open P1s, hard-capped
+   at 12 lines so a growing register can never eat the pack's budget. A missing
+   or unreadable status file renders one honest line and raises a WARNING; a
+   status older than **36h** carries the same `STALE(<age>)` prefix as the rest
+   of the pack. The sidecar carries `sections.defects = {status_path,
+   generated_at, counts, yours_today, rendered_ids}`, emitted **only when the
+   register is configured** -- a pack assembled before the register existed has
+   no `sections.defects` key at all, which is what `boot-digest.py` relies on to
+   render no defect lines.
 1. **Topology manifest** -- from the hand-maintained seed
    `tools/configs/seed-manifest.json` (tagged `provenance: manual`) until P21's
    `repo-manifest.json` ships. Canonical repos only; worktree copies excluded.

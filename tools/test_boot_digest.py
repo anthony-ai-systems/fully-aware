@@ -673,6 +673,8 @@ class WrapperStep(unittest.TestCase):
 _SHIM_ASSEMBLER = '''#!/usr/bin/env python3
 import os, sys
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(root, "event-log"), "a", encoding="utf-8") as fh:
+    fh.write("assembler\\n")
 with open(os.path.join(root, "assembler-called"), "a", encoding="utf-8") as fh:
     fh.write(" ".join(sys.argv[1:]) + "\\n")
 sys.exit(int(os.environ.get("SHIM_ASSEMBLER_RC", "0")))
@@ -681,6 +683,8 @@ sys.exit(int(os.environ.get("SHIM_ASSEMBLER_RC", "0")))
 _SHIM_DIGEST = '''#!/usr/bin/env python3
 import os
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(root, "event-log"), "a", encoding="utf-8") as fh:
+    fh.write("digest\\n")
 state = os.path.join(root, "state")
 os.makedirs(state, exist_ok=True)
 with open(os.path.join(state, "BOOT-DIGEST.md"), "a", encoding="utf-8") as fh:
@@ -688,8 +692,19 @@ with open(os.path.join(state, "BOOT-DIGEST.md"), "a", encoding="utf-8") as fh:
 '''
 
 _SHIM_GENERATOR = '''#!/usr/bin/env python3
-import sys
+import os, sys
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(root, "event-log"), "a", encoding="utf-8") as fh:
+    fh.write("generator\\n")
 sys.exit(0)
+'''
+
+_SHIM_VERIFIER = '''#!/usr/bin/env python3
+import os, sys
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(root, "event-log"), "a", encoding="utf-8") as fh:
+    fh.write("verifier\\n")
+sys.exit(int(os.environ.get("SHIM_VERIFIER_RC", "0")))
 '''
 
 
@@ -698,22 +713,29 @@ class WrapperExecution(unittest.TestCase):
 
     def _fixture(self, tmp):
         tools = os.path.join(tmp, "tools")
-        os.makedirs(os.path.join(tools, "configs"))
+        configs = os.path.join(tools, "configs")
+        os.makedirs(configs)
+        with open(os.path.join(configs, "synthetic.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"schema": "surface-config/v1",
+                       "environment": "synthetic"}, fh)
         shutil.copy2(_WRAPPER, os.path.join(tools, "morning-pack.sh"))
         for name, src in (("assemble-boot-pack.py", _SHIM_ASSEMBLER),
                           ("boot-digest.py", _SHIM_DIGEST),
-                          ("generate-surface.py", _SHIM_GENERATOR)):
+                          ("generate-surface.py", _SHIM_GENERATOR),
+                          ("verify-defects.py", _SHIM_VERIFIER)):
             path = os.path.join(tools, name)
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(src)
             os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
         return os.path.join(tools, "morning-pack.sh")
 
-    def _run(self, tmp, args=(), assembler_rc=0):
+    def _run(self, tmp, args=(), assembler_rc=0, verifier_rc=0):
         wrapper = self._fixture(tmp)
         env = dict(os.environ)
         env["FULLY_AWARE_PYTHON"] = sys.executable
         env["SHIM_ASSEMBLER_RC"] = str(assembler_rc)
+        env["SHIM_VERIFIER_RC"] = str(verifier_rc)
         proc = subprocess.run(["bash", wrapper] + list(args), env=env, cwd=tmp,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return proc
@@ -728,12 +750,18 @@ class WrapperExecution(unittest.TestCase):
         with open(marker, "r", encoding="utf-8") as fh:
             return fh.read().splitlines()
 
+    def _events(self, tmp):
+        with open(os.path.join(tmp, "event-log"), "r", encoding="utf-8") as fh:
+            return fh.read().splitlines()
+
     def test_argless_run_writes_the_digest(self):
         with tempfile.TemporaryDirectory() as tmp:
             proc = self._run(tmp)
             self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8"))
             self.assertEqual(self._assembler_args(tmp), [""])
             self.assertTrue(os.path.isfile(self._digest(tmp)))
+            self.assertEqual(self._events(tmp),
+                             ["generator", "verifier", "assembler", "digest"])
 
     def test_preview_args_skip_the_digest_entirely(self):
         """--stdout / --out-json previews must not rewrite boot state."""
@@ -751,6 +779,17 @@ class WrapperExecution(unittest.TestCase):
                     self.assertFalse(os.path.exists(self._digest(tmp)))
                     self.assertIn("args passed, skipping boot digest", out)
                     self.assertNotIn("generating boot digest", out)
+                    self.assertEqual(self._events(tmp),
+                                     ["generator", "verifier", "assembler"])
+
+    def test_failing_verifier_degrades_and_assembler_still_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, verifier_rc=7)
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8"))
+            self.assertIn("defect verify FAILED (exit 7)",
+                          proc.stderr.decode("utf-8"))
+            self.assertEqual(self._events(tmp),
+                             ["generator", "verifier", "assembler", "digest"])
 
     def test_failing_assembler_propagates_its_status_with_args(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1105,6 +1144,175 @@ class InstallerWorktreeGuard(unittest.TestCase):
             self.assertEqual(proc.returncode, 1, proc.stdout.decode("utf-8"))
             self.assertIn("linked worktree", proc.stderr.decode("utf-8"))
             self.assertEqual(self._settings(home), before)
+
+
+
+
+# --------------------------------------------------------------------------- #
+# DEFECTS: the register's count is the first line every session reads
+# --------------------------------------------------------------------------- #
+DEFECT_COUNTS = {
+    "P0": {"open": 3, "oldest_days": 6},
+    "P1": {"open": 9, "oldest_days": 12},
+    "P2": {"open": 7, "oldest_days": 30},
+    "fixed_since_last": 1, "provisional": 4, "deferred": 0, "error": 0,
+    "open_by_owner": {"anthony": 4, "codex": 5, "session": 10},
+}
+
+EXPECTED_SUMMARY = ("DEFECTS -- P0: 3 (oldest 6d) · P1: 9 · P2: 7 · "
+                    "fixed since yesterday: 1 · yours today: 4 · "
+                    "no real check yet: 4")
+
+
+def _defect_record(item_id, days=6, symptom="a synthetic thing is broken"):
+    return {"id": item_id, "severity": "P0", "owner": "anthony",
+            "fix_scope": "decision", "status": "open", "days_open": days,
+            "symptom": symptom, "fix_hint": "do the synthetic thing"}
+
+
+def _defect_pack(tmp=None, counts=DEFECT_COUNTS, yours=("SYN-1",),
+                 records=None, status_path="", **kw):
+    """A pack whose sidecar carries sections.defects (+ an optional status file)."""
+    pack = _pack(**kw)
+    if records is not None and tmp is not None:
+        status_path = os.path.join(tmp, "defects-status.json")
+        with open(status_path, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "defect-status/v1", "items": records}, fh)
+    pack["sections"]["defects"] = {
+        "status_path": status_path,
+        "generated_at": GENERATED,
+        "counts": dict(counts) if counts else {},
+        "yours_today": list(yours),
+        "rendered_ids": list(yours),
+    }
+    return pack
+
+
+class DefectLines(unittest.TestCase):
+    def test_summary_is_the_first_line_after_the_title(self):
+        md = bd.build_digest(NOW, _defect_pack())
+        lines = md.splitlines()
+        self.assertEqual(lines[0], bd.TITLE)
+        self.assertEqual(lines[1], EXPECTED_SUMMARY)
+
+    def test_pack_header_still_follows_the_defect_lines(self):
+        md = bd.build_digest(NOW, _defect_pack())
+        self.assertLess(md.index("DEFECTS --"), md.index("Pack generated:"))
+
+    def test_up_to_three_yours_today_lines_follow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = [_defect_record("SYN-%d" % i, days=i) for i in range(5)]
+            pack = _defect_pack(tmp, yours=[r["id"] for r in records],
+                                records=records)
+            lines = bd.build_digest(NOW, pack).splitlines()
+            bullets = [ln for ln in lines if ln.startswith("- SYN-")]
+            self.assertEqual(len(bullets), bd.DEFECT_LINES)
+            self.assertEqual(lines[2], "- SYN-0 — 0d — a synthetic thing is broken")
+
+    def test_lines_are_compressed_to_the_digest_line_width(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = [_defect_record("SYN-1", symptom="y" * 400)]
+            pack = _defect_pack(tmp, yours=["SYN-1"], records=records)
+            md = bd.build_digest(NOW, pack)
+            bullet = [ln for ln in md.splitlines() if ln.startswith("- SYN-1")][0]
+            self.assertLessEqual(len(bullet), bd.MAX_LINE_CHARS)
+
+    def test_ids_alone_when_the_status_file_is_gone(self):
+        """The sidecar names the status file; losing it costs prose, not the count."""
+        pack = _defect_pack(status_path="/nonexistent/defects-status.json")
+        md = bd.build_digest(NOW, pack)
+        self.assertIn(EXPECTED_SUMMARY, md)
+        self.assertIn("- SYN-1 — yours today", md)
+
+    def test_older_packs_without_the_section_get_no_defect_lines(self):
+        md = bd.build_digest(NOW, _pack())
+        self.assertNotIn("DEFECTS", md)
+        self.assertEqual(md.splitlines()[1][:15], "Pack generated:")
+
+    def test_section_present_but_countless_says_so(self):
+        md = bd.build_digest(NOW, _defect_pack(counts={}))
+        self.assertIn("DEFECTS -- no status yet (run tools/verify-defects.py)",
+                      md)
+
+    def test_defect_lines_are_never_shed_by_the_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = [_defect_record("SYN-%d" % i, days=i) for i in range(5)]
+            fat = _defect_pack(
+                tmp, yours=[record["id"] for record in records], records=records,
+                warnings=["a degraded synthetic probe %d" % i for i in range(40)],
+                open_items=["Open item %d. Trailing background." % i
+                            for i in range(20)],
+                surfaces=[_surface("synth-%02d" % i, behind=i + 1)
+                          for i in range(30)])
+            pack_md = "/synthetic/BOOT-PACK.md"
+            with unittest.mock.patch.object(bd, "PACK_MD", pack_md), \
+                    unittest.mock.patch.object(
+                        bd, "PACK_POINTER", "Full pack: %s" % pack_md):
+                md = bd.build_digest(NOW, fat, cap_tokens=120)
+        lines = md.splitlines()
+        self.assertEqual(lines[1], EXPECTED_SUMMARY)
+        self.assertEqual([line.split(" ")[1] for line in lines
+                          if line.startswith("- SYN-")],
+                         ["SYN-0", "SYN-1", "SYN-2"])
+
+    def test_summary_line_drops_the_oldest_note_when_no_p0_is_open(self):
+        counts = dict(DEFECT_COUNTS, P0={"open": 0, "oldest_days": 0})
+        md = bd.build_digest(NOW, _defect_pack(counts=counts))
+        self.assertIn("DEFECTS -- P0: 0 · P1: 9 ·", md)
+        self.assertNotIn("oldest", md)
+
+
+class DefectStaleness(unittest.TestCase):
+    """Old counts must never read as this morning's counts."""
+
+    @staticmethod
+    def _aged(hours=None, stamp=None, drop=False):
+        pack = _defect_pack()
+        if drop:
+            del pack["sections"]["defects"]["generated_at"]
+        elif stamp is not None:
+            pack["sections"]["defects"]["generated_at"] = stamp
+        else:
+            pack["sections"]["defects"]["generated_at"] = (
+                NOW - datetime.timedelta(hours=hours)).isoformat(timespec="seconds")
+        return pack
+
+    def test_a_fresh_status_carries_no_prefix(self):
+        self.assertEqual(bd.defect_lines(NOW, self._aged(hours=3))[0],
+                         EXPECTED_SUMMARY)
+
+    def test_the_last_hour_inside_the_window_carries_no_prefix(self):
+        fresh = self._aged(stamp=(NOW - datetime.timedelta(
+            seconds=bd.STALE_DEFECTS)).isoformat(timespec="seconds"))
+        self.assertEqual(bd.defect_lines(NOW, fresh)[0], EXPECTED_SUMMARY)
+
+    def test_a_status_past_thirty_six_hours_is_marked_stale_with_its_age(self):
+        self.assertEqual(bd.defect_lines(NOW, self._aged(hours=40))[0],
+                         "STALE(40h) " + EXPECTED_SUMMARY)
+        self.assertEqual(bd.defect_lines(NOW, self._aged(hours=72))[0],
+                         "STALE(72h) " + EXPECTED_SUMMARY)
+
+    def test_an_unparseable_stamp_is_marked_rather_than_trusted(self):
+        for junk in ("not a timestamp", "2026-13-99", ""):
+            self.assertEqual(bd.defect_lines(NOW, self._aged(stamp=junk))[0],
+                             "AS_OF-UNPARSEABLE " + EXPECTED_SUMMARY,
+                             msg=junk)
+
+    def test_a_sidecar_with_no_stamp_at_all_is_left_alone(self):
+        """An older pack that never recorded the stamp must not read as stale."""
+        self.assertEqual(bd.defect_lines(NOW, self._aged(drop=True))[0],
+                         EXPECTED_SUMMARY)
+
+    def test_the_mark_reaches_the_rendered_digest_not_just_the_line(self):
+        md = bd.build_digest(NOW, self._aged(hours=48))
+        self.assertEqual(md.splitlines()[1], "STALE(48h) " + EXPECTED_SUMMARY)
+
+    def test_the_countless_line_is_never_prefixed(self):
+        pack = _defect_pack(counts={})
+        pack["sections"]["defects"]["generated_at"] = (
+            NOW - datetime.timedelta(hours=99)).isoformat(timespec="seconds")
+        self.assertEqual(bd.defect_lines(NOW, pack),
+                         ["DEFECTS -- no status yet (run tools/verify-defects.py)"])
 
 
 if __name__ == "__main__":
