@@ -331,6 +331,26 @@ def _valid_defect_counts(counts):
                and value >= 0 for owner, value in owners.items())
 
 
+def _valid_defect_item(rec):
+    """The bullet's small, strict item shape -- only what defect_bullets reads.
+
+    ``id`` keys a dict and breaks the tie in the bullet sort, so it must be a
+    non-empty string; a list or a dict id raises TypeError, and an integer id
+    beside a string one makes the sort itself unorderable. ``days_open`` is
+    negated in that same sort key and is None on a fixed item, so None stays
+    legal and everything non-integer does not.
+    """
+    if not isinstance(rec, dict):
+        return False
+    item_id = rec.get("id")
+    if not isinstance(item_id, str) or not item_id:
+        return False
+    days = rec.get("days_open")
+    if days is None:
+        return True
+    return isinstance(days, int) and not isinstance(days, bool) and days >= 0
+
+
 def load_defects(path):
     """Load the defect-status/v1 file. Never raises.
 
@@ -359,6 +379,15 @@ def load_defects(path):
     if not _valid_defect_counts(data.get("counts")):
         base["reason"] = "defect status at %s carries an invalid counts block" % path
         return base
+    items = data.get("items") or []
+    if not isinstance(items, list):
+        base["reason"] = "defect status at %s carries a non-list items block" % path
+        return base
+    for position, record in enumerate(items):
+        if not _valid_defect_item(record):
+            base["reason"] = ("defect status at %s carries a malformed item "
+                              "record (item %d)" % (path, position))
+            return base
     base.update({
         "present": True,
         "reason": None,
@@ -367,7 +396,7 @@ def load_defects(path):
         "counts": data["counts"],
         "yours_today": [i for i in (data.get("yours_today") or [])
                         if isinstance(i, str)],
-        "items": [i for i in (data.get("items") or []) if isinstance(i, dict)],
+        "items": items,
     })
     return base
 

@@ -1128,6 +1128,52 @@ class DefectsSection(unittest.TestCase):
                     self.assertTrue(any("invalid counts block" in warning
                                         for warning in sidecar["warnings"]))
 
+    def test_malformed_item_record_degrades_instead_of_crashing(self):
+        """A bad id or days_open used to raise TypeError out of defect_bullets."""
+        cases = {
+            "list id": {"id": ["SYN-A1"]},
+            "dict id": {"id": {"a": 1}},
+            "empty id": {"id": ""},
+            "int id": _defect_item(7),
+            "string days_open": _defect_item("SYN-A1", days="12"),
+            "dict days_open": _defect_item("SYN-A1", days={"a": 1}),
+            "negative days_open": _defect_item("SYN-A1", days=-1),
+            "bool days_open": _defect_item("SYN-A1", days=True),
+            "item is not a dict": "SYN-A1",
+        }
+        for label, item in cases.items():
+            with self.subTest(case=label):
+                bad = _defect_status(items=[item], yours_today=[])
+                with tempfile.TemporaryDirectory() as tmp:
+                    md, sidecar = self._build(tmp, bad)
+                    section = md[md.index("## 0."):md.index("## 1.")]
+                    self.assertIn("no defect status yet", section)
+                    self.assertTrue(any("malformed item record" in warning
+                                        for warning in sidecar["warnings"]),
+                                    sidecar["warnings"])
+
+    def test_non_list_items_block_degrades(self):
+        bad = _defect_status(items=[])
+        bad["items"] = {"SYN-A1": {"id": "SYN-A1"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            md, sidecar = self._build(tmp, bad)
+            self.assertIn("no defect status yet", md)
+            self.assertTrue(any("non-list items block" in warning
+                                for warning in sidecar["warnings"]))
+
+    def test_a_fixed_item_with_no_days_open_is_still_valid(self):
+        """days_open is None on a fixed record -- that must not be malformed."""
+        status = _defect_status(
+            items=[_defect_item("SYN-A1", status="fixed"),
+                   _defect_item("SYN-P1a", days=4)],
+            yours_today=["SYN-A1"])
+        with tempfile.TemporaryDirectory() as tmp:
+            md, sidecar = self._build(tmp, status)
+            section = md[md.index("## 0."):md.index("## 1.")]
+            self.assertNotIn("no defect status yet", section)
+            self.assertEqual(sidecar["sections"]["defects"]["rendered_ids"],
+                             ["SYN-A1", "SYN-P1a"])
+
 
 if __name__ == "__main__":
     unittest.main()
