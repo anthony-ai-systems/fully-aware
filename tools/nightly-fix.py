@@ -918,7 +918,20 @@ def run_item(item, mode, now, paths, runner, codex_runner=None):
 
     pr_check = item.get("pr_check")
     if pr_check:
-        assert_safe_pr_check(pr_check, clone_dir)
+        # Re-checked now that the clone exists: this call resolves the real
+        # path (symlinks included), so it can refuse what the pre-clone call
+        # accepted. Handled the same way -- run log plus attempt record --
+        # rather than escaping to main() as an exit-2 crash with no run log.
+        try:
+            assert_safe_pr_check(pr_check, clone_dir)
+        except (SafetyError, ConfigError) as exc:
+            story.append("The recorded pull-request check was refused after the "
+                         "clone was made: %s." % exc)
+            story.append("Nothing was committed or pushed. The clone is kept at %s."
+                         % clone_dir)
+            return finish("pr-check-refused",
+                          "the recorded pull-request check was refused after cloning: "
+                          "%s; clone kept at %s" % (exc, clone_dir))
         log("running the pull-request check inside the clone")
         res = guarded_run(runner,
                           ["/bin/bash", "-o", "pipefail", "-c", pr_check],

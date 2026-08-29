@@ -643,6 +643,44 @@ class TestTrial(Harness):
             body = fh.read()
         self.assertIn("refused before anything was cloned", body)
 
+    def test_a_check_refused_after_the_clone_is_handled_not_crashed(self):
+        """The post-clone re-check must not escape run_item as an exit-2 crash.
+
+        The second ``assert_safe_pr_check`` resolves the now-existing clone
+        path, so it can in principle refuse what the pre-clone call accepted.
+        Reaching that divergence for real needs the resolved path to change
+        mid-run, so the second call is forced to raise here; what is under test
+        is the handling -- run log, attempt record, exit 0, nothing pushed.
+        """
+        real = nf.assert_safe_pr_check
+        calls = []
+
+        def refuse_the_second_time(command, clone_dir):
+            calls.append(clone_dir)
+            if len(calls) == 1:
+                return real(command, clone_dir)
+            raise nf.SafetyError("refusing a pull-request check that names a "
+                                 "path outside the clone")
+
+        nf.assert_safe_pr_check = refuse_the_second_time
+        self.addCleanup(setattr, nf, "assert_safe_pr_check", real)
+
+        runner = FakeRunner({"git-status": (0, " M tools/morning-pack.sh")})
+        rc, _ = self.run_main("--trial", runner=runner)
+        self.assertEqual(0, rc)
+        self.assertEqual(2, len(calls))
+        labels = runner.labels()
+        self.assertIn("clone", labels)                   # it got past the clone
+        for forbidden in ("pr-check", "git-add", "git-commit", "git-push",
+                          "pr-create"):
+            self.assertNotIn(forbidden, labels)
+        self.assertEqual("pr-check-refused", self.attempts()[-1]["outcome"])
+        self.assertIn("refused after cloning", self.attempts()[-1]["detail"])
+        with open(os.path.join(self.state, "20260827-MAP-1.md")) as fh:
+            body = fh.read()
+        self.assertIn("refused after the clone was made", body)
+        self.assertTrue(os.path.isdir(os.path.join(self.clones, "MAP-1-20260827")))
+
     def test_a_clone_left_on_another_branch_is_never_committed_or_pushed(self):
         runner = FakeRunner({"git-status": (0, " M tools/morning-pack.sh"),
                              "git-rev-parse": (0, "main\n")})
