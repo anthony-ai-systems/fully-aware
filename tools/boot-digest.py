@@ -30,7 +30,10 @@ already flags a stale one) and exits 0. Only a refused write path is a hard
 failure.
 
 Content, in order: DEFECTS (the register's one summary line plus up to three of
-Anthony's own items -- the first thing any session reads, and never shed),
+Anthony's own items -- the first thing any session reads, and never shed; led by
+a "register step FAILED" line when the morning job's own marker is newer than
+the status file), NIGHTLY (one line for what the 02:30 fix lane did, or that it
+is not armed -- the digest is the only place a fresh session would see it),
 header (pack timestamp + age, ``STALE (>36h)`` when old),
 WARNINGS (count + one compressed line each, led by this run's own launchd
 probe), OPEN ITEMS (count + first sentence each), ATTENTION (only repos behind
@@ -97,7 +100,25 @@ STALE_EXPORT = 26 * 3600
 # summary line STALE past 36h; the digest rebuilds that line from the same
 # counts, so it must carry the same mark or a session reads old numbers as new.
 STALE_DEFECTS = 36 * 3600
+# 36h is far too patient on its own: the register step runs seconds before the
+# assembler in the same wrapper, so a status file more than an hour behind the
+# pack it was folded into is a step that failed or never ran. Below the stale
+# threshold the line carries its own age instead of nothing at all.
+DEFECT_LAG = 3600
 DEFENSE_LINES_SENTINEL = object()
+
+# The days-open figure at which tools/hooks/defect_gate.py starts refusing Task,
+# Agent and Workflow calls on this Mac. Duplicated, not imported (the hook is
+# also installed outside this repo and must stay import-free) -- the drift test
+# in test_boot_digest.py reads the hook's own constant and fails if they part.
+# The digest names the number because a session that reads "oldest 6d" has no
+# way to know that 7 is where every subagent stops.
+GATE_BLOCKS_AT_DAYS = 7
+
+# The marker tools/morning-pack.sh writes when the register step itself fails.
+# It sits beside the status file, so the path is derived from whatever status
+# file the pack names rather than hardcoded.
+DEFECTS_FAILED_SUFFIX = ".FAILED"
 
 # The live store the markdown export is dumped from. Existence-guarded and
 # READ-ONLY (mtime only): this box has it, CI does not, and its absence costs
@@ -115,6 +136,13 @@ MAX_LINE_CHARS = 120
 TITLE = "# FULLY AWARE -- BOOT DIGEST (advisory, not law)"
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Where tools/nightly-fix.py leaves one markdown run log per attempt, named
+# <YYYYMMDD>-<id>.md. The lane runs at 02:30 and the digest is what a fresh
+# session actually reads, so without this the night is invisible: a pull request
+# opened, a Codex failure, a failed check and a lane that never ran all produced
+# an identical digest.
+NIGHTLY_DIR = os.path.join(_REPO_ROOT, "state", "nightly-fix")
 
 # The digest is read in SESSIONS, whose cwd is arbitrary (folder = activity, but
 # not this folder). A repo-relative pointer resolves against the wrong directory
@@ -404,27 +432,42 @@ def queue_counts(pack):
     return counts
 
 
-def defects_summary_line(counts):
+def defects_summary_line(counts, threshold=None):
     """The ONE defect line, built from the pack sidecar's counts block.
 
     Deliberately duplicated in verify-defects.py and assemble-boot-pack.py
     rather than imported: the three tools couple by the defect-status/v1 data
     contract only.
+
+    The digest's copy says one thing the other two do not: where the defect gate
+    trips. "oldest 6d" told a session nothing about the machine-wide block that
+    starts at 7d, so the day it arrives was always a surprise. The line now
+    names the trip point, and warns on the eve of it.
     """
     counts = counts or {}
+    threshold = GATE_BLOCKS_AT_DAYS if threshold is None else int(threshold)
     p0 = counts.get("P0") or {}
     p1 = counts.get("P1") or {}
     p2 = counts.get("P2") or {}
     p0_open = int(p0.get("open") or 0)
-    oldest = " (oldest %dd)" % int(p0.get("oldest_days") or 0) if p0_open else ""
+    oldest_days = int(p0.get("oldest_days") or 0)
+    oldest = ""
+    warning = ""
+    if p0_open:
+        oldest = " (oldest %dd; gate blocks at %dd)" % (oldest_days, threshold)
+        if oldest_days >= threshold:
+            warning = " — gate is blocking now"
+        elif oldest_days == threshold - 1:
+            warning = " — gate arms tomorrow"
     owners = counts.get("open_by_owner") or {}
     return ("DEFECTS -- P0: %d%s · P1: %d · P2: %d · "
             "fixed since yesterday: %d · yours today: %d · "
-            "no real check yet: %d"
+            "no real check yet: %d · accepted: %d%s"
             % (p0_open, oldest, int(p1.get("open") or 0), int(p2.get("open") or 0),
                int(counts.get("fixed_since_last") or 0),
                int(owners.get("anthony") or 0),
-               int(counts.get("provisional") or 0)))
+               int(counts.get("provisional") or 0),
+               int(counts.get("accepted") or 0), warning))
 
 
 def defect_items(section):
@@ -453,6 +496,46 @@ def defect_items(section):
             if isinstance(r, dict) and isinstance(r.get("id"), str)}
 
 
+def register_failed_line(section):
+    """``"DEFECTS -- register step FAILED at <time>"``, or None.
+
+    tools/morning-pack.sh writes a marker beside the status file when the
+    register step itself fails. The pack is still assembled and still looks
+    fresh, so without this the only trace is a warning in a launchd log while
+    the digest shows yesterday's counts as if they were today's.
+
+    Only a marker NEWER than the status file counts: an old marker beside a
+    status file that has since been rewritten is a failure already recovered.
+    """
+    path = section.get("status_path")
+    if not isinstance(path, str) or not path:
+        return None
+    marker = os.path.splitext(path)[0] + DEFECTS_FAILED_SUFFIX
+    try:
+        marker_mtime = os.path.getmtime(marker)
+    except OSError:
+        return None
+    try:
+        if os.path.getmtime(path) >= marker_mtime:
+            return None
+    except OSError:
+        pass                     # no status file at all: the marker stands
+    when = ""
+    try:
+        with open(marker, "r", encoding="utf-8") as fh:
+            text = fh.read(400)
+        for token in text.split():
+            if token.startswith("at="):
+                when = token[3:]
+                break
+    except OSError:
+        text = ""
+    if not when:
+        when = datetime.datetime.fromtimestamp(marker_mtime).isoformat(
+            timespec="seconds")
+    return "DEFECTS -- register step FAILED at %s" % when
+
+
 def defect_lines(now, pack, limit=DEFENSE_LINES_SENTINEL):
     """The digest's opening lines: the defect count, then Anthony's items today.
 
@@ -460,7 +543,10 @@ def defect_lines(now, pack, limit=DEFENSE_LINES_SENTINEL):
     existed) contributes NOTHING -- an old pack must not be made to say zero
     defects. A pack that carries the section but no counts says so out loud.
     A status older than 36h is prefixed STALE(<hours>h), exactly as the boot
-    pack prefixes it; a stamp that cannot be parsed is marked AS_OF-UNPARSEABLE.
+    pack prefixes it; a stamp that cannot be parsed is marked AS_OF-UNPARSEABLE;
+    and a status merely older than the PACK it was folded into is prefixed
+    AS_OF(<hours>h), because a register step that failed leaves a fresh pack
+    carrying old counts. A failed register step leads with its own line.
     """
     if limit is DEFENSE_LINES_SENTINEL:
         limit = DEFECT_LINES
@@ -478,11 +564,20 @@ def defect_lines(now, pack, limit=DEFENSE_LINES_SENTINEL):
             prefix = "AS_OF-UNPARSEABLE "
         else:
             age = (now - gen).total_seconds()
+            pack_gen = _parse_iso(pack.get("generated_at"))
             if age > STALE_DEFECTS:
                 prefix = "STALE(%dh) " % (age // 3600)
-    lines = [prefix + defects_summary_line(counts)]
+            elif (pack_gen is not None
+                  and (pack_gen - gen).total_seconds() > DEFECT_LAG):
+                prefix = "AS_OF(%dh) " % (age // 3600)
+    lines = []
+    failed = register_failed_line(section)
+    if failed:
+        lines.append(failed)
+    lines.append(prefix + defects_summary_line(counts))
     yours = [i for i in (section.get("yours_today") or []) if isinstance(i, str)]
     by_id = defect_items(section)
+
     for item_id in yours[:limit]:
         rec = by_id.get(item_id) or {}
         symptom = rec.get("symptom")
@@ -499,6 +594,63 @@ def defect_lines(now, pack, limit=DEFENSE_LINES_SENTINEL):
         else:
             lines.append("- %s — yours today" % item_id)
     return lines
+
+
+_NIGHTLY_HEADER_RE = re.compile(r"^#\s*Nightly fix\s+(\S+)")
+_NIGHTLY_OUTCOME_RE = re.compile(r"^Outcome:\s*(.+?)\s*$", re.MULTILINE)
+# The lane writes four files per attempt under the same <date>-<id> stem; only
+# the bare .md is the plain-English run log.
+_NIGHTLY_SKIP = (".prompt.md", ".last.md")
+
+
+def nightly_line(state_dir=None):
+    """ONE line about last night's fix lane, for the file a session actually reads.
+
+    ``NIGHTLY -- lane not armed`` when the run-log folder does not exist yet,
+    ``NIGHTLY -- no run recorded`` when it exists but holds no run log, and
+    ``NIGHTLY -- <id>: <outcome>`` from the newest log otherwise. The outcome is
+    the lane's own word for what happened (pr-opened, pr-check-failed,
+    codex-failed, no-changes, ...), quoted rather than reinterpreted.
+
+    Read-only and never fatal: an unreadable log costs the outcome, not the line.
+    """
+    directory = NIGHTLY_DIR if state_dir is None else state_dir
+    if not os.path.isdir(directory):
+        return "NIGHTLY -- lane not armed"
+    newest = None
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return "NIGHTLY -- no run recorded"
+    for name in names:
+        if not name.endswith(".md") or name.endswith(_NIGHTLY_SKIP):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if newest is None or (mtime, name) > (newest[0], newest[1]):
+            newest = (mtime, name, path)
+    if newest is None:
+        return "NIGHTLY -- no run recorded"
+    _mtime, name, path = newest
+    item_id = name[:-len(".md")]
+    outcome = ""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read(4000)
+    except OSError:
+        text = ""
+    header = _NIGHTLY_HEADER_RE.search(text)
+    if header:
+        item_id = header.group(1)
+    elif "-" in item_id:
+        item_id = item_id.split("-", 1)[1]
+    found = _NIGHTLY_OUTCOME_RE.search(text)
+    if found:
+        outcome = found.group(1)
+    return "NIGHTLY -- %s: %s" % (item_id, outcome or "outcome not recorded")
 
 
 def attention_lines(pack):
@@ -553,6 +705,7 @@ def collect(now, pack, daily_brief=None, daily_brief_path=None,
         ["- " + compress(w) for w in pack.get("warnings") or []]
     return {
         "defects": defect_lines(now, pack),
+        "nightly": nightly_line(),
         "generated_at": generated_at or "unknown",
         "age_hours": age_hours,
         "stale": gen is not None and (now - gen).total_seconds() > STALE_PACK,
@@ -575,8 +728,9 @@ def _shed_one(model):
 
     Priority (last to go): attention lines route today's work; warnings say the
     pack itself is degraded; open items are standing design gaps. The DEFECTS
-    lines, the header, and both pointers are never shed -- the defect count is
-    the whole point of the first line.
+    lines, the NIGHTLY line, the header, and both pointers are never shed -- the
+    defect count is the whole point of the first line, and the night's outcome
+    is reachable nowhere else a fresh session looks.
     """
     for key in ("open_items", "warnings", "attention"):
         if model[key]:
@@ -614,6 +768,9 @@ def render_md(model, imprint=None):
     lines = [TITLE]
     if model.get("defects"):
         lines.extend(model["defects"])
+    if model.get("nightly"):
+        lines.append(model["nightly"])
+    if model.get("defects") or model.get("nightly"):
         lines.append("")
     lines.extend([header, ""])
     lines.extend(_section(model["warnings"], "WARNINGS",

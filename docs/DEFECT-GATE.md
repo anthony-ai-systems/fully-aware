@@ -16,6 +16,18 @@ does anything at P1 or P2. Why: a P0 means unattended work is already unsafe,
 and spawning more overnight lanes on top of one multiplies the damage. Seven
 days is where the register stops being a to-do list and starts being a lie.
 
+## Clearing the block by actually fixing it
+
+The gate reads the morning job's status snapshot, not the register, so repairing
+the defect does not lift the block on its own. Rebuild the snapshot and the gate
+reopens on the next call:
+
+    /usr/bin/python3 ~/code/fully-aware/tools/verify-defects.py
+
+That is one command, it runs every check in the register, and it rewrites
+`state/defects-status.json`, which is the only file this hook looks at. The
+block message prints the same line, so nobody has to remember it.
+
 ## Declaring a fix session
 
 If this is the session that will fix it, say so:
@@ -25,6 +37,10 @@ If this is the session that will fix it, say so:
 The block message prints that line with your real session id in it. The marker
 lasts twelve hours, then the gate closes again. A marker named `ALL` opens the
 gate for every session on this Mac, same twelve hours.
+
+If the tool call arrives with no session id at all, there is no per-session
+marker to create, so the block message prints the `ALL` line instead. It never
+prints a placeholder you cannot type.
 
 ## Turning it off, and failing open
 

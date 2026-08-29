@@ -89,6 +89,12 @@ STALE_DECISIONS = 1 * 3600
 # The defect loop runs inside the same 05:45 wrapper as this assembler, so a
 # status file older than a day-and-a-half means that step did not run.
 STALE_DEFECTS = 36 * 3600
+# ...but 36 hours is far too patient on its own. The register step runs seconds
+# before this assembler in the same wrapper, so a status file more than an hour
+# behind the pack it is folded into is already a step that failed or never ran.
+# Below STALE_DEFECTS it is not "stale" yet, so it is labelled with its own age
+# instead: old counts must never read as this morning's counts.
+DEFECT_LAG = 3600
 
 # Scan-consumption-interface-v1 required + optional artifacts (fixed order).
 SCAN_ARTIFACTS = [
@@ -416,11 +422,12 @@ def defects_summary_line(counts):
     owners = counts.get("open_by_owner") or {}
     return ("DEFECTS -- P0: %d%s · P1: %d · P2: %d · "
             "fixed since yesterday: %d · yours today: %d · "
-            "no real check yet: %d"
+            "no real check yet: %d · accepted: %d"
             % (p0_open, oldest, int(p1.get("open") or 0), int(p2.get("open") or 0),
                int(counts.get("fixed_since_last") or 0),
                int(owners.get("anthony") or 0),
-               int(counts.get("provisional") or 0)))
+               int(counts.get("provisional") or 0),
+               int(counts.get("accepted") or 0)))
 
 
 def _defect_bullet(rec):
@@ -884,12 +891,33 @@ def _fmt_val(v):
     return str(v)
 
 
+def defect_age_prefix(now, as_of_str):
+    """The mark section 0's summary line carries: STALE, AS_OF, or nothing.
+
+    STALE(<age>) past 36h, exactly as the rest of the pack marks a dead feed.
+    Below that, AS_OF(<age>) whenever the status is more than DEFECT_LAG behind
+    this pack -- the register step runs seconds before the assembler, so any
+    real gap means these counts are not from this run.
+    """
+    prefix = stale_prefix(now, as_of_str, STALE_DEFECTS)
+    if prefix:
+        return prefix
+    ts = parse_ts(as_of_str)
+    if ts is None:
+        return ""
+    age = now - ts
+    if age.total_seconds() > DEFECT_LAG:
+        return "AS_OF(%s) " % humanize_age(age)
+    return ""
+
+
 def render_defects(model, now):
     """Section 0: the defect register's status, in at most a dozen lines.
 
     First content line is the ONE summary line every session sees, carrying the
     same STALE(<age>) prefix the rest of the pack uses when the morning loop did
-    not run. Then Anthony's items for today, oldest open P1s filling the rest.
+    not run -- or AS_OF(<age>) when the status is merely older than this pack.
+    Then Anthony's items for today, oldest open P1s filling the rest.
     """
     defects = model.get("defects") or {}
     if not defects.get("configured"):
@@ -899,7 +927,7 @@ def render_defects(model, now):
         lines.append("no defect status yet (run tools/verify-defects.py)")
         lines.append("")
         return "\n".join(lines)
-    lines.append(stale_prefix(now, defects.get("generated_at", ""), STALE_DEFECTS)
+    lines.append(defect_age_prefix(now, defects.get("generated_at", ""))
                  + defects_summary_line(defects.get("counts")))
     lines.extend(defects.get("bullets") or [])
     # Hard line cap: the section may never grow into the pack's budget.

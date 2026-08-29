@@ -155,7 +155,8 @@ def test_counts_ordering_eligibility_and_record_shape():
             raise subprocess.TimeoutExpired(command, 60)
         return 1, "ignored stdout", "x" * 350
 
-    status = vd.build_status(_register(items), _now(), runner=runner)
+    status = vd.build_status(_register(items), _now(), runner=runner,
+                             previous_run="2026-08-27")
     counts = status["counts"]
     assert counts["P0"] == {"open": 1, "oldest_days": 1}
     assert counts["P1"] == {"open": 3, "oldest_days": 10}
@@ -170,7 +171,7 @@ def test_counts_ordering_eligibility_and_record_shape():
 
     expected_fields = {
         "id", "severity", "owner", "fix_scope", "size", "system", "symptom",
-        "fix_hint", "status", "exit", "last_verified", "open_since",
+        "fix_hint", "accepted", "status", "exit", "last_verified", "open_since",
         "days_open", "fixed_at", "duration_ms", "stderr_tail",
     }
     for record in status["items"]:
@@ -205,14 +206,17 @@ def test_markdown_summary_group_order_exact_bullets_and_error_tail():
     status = {
         "schema": "defect-status/v1",
         "generated_at": "2026-08-28T12:00:00+00:00",
-        "counts": vd.build_counts(records, "2026-08-28"),
+        "today": "2026-08-28",
+        "previous_run": "2026-08-27",
+        "counts": vd.build_counts(records, "2026-08-28",
+                                  previous_run="2026-08-27"),
         "items": records,
     }
     md = vd.render_md(status)
     lines = md.splitlines()
     expected_summary = (
         "DEFECTS -- P0: 0 · P1: 4 · P2: 0 · fixed since yesterday: 1 · "
-        "yours today: 1 · no real check yet: 1"
+        "yours today: 1 · no real check yet: 1 · accepted: 0"
     )
     assert lines[:3] == [vd.MD_TITLE, "", expected_summary]
     headings = [line for line in lines if line.startswith("## ")]
@@ -221,6 +225,7 @@ def test_markdown_summary_group_order_exact_bullets_and_error_tail():
         "## A supervised session on this Mac (1)",
         "## The nightly lane can take these (1)",
         "## Waiting on someone else (1)",
+        "## Accepted, not being fixed (0)",
         "## No real check yet (1)",
         "## Deferred (1)",
         "## Fixed since yesterday (1)",
@@ -234,10 +239,143 @@ def test_markdown_summary_group_order_exact_bullets_and_error_tail():
 def test_empty_groups_are_still_rendered():
     status = {
         "generated_at": "2026-08-28T12:00:00+00:00",
-        "counts": vd.build_counts([], "2026-08-28"),
+        "today": "2026-08-28",
+        "previous_run": "2026-08-27",
+        "counts": vd.build_counts([], "2026-08-28",
+                                  previous_run="2026-08-27"),
         "items": [],
     }
-    assert vd.render_md(status).count(" (0)") == 8
+    assert vd.render_md(status).count(" (0)") == 9
+
+
+# --------------------------------------------------------------------------- #
+# Dates are LOCAL dates, and "fixed since yesterday" only counts NEW fixes.
+# (review 2026-08-28: GATE-INSTALL-3, EXIT-TEST-3, INSTRUMENTS-LIE-4)
+# --------------------------------------------------------------------------- #
+def _evening(day="2026-08-28"):
+    """An instant that is late evening LOCALLY, whatever this machine's zone is."""
+    local = datetime.datetime.fromisoformat(day + "T23:01:00").astimezone()
+    return local.astimezone(datetime.timezone.utc)
+
+
+def _morning(day="2026-08-28"):
+    local = datetime.datetime.fromisoformat(day + "T05:45:00").astimezone()
+    return local.astimezone(datetime.timezone.utc)
+
+
+def test_days_open_uses_the_local_date_so_an_evening_run_matches_the_morning():
+    """The same local day must give the same age, whatever the UTC date is."""
+    items = [_item("OLD", verify="still", since="2026-08-23")]
+
+    def runner(_command):
+        return 1, "", "still broken"
+
+    morning = vd.build_status(_register(items), _morning(), runner=runner)
+    evening = vd.build_status(_register(items), _evening(), runner=runner)
+
+    assert morning["today"] == "2026-08-28"
+    assert evening["today"] == "2026-08-28"
+    assert _by_id(morning)["OLD"]["days_open"] == 5
+    assert _by_id(evening)["OLD"]["days_open"] == 5
+
+
+def test_the_local_date_is_what_the_gate_would_compute():
+    """hooks/defect_gate.py falls back to datetime.now().date() -- the LOCAL
+    date. What this tool records has to be the same day, or the file and the
+    hook disagree about how old a defect is."""
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    assert vd.local_date(now_utc) == datetime.datetime.now().date().isoformat()
+    # ...and an explicitly-zoned instant maps to ITS own local day.
+    evening = _evening("2026-08-28")
+    assert vd.local_date(evening) == "2026-08-28"
+
+
+def test_first_run_reports_no_fixes_at_all():
+    """No previous status file means nothing can honestly be called a new fix."""
+    items = [_item("A", verify="fixed"), _item("B", verify="fixed"),
+             _item("C", verify="still")]
+
+    def runner(command):
+        return (0, "", "") if command == "fixed" else (1, "", "broken")
+
+    status = vd.build_status(_register(items), _morning(), runner=runner)
+    assert status["previous_run"] is None
+    assert status["counts"]["fixed_since_last"] == 0
+    assert "## Fixed since yesterday (0)" in vd.render_md(status)
+    # ...and the items are still recorded as fixed, with today's date.
+    assert _by_id(status)["A"]["status"] == "fixed"
+    assert _by_id(status)["A"]["fixed_at"] == "2026-08-28"
+
+
+def test_a_second_run_on_the_same_day_reports_no_new_fixes():
+    """The morning run must not recount what an evening kickstart already saw."""
+    items = [_item("A", verify="fixed"), _item("B", verify="fixed")]
+
+    def runner(_command):
+        return 0, "", ""
+
+    first = vd.build_status(_register(items), _evening("2026-08-27"),
+                            runner=runner)
+    assert first["counts"]["fixed_since_last"] == 0
+
+    second = vd.build_status(_register(items), _morning("2026-08-28"),
+                             previous=_by_id(first), runner=runner,
+                             previous_run=vd.previous_run_date(first))
+    assert second["previous_run"] == "2026-08-27"
+    assert second["counts"]["fixed_since_last"] == 0
+
+    third = vd.build_status(_register(items), _evening("2026-08-28"),
+                            previous=_by_id(second), runner=runner,
+                            previous_run=vd.previous_run_date(second))
+    assert third["previous_run"] == "2026-08-28"
+    assert third["counts"]["fixed_since_last"] == 0
+
+
+def test_a_genuinely_new_fix_is_counted_once_and_only_once():
+    phase = {"fixed": False}
+
+    def runner(_command):
+        return (0, "", "") if phase["fixed"] else (1, "", "broken")
+
+    items = [_item("A", verify="check")]
+    day1 = vd.build_status(_register(items), _morning("2026-08-27"), runner=runner)
+    phase["fixed"] = True
+    day2 = vd.build_status(_register(items), _morning("2026-08-28"),
+                           previous=_by_id(day1), runner=runner,
+                           previous_run=vd.previous_run_date(day1))
+    day3 = vd.build_status(_register(items), _morning("2026-08-29"),
+                           previous=_by_id(day2), runner=runner,
+                           previous_run=vd.previous_run_date(day2))
+    assert day1["counts"]["fixed_since_last"] == 0
+    assert day2["counts"]["fixed_since_last"] == 1
+    assert day3["counts"]["fixed_since_last"] == 0
+    assert "## Fixed since yesterday (1)" in vd.render_md(day2)
+    assert "## Fixed since yesterday (0)" in vd.render_md(day3)
+
+
+def test_previous_run_date_reads_the_previous_file_in_local_terms():
+    assert vd.previous_run_date({}) is None
+    assert vd.previous_run_date({"generated_at": ""}) is None
+    assert vd.previous_run_date({"generated_at": "not a stamp"}) is None
+    # A UTC stamp from an evening run belongs to the LOCAL day it was written on.
+    stamp = _evening("2026-08-28").isoformat()
+    assert vd.previous_run_date({"generated_at": stamp}) == "2026-08-28"
+
+
+def test_a_lost_status_file_reports_zero_rather_than_a_pile_of_fixes(tmp_path):
+    """The whole end-to-end path: no status file on disk -> the line says 0."""
+    register = tmp_path / "register.json"
+    _write_register(str(register), [_item("A", verify="true"),
+                                    _item("B", verify="true")])
+    status_out = tmp_path / "status.json"
+    md_out = tmp_path / "DEFECTS.md"
+    rc = vd.main(["--register", str(register), "--status-out", str(status_out),
+                  "--md-out", str(md_out)])
+    assert rc == 0
+    written = json.loads(status_out.read_text(encoding="utf-8"))
+    assert written["previous_run"] is None
+    assert written["counts"]["fixed_since_last"] == 0
+    assert "fixed since yesterday: 0" in md_out.read_text(encoding="utf-8")
 
 
 def test_only_runs_one_and_writes_nothing(tmp_path, capsys):
@@ -419,3 +557,80 @@ def test_relative_cli_paths_resolve_from_repo_root():
     absolute = os.path.abspath(os.path.join(os.sep, "tmp", "example.json"))
     assert vd.resolve_repo_path(absolute) == absolute
 
+
+
+# --------------------------------------------------------------------------- #
+# Accepted items: a standing decision not to fix something (ruling E 2026-08-26).
+# --------------------------------------------------------------------------- #
+def test_an_accepted_item_is_never_run_and_never_open():
+    ran = []
+
+    def runner(command):
+        ran.append(command)
+        return 1, "", "broken"
+
+    items = [
+        _item("KEPT", verify="would-run",
+              accepted="the only repair would cross a ruling (ruling E 2026-08-26)"),
+        _item("NORMAL", verify="would-run"),
+    ]
+    status = vd.build_status(_register(items), _now(), runner=runner)
+    records = _by_id(status)
+    assert records["KEPT"]["status"] == "accepted"
+    assert records["KEPT"]["days_open"] is None
+    assert records["NORMAL"]["status"] == "open"
+    assert ran == ["would-run"]          # only the normal item's check ran
+    assert status["counts"]["accepted"] == 1
+    assert status["counts"]["P1"] == {"open": 1, "oldest_days": 8}
+    assert status["counts"]["open_by_owner"] == {"session": 1}
+
+
+def test_an_accepted_item_is_nobody_s_work_and_reaches_no_lane():
+    items = [
+        _item("MINE", owner="anthony", accepted="ruled out (ruling E 2026-08-26)"),
+        _item("NIGHT", owner="codex", fix_scope="repo-pr",
+              accepted="ruled out (ruling E 2026-08-26)"),
+    ]
+    status = vd.build_status(_register(items), _now(),
+                             runner=lambda _c: (1, "", ""))
+    assert status["yours_today"] == []
+    assert status["nightly_eligible"] == []
+
+
+def test_the_reason_and_the_ruling_date_are_rendered_next_to_the_item():
+    reason = "the fork stays where it is (ruling E 2026-08-26)"
+    items = [_item("KEPT", accepted=reason)]
+    status = vd.build_status(_register(items), _now(),
+                             runner=lambda _c: (1, "", ""))
+    md = vd.render_md(status)
+    assert "## Accepted, not being fixed (1)" in md
+    assert "accepted: %s" % reason in md
+    assert "accepted: 1" in md
+
+
+def test_an_empty_accepted_field_is_not_an_acceptance():
+    for value in (None, "", "   ", True, 1, [], {}):
+        items = [_item("X", accepted=value)]
+        status = vd.build_status(_register(items), _now(),
+                                 runner=lambda _c: (1, "", ""))
+        assert _by_id(status)["X"]["status"] == "open", value
+
+
+def test_accepted_wins_over_provisional_and_not_before():
+    items = [_item("A", provisional=True, not_before="2026-09-30",
+                   accepted="ruled out (ruling E 2026-08-26)")]
+    status = vd.build_status(_register(items), _now(),
+                             runner=lambda _c: (1, "", ""))
+    assert _by_id(status)["A"]["status"] == "accepted"
+
+
+def test_the_real_register_records_leak3_as_accepted_not_open():
+    """Ruling E stands: the client-held fork is recorded, not worked."""
+    register = vd.load_register(os.path.join(
+        os.path.dirname(_HERE), "registers", "defects.json"))
+    item = next(i for i in register["items"] if i["id"] == "LEAK-3")
+    assert vd.is_accepted(item)
+    assert "2026-08-26" in item["accepted"]
+    assert vd.plan_item(item, "2026-08-28") == ("skip", "accepted")
+    # ...and it does not duplicate what LEAK-1 and LEAK-2 already check.
+    assert "LEAK-1" in item["symptom"] and "LEAK-2" in item["symptom"]

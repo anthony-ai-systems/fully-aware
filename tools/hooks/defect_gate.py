@@ -19,7 +19,10 @@ because a nightly job did not run is worse than the defect it is guarding.
 
 Escape hatches, in the order a session would reach for them:
   * declare a fix session -- touch ~/.claude/defect-fix-mode/<session_id>
-    (or .../ALL for every session on this Mac); good for 12 hours
+    (or .../ALL for every session on this Mac, which is also what a payload with
+    no session id is told to use); good for 12 hours
+  * actually fix the defect, then re-run tools/verify-defects.py so the status
+    file this hook reads knows about it -- the gate reopens on the next call
   * emergency off -- DEFECT_GATE_DISABLE=1 in the environment
 
 Environment overrides (tests use all four; day-to-day nothing sets them):
@@ -43,6 +46,11 @@ GATED_TOOLS = ("Task", "Agent", "Workflow")
 STATUS_PATH = "/Users/anthonyflores/code/fully-aware/state/defects-status.json"
 MARKER_DIR = os.path.expanduser("~/.claude/defect-fix-mode")
 DEFECTS_MD = "~/code/fully-aware/state/DEFECTS.md"
+# This hook reads the status file, never the register, so a session that fixes
+# the defect stays blocked until the status file is rebuilt. That command is the
+# only thing standing between a real fix and an open gate, so the block message
+# prints it.
+REFRESH_CMD = "/usr/bin/python3 ~/code/fully-aware/tools/verify-defects.py"
 
 DEFAULT_DAYS = 7
 STATUS_MAX_AGE_HOURS = 36.0
@@ -202,7 +210,6 @@ def _quote(text):
 
 def _message(days, item, extra_count, session_id):
     ident = str(item.get("id") or "an unnamed P0")
-    label = session_id if session_id else "<session_id>"
     lines = [
         "defect-gate: %s has blocked unattended work for %d days: %s"
         % (ident, days, _quote(item.get("symptom"))),
@@ -213,10 +220,25 @@ def _message(days, item, extra_count, session_id):
             % (extra_count + 1)
         )
     lines.append("Fix: %s" % _quote(item.get("fix_hint")))
-    lines.append(
-        "To work on it in this session run: mkdir -p ~/.claude/defect-fix-mode "
-        "&& touch ~/.claude/defect-fix-mode/%s  (12h)." % label
-    )
+    if session_id:
+        lines.append(
+            "To work on it in this session run: mkdir -p ~/.claude/defect-fix-mode "
+            "&& touch ~/.claude/defect-fix-mode/%s  (12h)." % session_id
+        )
+    else:
+        # No session id in the payload. The old text printed a literal
+        # <session_id>, which is not just a placeholder -- the angle brackets
+        # are shell redirections, so pasting it fails. ALL is the marker that
+        # works without one.
+        lines.append(
+            "This session sent no id, so open the gate for every session: "
+            "mkdir -p ~/.claude/defect-fix-mode "
+            "&& touch ~/.claude/defect-fix-mode/ALL  (12h)."
+        )
+    # Fixing it is not enough on its own: this hook reads the morning job's
+    # status file, not the register, so the status has to be rebuilt before the
+    # gate can see the repair.
+    lines.append("Then refresh the status so the gate reopens: %s" % REFRESH_CMD)
     lines.append("Full list: %s" % DEFECTS_MD)
     return "\n".join(lines) + "\n"
 
@@ -242,6 +264,9 @@ def main():
     if not isinstance(payload, dict) or not _status_is_fresh(payload):
         sys.exit(0)          # stale morning job -- never block on staleness
 
+    # The LOCAL date, deliberately: tools/verify-defects.py stamps open_since
+    # and days_open from the local date too, so this fallback and the file it
+    # reads always describe the same day. Do not "fix" this to UTC.
     today = datetime.datetime.now().date()
     blockers = _qualifying(payload, _threshold_days(), today)
     if not blockers:

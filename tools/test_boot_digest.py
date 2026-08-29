@@ -1152,16 +1152,20 @@ class InstallerWorktreeGuard(unittest.TestCase):
 # DEFECTS: the register's count is the first line every session reads
 # --------------------------------------------------------------------------- #
 DEFECT_COUNTS = {
-    "P0": {"open": 3, "oldest_days": 6},
+    # oldest_days is deliberately well clear of the gate threshold, so the
+    # baseline line carries the trip point but no warning tail.
+    "P0": {"open": 3, "oldest_days": 3},
     "P1": {"open": 9, "oldest_days": 12},
     "P2": {"open": 7, "oldest_days": 30},
     "fixed_since_last": 1, "provisional": 4, "deferred": 0, "error": 0,
+    "accepted": 1,
     "open_by_owner": {"anthony": 4, "codex": 5, "session": 10},
 }
 
-EXPECTED_SUMMARY = ("DEFECTS -- P0: 3 (oldest 6d) · P1: 9 · P2: 7 · "
+EXPECTED_SUMMARY = ("DEFECTS -- P0: 3 (oldest 3d; gate blocks at 7d) · "
+                    "P1: 9 · P2: 7 · "
                     "fixed since yesterday: 1 · yours today: 4 · "
-                    "no real check yet: 4")
+                    "no real check yet: 4 · accepted: 1")
 
 
 def _defect_record(item_id, days=6, symptom="a synthetic thing is broken"):
@@ -1253,7 +1257,9 @@ class DefectLines(unittest.TestCase):
     def test_older_packs_without_the_section_get_no_defect_lines(self):
         md = bd.build_digest(NOW, _pack())
         self.assertNotIn("DEFECTS", md)
-        self.assertEqual(md.splitlines()[1][:15], "Pack generated:")
+        lines = md.splitlines()
+        self.assertEqual(lines[1][:8], "NIGHTLY ")
+        self.assertEqual(lines[3][:15], "Pack generated:")
 
     def test_section_present_but_countless_says_so(self):
         md = bd.build_digest(NOW, _defect_pack(counts={}))
@@ -1307,10 +1313,30 @@ class DefectStaleness(unittest.TestCase):
         self.assertEqual(bd.defect_lines(NOW, self._aged(hours=3))[0],
                          EXPECTED_SUMMARY)
 
-    def test_the_last_hour_inside_the_window_carries_no_prefix(self):
-        fresh = self._aged(stamp=(NOW - datetime.timedelta(
+    def test_the_last_hour_inside_the_window_still_carries_its_own_age(self):
+        """Not yet STALE, but far older than the pack: the age must show.
+
+        This is the failure mode GATE-INSTALL-4 found -- a register step that
+        crashed leaves a fresh-looking pack carrying day-old counts, and for the
+        twelve hours before the 36h line the digest said nothing at all.
+        """
+        old = self._aged(stamp=(NOW - datetime.timedelta(
             seconds=bd.STALE_DEFECTS)).isoformat(timespec="seconds"))
-        self.assertEqual(bd.defect_lines(NOW, fresh)[0], EXPECTED_SUMMARY)
+        self.assertEqual(bd.defect_lines(NOW, old)[0],
+                         "AS_OF(36h) " + EXPECTED_SUMMARY)
+
+    def test_a_day_old_status_in_a_fresh_pack_carries_its_age(self):
+        day_old = self._aged(hours=24)
+        self.assertEqual(bd.defect_lines(NOW, day_old)[0],
+                         "AS_OF(24h) " + EXPECTED_SUMMARY)
+
+    def test_the_ordinary_seconds_of_lag_within_one_run_are_not_marked(self):
+        """verify-defects runs seconds before the assembler; that is not lag."""
+        for minutes in (0, 5, 59):
+            with self.subTest(minutes=minutes):
+                pack = self._aged(stamp=(NOW - datetime.timedelta(
+                    hours=3, minutes=minutes)).isoformat(timespec="seconds"))
+                self.assertEqual(bd.defect_lines(NOW, pack)[0], EXPECTED_SUMMARY)
 
     def test_a_status_past_thirty_six_hours_is_marked_stale_with_its_age(self):
         self.assertEqual(bd.defect_lines(NOW, self._aged(hours=40))[0],
@@ -1339,6 +1365,218 @@ class DefectStaleness(unittest.TestCase):
             NOW - datetime.timedelta(hours=99)).isoformat(timespec="seconds")
         self.assertEqual(bd.defect_lines(NOW, pack),
                          ["DEFECTS -- no status yet (run tools/verify-defects.py)"])
+
+
+# --------------------------------------------------------------------------- #
+# The gate's trip point, the register's own failures, and the night.
+# (review 2026-08-28: EXIT-TEST-1, GATE-INSTALL-4, EXIT-TEST-4, LAUNCHD-ENV-3/5)
+# --------------------------------------------------------------------------- #
+class GateTripPoint(unittest.TestCase):
+    """"oldest 6d" never said where the machine-wide block starts."""
+
+    @staticmethod
+    def _line(oldest, open_count=3):
+        counts = dict(DEFECT_COUNTS,
+                      P0={"open": open_count, "oldest_days": oldest})
+        return bd.defects_summary_line(counts)
+
+    def test_the_line_names_the_day_the_gate_blocks(self):
+        self.assertIn("(oldest 3d; gate blocks at 7d)", self._line(3))
+
+    def test_the_eve_of_the_threshold_says_so(self):
+        line = self._line(6)
+        self.assertIn("(oldest 6d; gate blocks at 7d)", line)
+        self.assertTrue(line.endswith(" — gate arms tomorrow"), line)
+
+    def test_two_days_out_gets_no_warning_tail(self):
+        self.assertNotIn("gate arms tomorrow", self._line(5))
+        self.assertNotIn("gate is blocking now", self._line(5))
+
+    def test_at_or_past_the_threshold_the_line_says_it_is_blocking(self):
+        for oldest in (7, 9, 40):
+            with self.subTest(oldest=oldest):
+                line = self._line(oldest)
+                self.assertTrue(line.endswith(" — gate is blocking now"), line)
+                self.assertNotIn("arms tomorrow", line)
+
+    def test_no_open_p0_means_no_gate_talk_at_all(self):
+        line = self._line(0, open_count=0)
+        self.assertNotIn("gate", line)
+        self.assertNotIn("oldest", line)
+
+    def test_the_threshold_matches_the_hook_that_enforces_it(self):
+        """The number is duplicated, so this test is the coupling."""
+        spec = importlib.util.spec_from_file_location(
+            "defect_gate", os.path.join(_HERE, "hooks", "defect_gate.py"))
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+        self.assertEqual(bd.GATE_BLOCKS_AT_DAYS, gate.DEFAULT_DAYS)
+
+
+class RegisterStepFailed(unittest.TestCase):
+    """A register step that crashed must be a line, not a silent countdown."""
+
+    def _pack_with_marker(self, tmp, marker_body, status_age=0, marker_age=0):
+        status_path = os.path.join(tmp, "defects-status.json")
+        with open(status_path, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "defect-status/v1", "items": []}, fh)
+        marker = os.path.join(tmp, "defects-status.FAILED")
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write(marker_body)
+        now = datetime.datetime.now().timestamp()
+        os.utime(status_path, (now - status_age, now - status_age))
+        os.utime(marker, (now - marker_age, now - marker_age))
+        return _defect_pack(status_path=status_path), marker
+
+    def test_a_marker_newer_than_the_status_leads_the_defect_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pack, _ = self._pack_with_marker(
+                tmp, "verify-defects FAILED exit=2 at=2026-08-28T05:45:12-0700\n",
+                status_age=90000, marker_age=0)
+            lines = bd.defect_lines(NOW, pack)
+        self.assertEqual(
+            lines[0],
+            "DEFECTS -- register step FAILED at 2026-08-28T05:45:12-0700")
+        self.assertIn(EXPECTED_SUMMARY, lines[1])
+
+    def test_the_failed_line_reaches_the_rendered_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pack, _ = self._pack_with_marker(
+                tmp, "verify-defects FAILED exit=2 at=2026-08-28T05:45:12-0700\n",
+                status_age=90000, marker_age=0)
+            md = bd.build_digest(NOW, pack)
+        self.assertEqual(md.splitlines()[1],
+                         "DEFECTS -- register step FAILED at "
+                         "2026-08-28T05:45:12-0700")
+
+    def test_a_marker_older_than_the_status_is_a_failure_already_recovered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pack, _ = self._pack_with_marker(
+                tmp, "verify-defects FAILED exit=2 at=2026-08-27T05:45:12-0700\n",
+                status_age=0, marker_age=90000)
+            lines = bd.defect_lines(NOW, pack)
+        self.assertNotIn("FAILED", lines[0])
+
+    def test_no_marker_at_all_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = os.path.join(tmp, "defects-status.json")
+            with open(status_path, "w", encoding="utf-8") as fh:
+                json.dump({"schema": "defect-status/v1", "items": []}, fh)
+            lines = bd.defect_lines(NOW, _defect_pack(status_path=status_path))
+        self.assertEqual(lines[0], EXPECTED_SUMMARY)
+
+    def test_a_marker_with_no_timestamp_falls_back_to_its_own_mtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pack, marker = self._pack_with_marker(
+                tmp, "something went wrong\n", status_age=90000, marker_age=0)
+            lines = bd.defect_lines(NOW, pack)
+            expected = datetime.datetime.fromtimestamp(
+                os.path.getmtime(marker)).isoformat(timespec="seconds")
+        self.assertEqual(lines[0],
+                         "DEFECTS -- register step FAILED at %s" % expected)
+
+
+class NightlyLine(unittest.TestCase):
+    """One line so a session can see what the 02:30 lane did."""
+
+    def test_no_run_log_directory_means_the_lane_is_not_armed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(bd.nightly_line(os.path.join(tmp, "nope")),
+                             "NIGHTLY -- lane not armed")
+
+    def test_an_empty_directory_means_no_run_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(bd.nightly_line(tmp), "NIGHTLY -- no run recorded")
+
+    def test_only_prompt_and_last_message_files_still_means_no_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("20260829-MAP-1.prompt.md", "20260829-MAP-1.last.md",
+                         "20260829-MAP-1.codex.log", "attempts.json"):
+                with open(os.path.join(tmp, name), "w", encoding="utf-8") as fh:
+                    fh.write("x")
+            self.assertEqual(bd.nightly_line(tmp), "NIGHTLY -- no run recorded")
+
+    def test_the_newest_run_log_gives_the_id_and_the_outcome(self):
+        for outcome in ("pr-opened", "pr-check-failed", "codex-failed",
+                        "no-changes", "clone-failed"):
+            with self.subTest(outcome=outcome):
+                with tempfile.TemporaryDirectory() as tmp:
+                    self._write_log(tmp, "20260829-MAP-1.md", "MAP-1", outcome)
+                    self.assertEqual(bd.nightly_line(tmp),
+                                     "NIGHTLY -- MAP-1: %s" % outcome)
+
+    def test_the_newest_of_several_logs_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            older = self._write_log(tmp, "20260827-SAGA-1.md", "SAGA-1",
+                                    "no-changes")
+            self._write_log(tmp, "20260829-MAP-1.md", "MAP-1", "pr-opened")
+            stale = datetime.datetime.now().timestamp() - 200000
+            os.utime(older, (stale, stale))
+            self.assertEqual(bd.nightly_line(tmp), "NIGHTLY -- MAP-1: pr-opened")
+
+    def test_a_log_with_no_outcome_line_says_so_rather_than_guessing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "20260829-MAP-1.md"), "w",
+                      encoding="utf-8") as fh:
+                fh.write("# Nightly fix MAP-1 -- 2026-08-29\n\ntruncated\n")
+            self.assertEqual(bd.nightly_line(tmp),
+                             "NIGHTLY -- MAP-1: outcome not recorded")
+
+    def test_the_id_falls_back_to_the_filename_when_the_header_is_gone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "20260829-MAP-1.md"), "w",
+                      encoding="utf-8") as fh:
+                fh.write("Outcome: pr-opened\n")
+            self.assertEqual(bd.nightly_line(tmp), "NIGHTLY -- MAP-1: pr-opened")
+
+    def test_the_line_reaches_the_digest_and_survives_the_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_log(tmp, "20260829-MAP-1.md", "MAP-1", "pr-opened")
+            with unittest.mock.patch.object(bd, "NIGHTLY_DIR", tmp):
+                md = bd.build_digest(NOW, _defect_pack(), cap_tokens=60)
+        self.assertIn("NIGHTLY -- MAP-1: pr-opened", md)
+
+    def test_a_pack_with_no_defect_section_still_shows_the_lane(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with unittest.mock.patch.object(bd, "NIGHTLY_DIR",
+                                            os.path.join(tmp, "nope")):
+                md = bd.build_digest(NOW, _pack())
+        self.assertIn("NIGHTLY -- lane not armed", md)
+
+    @staticmethod
+    def _write_log(directory, name, item_id, outcome):
+        path = os.path.join(directory, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("# Nightly fix %s -- 2026-08-29\n\nMode: live\n"
+                     "Outcome: %s\n\n## What happened\n\n- did a thing\n"
+                     % (item_id, outcome))
+        return path
+
+
+class WrapperEnvironmentAndMarker(unittest.TestCase):
+    """One PATH contract across the lanes; a loud marker when the register dies."""
+
+    def _body(self):
+        with open(_WRAPPER, "r", encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_the_path_includes_the_local_bin_every_other_lane_has(self):
+        self.assertIn(
+            'export PATH="/opt/homebrew/bin:/usr/local/bin:${HOME}/.local/bin:${PATH}"',
+            self._body())
+
+    def test_a_failed_register_step_writes_a_marker_the_digest_can_see(self):
+        body = self._body()
+        self.assertIn("defects-status.FAILED", body)
+        self.assertIn("verify-defects FAILED exit=%s at=%s", body)
+
+    def test_a_successful_register_step_clears_the_marker(self):
+        self.assertIn('rm -f "${DEFECTS_FAILED}"', self._body())
+
+    def test_the_register_step_still_degrades_rather_than_aborting(self):
+        body = self._body()
+        self.assertNotRegex(body, r"set -e(?:[^a-zA-Z]|$)")
+        self.assertIn("defect verify FAILED", body)
 
 
 if __name__ == "__main__":
