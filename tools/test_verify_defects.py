@@ -313,7 +313,7 @@ def test_main_exit_codes_and_failing_checks_are_data(tmp_path):
 
 # --------------------------------------------------------------- private env --
 
-def test_private_env_parses_only_well_formed_uppercase_keys(tmp_path):
+def test_private_env_parses_only_well_formed_defect_keys(tmp_path):
     path = tmp_path / "defects.env"
     path.write_text("\n".join([
         "# a comment line",
@@ -330,6 +330,10 @@ def test_private_env_parses_only_well_formed_uppercase_keys(tmp_path):
         "9LEADING=skipped",
         "DEFECT-DASH=skipped",
         "NO_EQUALS_SIGN",
+        "OTHER_UPPERCASE=skipped",          # uppercase but not DEFECT_
+        "DEFECT=skipped",                   # the bare prefix is not a key
+        "DEFECT_=skipped",                  # nothing after the prefix
+        "defect_lower_prefix=skipped",
     ]) + "\n", encoding="utf-8")
     assert vd.load_private_env(str(path)) == {
         "DEFECT_PLAIN": "plain",
@@ -340,6 +344,29 @@ def test_private_env_parses_only_well_formed_uppercase_keys(tmp_path):
         "DEFECT_SPACED": "spaced",
         "DEFECT_INNER": "a=b=c",
     }
+
+
+def test_private_env_ignores_path_and_other_environment_overrides(tmp_path,
+                                                                  monkeypatch):
+    """A ``PATH=`` line in the private file must not reach a verify.
+
+    ``_shell_runner`` applies the private values AFTER setting the
+    Homebrew-first PATH the register's rules promise, so an unfiltered file
+    could redirect every check at what it runs.
+    """
+    path = tmp_path / "defects.env"
+    path.write_text("\n".join([
+        "PATH=/tmp/evil",
+        "HOME=/tmp/evil-home",
+        "LD_PRELOAD=/tmp/evil.so",
+        "DEFECT_KEPT=kept",
+    ]) + "\n", encoding="utf-8")
+    assert vd.load_private_env(str(path)) == {"DEFECT_KEPT": "kept"}
+
+    # And end to end: the verify still sees the real PATH and $HOME.
+    monkeypatch.setattr(vd, "PRIVATE_ENV_PATH", str(path))
+    assert vd.run_verify('[ "$PATH" != /tmp/evil ] && [ "$HOME" != /tmp/evil-home ]'
+                         ' && [ "$DEFECT_KEPT" = kept ]')[:2] == ("fixed", 0)
 
 
 def test_private_env_is_empty_when_the_file_is_missing_or_unreadable(tmp_path):

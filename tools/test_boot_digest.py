@@ -1224,6 +1224,32 @@ class DefectLines(unittest.TestCase):
         self.assertIn(EXPECTED_SUMMARY, md)
         self.assertIn("- SYN-1 — yours today", md)
 
+    def test_a_days_open_that_is_not_a_count_falls_back_to_the_id_line(self):
+        """A junk days_open must cost the detail line, never the whole digest.
+
+        The status file is read directly, so nothing upstream has type-checked
+        it: a string would raise TypeError on the %d and kill every line the
+        digest owes the session, and a bool would silently print as 1d/0d.
+        """
+        for junk in ("3", "", True, False, -1, -7, {"days": 3}, [3], 3.5, None):
+            with self.subTest(days_open=junk):
+                with tempfile.TemporaryDirectory() as tmp:
+                    record = _defect_record("SYN-1", days=junk)
+                    pack = _defect_pack(tmp, yours=["SYN-1"], records=[record])
+                    lines = bd.defect_lines(NOW, pack)
+                    self.assertEqual(lines[0], EXPECTED_SUMMARY)
+                    self.assertEqual(lines[1], "- SYN-1 — yours today")
+
+    def test_a_real_count_still_gets_the_detailed_line(self):
+        for days in (0, 1, 12):
+            with self.subTest(days_open=days):
+                with tempfile.TemporaryDirectory() as tmp:
+                    record = _defect_record("SYN-1", days=days)
+                    pack = _defect_pack(tmp, yours=["SYN-1"], records=[record])
+                    self.assertEqual(
+                        bd.defect_lines(NOW, pack)[1],
+                        "- SYN-1 — %dd — a synthetic thing is broken" % days)
+
     def test_older_packs_without_the_section_get_no_defect_lines(self):
         md = bd.build_digest(NOW, _pack())
         self.assertNotIn("DEFECTS", md)

@@ -487,6 +487,13 @@ def defect_lines(now, pack, limit=DEFENSE_LINES_SENTINEL):
         rec = by_id.get(item_id) or {}
         symptom = rec.get("symptom")
         days = rec.get("days_open")
+        # days_open arrives straight from the status file, which the pack
+        # assembler's own item guard never sees. A string "3" would raise
+        # TypeError on the %d below and take the WHOLE digest down; True would
+        # quietly print as "1d". Only a real, non-negative count earns the
+        # detailed line -- anything else falls back to the id-only one.
+        if not isinstance(days, int) or isinstance(days, bool) or days < 0:
+            days = None
         if symptom and days is not None:
             lines.append(compress("- %s — %dd — %s" % (item_id, days, symptom)))
         else:

@@ -40,6 +40,9 @@ and reach every verify as environment variables:
 
     ~/.config/fully-aware/defects.env   (override: $DEFECTS_PRIVATE_ENV)
 
+Only ``DEFECT_``-prefixed names are read from that file. The rest are ignored,
+so a ``PATH=`` or ``HOME=`` line there cannot redirect what a verify runs.
+
 A verify that needs one of them must fail (stay open) when it is empty.
 
 Stdlib only, Python 3.9+. ``--now`` injects the clock so tests are deterministic.
@@ -67,7 +70,10 @@ PATH_PREFIX = "/opt/homebrew/bin:/usr/local/bin:%s/.local/bin:" % HOME
 # variables, and every verify that depends on one fails -- never passes.
 PRIVATE_ENV_PATH = os.environ.get("DEFECTS_PRIVATE_ENV") or os.path.join(
     HOME, ".config", "fully-aware", "defects.env")
-_ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+# Only ``DEFECT_``-prefixed names are read (docs/DEFECTS.md). The values are
+# applied over the environment AFTER the Homebrew-first PATH is set, so a
+# stray ``PATH=`` or ``HOME=`` line must not be able to redirect a verify.
+_ENV_KEY_RE = re.compile(r"^DEFECT_[A-Z0-9_]+$")
 
 # Output of a verify is never rendered into the boot pack; only this much of its
 # tail rides into the status file, for the "Check errored" group.
