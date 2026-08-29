@@ -7,12 +7,35 @@ fix with the item's pr_check, and opens a pull request. Merge is always
 Anthony's -- this script never merges, never force-pushes, and never touches an
 existing checkout.
 
-The sandbox is absolute:
+What is actually isolated, stated exactly (a 2026-08-28 review found the older
+"the sandbox is absolute" claim was true of this script's own commands and
+false of the Codex process it launches):
 
   * a fresh clone under /Users/anthonyflores/code/.nightly-fix/, never a repo
     anyone works in;
   * one branch, named fix/<id>-<date>, never a default branch;
-  * one pull request, opened and left for Anthony.
+  * one pull request, opened and left for Anthony;
+  * Codex's SHELL sandbox is workspace-write. That is the only thing the -s
+    flag covers: it constrains model-generated shell commands, nothing else;
+  * every MCP server named in ~/.codex/config.toml is switched off by name on
+    the command line, the whole plugin system is switched off, and the app,
+    browser, computer-use, code-mode, memory and chronicle features are
+    switched off, for this run only. The global config file is never edited;
+  * that is VERIFIED before the model is launched: the lane runs "codex ...
+    mcp list" with the same overrides and refuses to start unless every row
+    reads "disabled" (outcome codex-isolation-failed);
+  * the item's pr_check runs under "codex sandbox", whose seatbelt denies the
+    network and denies writes outside the clone.
+
+What is NOT isolated, and should not be claimed to be:
+
+  * READS. A workspace-write sandbox restricts writes, not reads, so Codex can
+    still read files elsewhere on this Mac. The staging rail below is the
+    answer to that: nothing untracked that looks like a credential, nothing
+    over 1 MB and nothing outside the clone is ever committed;
+  * the Codex login itself, which stays the machine keychain login. An isolated
+    CODEX_HOME was tried and rejected: the keychain credential is bound to the
+    real home, so an isolated home breaks authentication.
 
 Modes:
 
@@ -35,9 +58,16 @@ Outputs (all under state/nightly-fix/, all gitignored):
   attempts.json             one line per attempt, for the 72 h backoff
   LOCK                      pid + timestamp while a run is live
 
-Exit codes: 0 for every handled outcome (including a missing morning status,
-"nothing to do", "Codex changed nothing", or a failed pr_check). 2 only for a
-lock/configuration failure or a safety rail refusing to let the run continue.
+Exit codes. launchd keeps one number per job and the morning digest reads it,
+so the number has to mean something:
+
+  0   the lane did its job or deliberately stood down -- a pull request opened,
+      nothing eligible, a backoff, a stale morning status, a pull request
+      already pending, a refused pr_check, Codex changed nothing, a leftover
+      clone, or a trial that stopped at the local commit.
+  2   a lock or configuration failure, or a safety rail refusing to continue.
+  3+  the lane tried and could not finish. One code per outcome, listed in
+      OUTCOME_EXIT_CODES below.
 
 Python 3.9, standard library only. Run it with /usr/bin/python3.
 """
@@ -66,11 +96,97 @@ DEFAULT_CLONE_PARENT = "/Users/anthonyflores/code/.nightly-fix"
 CODEX_TIMEOUT_S = 40 * 60
 PR_CHECK_TIMEOUT_S = 20 * 60
 GIT_TIMEOUT_S = 15 * 60
+MCP_LIST_TIMEOUT_S = 5 * 60
 LOCK_MAX_AGE_S = 6 * 3600
 ATTEMPT_BACKOFF_S = 72 * 3600
 CLONE_KEEP_DAYS = 7
 
+# The morning status file is the lane's whole picture of what is broken. The
+# 02:30 run always uses the previous morning's snapshot by design; more than a
+# day and a half old means the morning job stopped and the lane should not act.
+STATUS_MAX_AGE_S = 36 * 3600
+
+# Every outcome that means the lane tried and could not finish gets its own
+# number, so `launchctl list` and the morning digest can say WHICH way it
+# failed. Anything not listed here exits 0: it either worked or it was a
+# deliberate stand-down.
+OUTCOME_EXIT_CODES = {
+    "clone-failed": 3,
+    "branch-failed": 4,
+    "codex-isolation-failed": 5,
+    "codex-failed": 6,
+    "git-status-failed": 7,
+    "wrong-branch": 8,
+    "unsafe-diff": 9,
+    "pr-check-failed": 10,
+    "commit-failed": 11,
+    "push-failed": 12,
+    "pr-create-failed": 13,
+}
+
 PATH_PREFIX = "/opt/homebrew/bin:/usr/local/bin:" + os.path.expanduser("~/.local/bin")
+
+# --- Codex isolation -------------------------------------------------------
+#
+# The lane cannot use an isolated CODEX_HOME: the login credential is held in
+# the machine keychain and bound to the real home, so an isolated home logs the
+# lane out. So the global config is left alone and every tool it enables is
+# switched off ON THE COMMAND LINE, by name, for this run only.
+
+CODEX_CONFIG_FILE = os.path.expanduser("~/.codex/config.toml")
+
+# Feature flags switched off for the run. "plugins" is the load-bearing one:
+# the app connectors (mail, chat, docs, the GitHub connector, the computer
+# history reader) are supplied by the plugin system, not by [mcp_servers], and
+# per-plugin overrides do not reach them. Turning the feature off removes them
+# from the session entirely -- verified against `codex ... mcp list`.
+CODEX_DISABLED_FEATURES = (
+    "plugins",
+    "apps",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "computer_use",
+    "code_mode_host",
+    "memories",
+    "chronicle",
+)
+
+# Built-in Codex permission profile used to run the item's pr_check. It denies
+# the network and denies writes outside the working directory. Named profiles
+# have a leading colon; a profile is REQUIRED by `codex sandbox`.
+CODEX_SANDBOX_PROFILE = ":workspace"
+
+# The seatbelt denies writes under $HOME, and uv keeps its cache and its tool
+# directory there, so a check that runs pytest through uvx cannot start. These
+# point uv at /tmp, which the profile does allow, and the lane warms that
+# scratch cache with its own fixed command before entering the sandbox -- the
+# seatbelt has no network, so nothing can be downloaded from inside it.
+CHECK_SCRATCH_DIR = "/tmp/nightly-fix-check-scratch"
+CHECK_ENV = (
+    "UV_CACHE_DIR=" + os.path.join(CHECK_SCRATCH_DIR, "uv-cache"),
+    "UV_TOOL_DIR=" + os.path.join(CHECK_SCRATCH_DIR, "uv-tools"),
+    "UV_PYTHON_INSTALL_DIR=" + os.path.join(CHECK_SCRATCH_DIR, "uv-python"),
+)
+CHECK_WARM_ARGV = ("uvx", "--with", "pytest", "python", "-c", "pass")
+
+# --- the staging rail ------------------------------------------------------
+
+# Codex can READ anything on this Mac even under a workspace-write sandbox, so
+# the rail is on what leaves: an untracked file whose name looks like a secret
+# is never staged, and neither is anything large or anything outside the clone.
+CREDENTIAL_PATTERNS = (
+    r"\.env$",
+    r"defects\.env",
+    r"\.pem$",
+    r"id_rsa",
+    r"token",
+    r"secret",
+    r"credential",
+    r"auth\.json",
+)
+CREDENTIAL_RE = re.compile("|".join(CREDENTIAL_PATTERNS), re.IGNORECASE)
+MAX_STAGED_BYTES = 1024 * 1024
 
 DONE_MARKER = "NIGHTLY-FIX DONE"
 
@@ -282,6 +398,61 @@ def assert_not_inside_worktree(path):
         probe = parent
 
 
+def parse_porcelain_z(text):
+    """`git status --porcelain -z` as a list of (code, path).
+
+    NUL-separated on purpose: it is the only porcelain form that never quotes
+    or escapes a path, so a filename with a space, a quote or a newline in it
+    cannot slip past the rail below. A rename entry carries the old path as an
+    extra field, which is consumed and ignored -- the new path is what would be
+    committed.
+    """
+    fields = [f for f in (text or "").split("\0")]
+    entries = []
+    i = 0
+    while i < len(fields):
+        field = fields[i]
+        i += 1
+        if not field:
+            continue
+        if len(field) < 4 or field[2] != " ":
+            continue
+        code = field[:2]
+        path = field[3:]
+        if code[0] in ("R", "C"):
+            i += 1  # the source path of the rename/copy
+        entries.append((code, path))
+    return entries
+
+
+def unsafe_staged_paths(entries, clone_dir):
+    """Why the rail refuses to stage this working tree, or [] when it is fine.
+
+    Three refusals, in the order they are cheap to check: an untracked file
+    whose NAME looks like a credential; anything outside the clone; anything
+    over a megabyte. Codex can read this whole Mac even inside a workspace-write
+    sandbox, so this is the rail on what leaves.
+    """
+    root = os.path.realpath(clone_dir)
+    problems = []
+    for code, path in entries:
+        full = os.path.realpath(os.path.join(clone_dir, path))
+        if full != root and not full.startswith(root + os.sep):
+            problems.append("%s resolves outside the clone" % path)
+            continue
+        if code == "??" and CREDENTIAL_RE.search(path):
+            problems.append("%s is untracked and named like a credential" % path)
+            continue
+        try:
+            size = os.path.getsize(full)
+        except OSError:
+            continue
+        if size > MAX_STAGED_BYTES:
+            problems.append("%s is %d bytes, over the %d byte limit"
+                            % (path, size, MAX_STAGED_BYTES))
+    return problems
+
+
 # --------------------------------------------------------------------------
 # command runner (injectable so tests never touch codex, git or gh)
 # --------------------------------------------------------------------------
@@ -443,7 +614,7 @@ def write_attempts(path, records):
         fh.write("\n".join(lines) + "\n")
 
 
-def record_attempt(path, item_id, now, mode, outcome, detail=""):
+def record_attempt(path, item_id, now, mode, outcome, detail="", branch=""):
     records = read_attempts(path)
     records.append({
         "id": item_id,
@@ -451,6 +622,7 @@ def record_attempt(path, item_id, now, mode, outcome, detail=""):
         "mode": mode,
         "outcome": outcome,
         "detail": detail[:200],
+        "branch": branch or "",
     })
     write_attempts(path, records)
     return records
@@ -467,6 +639,66 @@ def last_attempt_at(records, item_id):
     return latest
 
 
+def pending_pr_branch(records, item_id):
+    """The branch of the most recent pull request this lane opened for an item.
+
+    None means it has never opened one. An empty string means it did but the
+    record is from an older version that did not save the branch name -- the
+    caller cannot ask GitHub about it, and treats it as still open.
+
+    This deliberately reads the OUTCOME, not the timestamp: a pull request that
+    is still waiting for Anthony must keep blocking the item however many nights
+    pass, or the lane opens a second one for the same defect every 72 hours.
+    """
+    branch = None
+    latest = None
+    for rec in records:
+        if not isinstance(rec, dict) or rec.get("id") != item_id:
+            continue
+        if rec.get("outcome") != "pr-opened":
+            continue
+        when = parse_stamp(rec.get("at"))
+        if when is None:
+            continue
+        if latest is None or when >= latest:
+            latest = when
+            branch = str(rec.get("branch") or "")
+    return branch
+
+
+def pr_state(runner, remote, branch):
+    """MERGED / CLOSED / OPEN / UNKNOWN for a branch's pull request.
+
+    Anything that is not a clean answer comes back UNKNOWN, and the caller
+    treats UNKNOWN as "still open". Failing closed here costs one night of not
+    working an item; failing open costs Anthony a duplicate pull request.
+    """
+    if not branch or not remote:
+        return "UNKNOWN"
+    argv = ["gh", "pr", "view", branch, "--repo", str(remote), "--json", "state"]
+    try:
+        res = guarded_run(runner, argv, timeout=GIT_TIMEOUT_S)
+    except SafetyError:
+        return "UNKNOWN"
+    if res.rc != 0:
+        return "UNKNOWN"
+    try:
+        data = json.loads(res.output.strip() or "{}")
+    except ValueError:
+        return "UNKNOWN"
+    if not isinstance(data, dict):
+        return "UNKNOWN"
+    return str(data.get("state") or "UNKNOWN").upper()
+
+
+def status_age_seconds(status, now):
+    """How old the morning snapshot is, or None when it does not say."""
+    when = parse_stamp((status or {}).get("generated_at"))
+    if when is None:
+        return None
+    return (now - when).total_seconds()
+
+
 # --------------------------------------------------------------------------
 # eligibility and selection
 # --------------------------------------------------------------------------
@@ -477,7 +709,7 @@ def item_open_since(item):
     )
 
 
-def ineligibility_reason(item, now, attempts, ignore_backoff=False):
+def ineligibility_reason(item, now, attempts, ignore_backoff=False, pr_blocked=()):
     """Return None when the nightly lane may take this item, else why not."""
     if not isinstance(item, dict) or not item.get("id"):
         return "not an item"
@@ -488,6 +720,11 @@ def ineligibility_reason(item, now, attempts, ignore_backoff=False):
         return "status is %r, not open" % (item.get("status"),)
     if str(item.get("owner") or "").lower() != "codex":
         return "owner is %r, not codex" % (item.get("owner"),)
+    # A P0 is the kind of thing Anthony wants to see fixed himself. The status
+    # job never lists one as nightly-eligible today; saying so here as well
+    # means a future change to that job cannot quietly hand one to the lane.
+    if str(item.get("severity") or "").upper() == "P0":
+        return "severity is P0; the nightly lane never takes a P0 unattended"
     if str(item.get("fix_scope") or "").lower() != "repo-pr":
         return "fix_scope is %r, not repo-pr" % (item.get("fix_scope"),)
     if str(item.get("size") or "").upper() != "S":
@@ -502,6 +739,8 @@ def ineligibility_reason(item, now, attempts, ignore_backoff=False):
         return "no remote to open a pull request against"
     if "/" not in str(remote):
         return "remote %r is not org/name" % (remote,)
+    if item["id"] in pr_blocked:
+        return "a pull request this lane opened for it is still waiting"
     if not ignore_backoff:
         when = last_attempt_at(attempts, item["id"])
         if when and (now - when).total_seconds() < ATTEMPT_BACKOFF_S:
@@ -510,12 +749,12 @@ def ineligibility_reason(item, now, attempts, ignore_backoff=False):
     return None
 
 
-def select_item(items, now, attempts, forced_id=None):
+def select_item(items, now, attempts, forced_id=None, pr_blocked=()):
     """Oldest eligible item first. Returns (item, note) -- item may be None."""
     if forced_id:
         for item in items:
             if item.get("id") == forced_id:
-                reason = ineligibility_reason(item, now, attempts)
+                reason = ineligibility_reason(item, now, attempts, pr_blocked=pr_blocked)
                 if reason:
                     return None, "%s cannot be forced: %s" % (forced_id, reason)
                 return item, "forced"
@@ -523,7 +762,7 @@ def select_item(items, now, attempts, forced_id=None):
 
     eligible = []
     for item in items:
-        if ineligibility_reason(item, now, attempts) is None:
+        if ineligibility_reason(item, now, attempts, pr_blocked=pr_blocked) is None:
             eligible.append(item)
     if not eligible:
         return None, "no eligible item tonight"
@@ -741,13 +980,186 @@ def build_prompt(item, branch, clone_dir, now):
 # codex
 # --------------------------------------------------------------------------
 
-def codex_argv(clone_dir, last_message_path, prompt):
+_TOML_SECTION_RE = re.compile(r"^\s*\[\s*(mcp_servers|plugins)\s*\.\s*(.+?)\s*\]\s*$")
+_TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _toml_first_key(rest):
+    """First key of a dotted TOML path, honouring quotes.
+
+    'node_repl.env'                  -> 'node_repl'
+    '"firecrawl-mcp".tools.scrape'   -> 'firecrawl-mcp'
+    '"github@openai-curated"'        -> 'github@openai-curated'
+    """
+    rest = rest.strip()
+    if rest[:1] in ('"', "'"):
+        quote = rest[0]
+        out = []
+        i = 1
+        while i < len(rest):
+            char = rest[i]
+            if quote == '"' and char == "\\" and i + 1 < len(rest):
+                out.append(rest[i + 1])
+                i += 2
+                continue
+            if char == quote:
+                break
+            out.append(char)
+            i += 1
+        return "".join(out)
+    return rest.split(".", 1)[0].strip()
+
+
+def _toml_quote_key(name):
+    """Render a name as a TOML key: bare when it can be, quoted when it cannot."""
+    if _TOML_BARE_KEY_RE.match(name):
+        return name
+    return '"%s"' % name.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def codex_tool_names(config_text):
+    """Every [mcp_servers.<name>] and [plugins.<name>] name in a config file.
+
+    Sub-tables collapse to their parent, so mcp_servers.node_repl.env counts
+    once. Returns (servers, plugins), both sorted and deduplicated.
+    """
+    servers = set()
+    plugins = set()
+    for line in (config_text or "").splitlines():
+        found = _TOML_SECTION_RE.match(line)
+        if not found:
+            continue
+        name = _toml_first_key(found.group(2))
+        if not name:
+            continue
+        (servers if found.group(1) == "mcp_servers" else plugins).add(name)
+    return sorted(servers), sorted(plugins)
+
+
+def read_codex_config_text(path=None):
+    """The global Codex config as text. Missing or unreadable reads as empty.
+
+    Deliberately NOT parsed as TOML: /usr/bin/python3 here is 3.9, which has no
+    tomllib, and the lane only ever needs the section headers.
+    """
+    path = path or CODEX_CONFIG_FILE
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def codex_isolation_argv(servers, plugins):
+    """The overrides that strip Codex down to a model and a shell, for one run.
+
+    Nothing here edits ~/.codex/config.toml; these are command-line overrides
+    that live and die with the process.
+    """
+    argv = []
+    for name in servers:
+        argv += ["-c", "mcp_servers.%s.enabled=false" % _toml_quote_key(name)]
+    for name in plugins:
+        argv += ["-c", "plugins.%s.enabled=false" % _toml_quote_key(name)]
+    for feature in CODEX_DISABLED_FEATURES:
+        argv += ["--disable", feature]
+    argv += ["-c", "approval_policy=never"]
+    return argv
+
+
+def codex_overrides(config_text=None):
+    text = read_codex_config_text() if config_text is None else config_text
+    servers, plugins = codex_tool_names(text)
+    return codex_isolation_argv(servers, plugins)
+
+
+_MCP_COLUMN_RE = re.compile(r"\s{2,}")
+
+
+def parse_mcp_list(text):
+    """Rows of `codex mcp list` as (name, status).
+
+    The command prints two tables (local servers, then remote connectors) with
+    different columns, so the status is found by looking for the last standalone
+    "enabled"/"disabled" cell rather than by counting columns. A row whose status
+    cannot be read comes back as "unknown", which the caller treats as NOT
+    disabled -- this rail fails closed.
+    """
+    rows = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        cells = [cell for cell in _MCP_COLUMN_RE.split(stripped) if cell]
+        if len(cells) < 2 or cells[0] == "Name":
+            continue
+        status = "unknown"
+        for cell in cells[1:]:
+            if cell in ("enabled", "disabled"):
+                status = cell
+        rows.append((cells[0], status))
+    return rows
+
+
+def mcp_rows_still_live(text):
+    """Names from `codex mcp list` that are not reported disabled."""
+    return [name for name, status in parse_mcp_list(text) if status != "disabled"]
+
+
+def codex_mcp_list_argv(overrides):
+    return [codex_binary()] + list(overrides) + ["mcp", "list"]
+
+
+def codex_argv(clone_dir, last_message_path, prompt, overrides=()):
     return [
         codex_binary(), "exec",
+    ] + list(overrides) + [
         "-C", clone_dir,
         "-s", "workspace-write",
         "-o", last_message_path,
         prompt,
+    ]
+
+
+def warm_check_scratch(runner, command):
+    """Fill the scratch uv cache before the seatbelt closes, if the check needs it.
+
+    The seatbelt denies the network, so a check that installs its test runner
+    through uvx has to find it already cached, and the cache has to live where
+    the seatbelt allows writes. This runs ONE fixed lane-owned command with
+    fixed arguments -- nothing from the register reaches it, the register's
+    check string is only inspected for the word "uv". It is a few milliseconds
+    once the cache is warm, and a failure here is not fatal: the check simply
+    runs and reports for itself.
+    """
+    if "uv" not in (command or ""):
+        return False
+    try:
+        for value in CHECK_ENV:
+            os.makedirs(value.split("=", 1)[1], exist_ok=True)
+    except OSError:
+        return False
+    argv = ["/usr/bin/env"] + list(CHECK_ENV) + list(CHECK_WARM_ARGV)
+    runner.run(argv, timeout=PR_CHECK_TIMEOUT_S)
+    return True
+
+
+def pr_check_argv(clone_dir, command):
+    """The item's pr_check, wrapped in a Codex seatbelt.
+
+    The check is a shell string out of the register, so it gets the same
+    treatment as model output: the profile denies the network and denies every
+    write outside the clone. /usr/bin/env supplies the scratch cache locations
+    uv needs, because the seatbelt will not let it write under $HOME.
+    """
+    return [
+        codex_binary(), "sandbox",
+        "--permission-profile", CODEX_SANDBOX_PROFILE,
+        "-C", clone_dir,
+        "--",
+        "/usr/bin/env",
+    ] + list(CHECK_ENV) + [
+        "/bin/bash", "-o", "pipefail", "-c", command,
     ]
 
 
@@ -827,10 +1239,14 @@ def run_item(item, mode, now, paths, runner, codex_runner=None):
 
     def finish(outcome, note, pr_url=None):
         write_run_log(run_log, item, mode, now, outcome, story, pr_url=pr_url, extra=note)
-        record_attempt(paths["attempts"], item_id, now, mode, outcome, note or "")
+        record_attempt(paths["attempts"], item_id, now, mode, outcome, note or "",
+                       branch=branch)
+        code = OUTCOME_EXIT_CODES.get(outcome, 0)
         log("outcome: %s -- %s" % (outcome, note or ""))
         log("run log: %s" % run_log)
-        return 0
+        if code:
+            log("exit %d: the lane could not finish this item" % code)
+        return code
 
     # The recorded check is validated BEFORE anything is cloned or Codex is
     # paid for. A refused check is a handled outcome -- run log plus attempt
@@ -846,15 +1262,20 @@ def run_item(item, mode, now, paths, runner, codex_runner=None):
             return finish("pr-check-refused",
                           "the recorded pull-request check was refused: %s" % exc)
 
-    # the clone must not land inside anyone's work tree
-    assert_not_inside_worktree(clone_dir)
-    os.makedirs(paths["clone_parent"], exist_ok=True)
-
+    # A leftover clone is a handled outcome, so it is checked FIRST. The other
+    # order made the branch unreachable: a leftover clone is by definition a git
+    # work tree, so the assertion below always fired before this could run, and
+    # a kept clone crashed the lane with exit 2 instead of logging.
     if os.path.exists(clone_dir):
         story.append("A clone directory from an earlier run today is still at %s." % clone_dir)
         return finish("clone-exists",
                       "A clone from an earlier run today is still on disk at %s; "
                       "inspect or delete it, then re-run." % clone_dir)
+
+    # The clone PARENT must not sit inside anyone's work tree -- the clone
+    # itself does not exist yet, and once it does it is a work tree by design.
+    assert_not_inside_worktree(paths["clone_parent"])
+    os.makedirs(paths["clone_parent"], exist_ok=True)
 
     log("cloning %s into %s" % (remote, clone_dir))
     res = guarded_run(runner, ["gh", "repo", "clone", remote, clone_dir],
@@ -876,7 +1297,42 @@ def run_item(item, mode, now, paths, runner, codex_runner=None):
         fh.write(prompt)
     story.append("Wrote the prompt to %s." % prompt_path)
 
-    argv = codex_argv(clone_dir, codex_last, prompt)
+    # Strip Codex down to a model and a sandboxed shell for this run, then PROVE
+    # it before spending anything. `codex mcp list` is asked with exactly the
+    # overrides the model will get, and only the names and statuses it reports
+    # are written down -- never the commands, arguments or environment the
+    # table also prints, which come from Anthony's private config.
+    overrides = codex_overrides()
+    log("codex isolation: %d override(s) covering every server and plugin named "
+        "in the global config" % len(overrides))
+    probe = runner.run(codex_mcp_list_argv(overrides), timeout=MCP_LIST_TIMEOUT_S)
+    rows = parse_mcp_list(probe.output)
+    with open(codex_log, "a", encoding="utf-8") as fh:
+        fh.write("$ codex <isolation overrides> mcp list\n")
+        for name, state in rows:
+            fh.write("%s %s\n" % (name, state))
+        fh.write("[exit %s]\n" % probe.rc)
+    if probe.rc != 0:
+        story.append("Could not verify the Codex isolation: `codex mcp list` exited "
+                     "%s. Nothing was run." % probe.rc)
+        if mode != "trial":
+            _drop_clone(clone_dir, story)
+        return finish("codex-isolation-failed",
+                      "codex mcp list exited %s, so the isolation could not be "
+                      "verified" % probe.rc)
+    live = mcp_rows_still_live(probe.output)
+    if live or not rows:
+        detail = ", ".join(live) if live else "the table was empty"
+        story.append("Refusing to launch Codex: these tools were still reachable "
+                     "after the isolation overrides: %s." % detail)
+        if mode != "trial":
+            _drop_clone(clone_dir, story)
+        return finish("codex-isolation-failed",
+                      "still reachable after isolation: %s" % detail)
+    story.append("Verified the Codex isolation: all %d server(s) report disabled, "
+                 "and the plugin system is off." % len(rows))
+
+    argv = codex_argv(clone_dir, codex_last, prompt, overrides)
     log("running codex with the configured default model (up to %d minutes)"
         % (CODEX_TIMEOUT_S // 60))
     res = guarded_run(codex_runner, argv, cwd=clone_dir, timeout=CODEX_TIMEOUT_S,
@@ -932,9 +1388,9 @@ def run_item(item, mode, now, paths, runner, codex_runner=None):
             return finish("pr-check-refused",
                           "the recorded pull-request check was refused after cloning: "
                           "%s; clone kept at %s" % (exc, clone_dir))
-        log("running the pull-request check inside the clone")
-        res = guarded_run(runner,
-                          ["/bin/bash", "-o", "pipefail", "-c", pr_check],
+        log("running the pull-request check inside a codex sandbox")
+        warm_check_scratch(runner, pr_check)
+        res = guarded_run(runner, pr_check_argv(clone_dir, pr_check),
                           cwd=clone_dir, timeout=PR_CHECK_TIMEOUT_S, log_path=codex_log)
         if res.rc != 0:
             tail = " ".join(res.output.strip().splitlines()[-2:])[:200]
@@ -954,6 +1410,28 @@ def run_item(item, mode, now, paths, runner, codex_runner=None):
     msg_fd, msg_path = tempfile.mkstemp(prefix="nightly-fix-msg-", suffix=".txt")
     with os.fdopen(msg_fd, "w", encoding="utf-8") as fh:
         fh.write(subject + "\n\n" + body)
+
+    # Read what is about to be staged BEFORE staging it. `git add -A` on its own
+    # commits whatever Codex left in the clone, and Codex can read this whole
+    # Mac even inside a workspace-write sandbox.
+    res = guarded_run(runner,
+                      ["git", "-C", clone_dir, "status", "--porcelain", "-z"],
+                      timeout=GIT_TIMEOUT_S)
+    if res.rc != 0:
+        story.append("Could not list what would be staged.")
+        return finish("git-status-failed", "git status -z failed (exit %s)" % res.rc)
+    entries = parse_porcelain_z(res.output)
+    story.append("About to stage %d path(s): %s"
+                 % (len(entries), ", ".join("%s %s" % (c, p) for c, p in entries) or "none"))
+    problems = unsafe_staged_paths(entries, clone_dir)
+    if problems:
+        story.append("The staging rail refused this working tree: %s."
+                     % "; ".join(problems))
+        story.append("Nothing was staged, committed or pushed. The clone is kept "
+                     "at %s so it can be read." % clone_dir)
+        return finish("unsafe-diff",
+                      "the staging rail refused %d path(s): %s; clone kept at %s"
+                      % (len(problems), "; ".join(problems), clone_dir))
 
     res = guarded_run(runner, ["git", "-C", clone_dir, "add", "-A"], timeout=GIT_TIMEOUT_S)
     if res.rc != 0:
@@ -1114,13 +1592,52 @@ def main(argv=None, runner=None, codex_runner=None):
                 log("pruned %d clone dir(s) older than %d days: %s"
                     % (len(removed), CLONE_KEEP_DAYS, ", ".join(removed)))
 
+        # The lane's whole picture of what is broken comes from the morning job.
+        # The 02:30 run always uses the previous morning's snapshot by design,
+        # but if the morning job stops the snapshot silently ages forever, and
+        # the lane would keep acting on it. Standing down is the right answer:
+        # nothing is broken, so the exit code stays 0.
+        age = status_age_seconds(status, now)
+        if age is not None and age > STATUS_MAX_AGE_S:
+            log("the morning status file is %d hours old (limit %d); standing down"
+                % (int(age // 3600), STATUS_MAX_AGE_S // 3600))
+            log("outcome: status-stale -- re-run the morning pack, then this lane")
+            return 0
+        if age is None:
+            log("the morning status file has no generated_at; treating it as fresh")
+
         approved_ids = {str(item_id) for item_id in status["nightly_eligible"]}
         merged = merge_register(status["items"], paths["register"])
         items = [entry for entry in merged if str(entry.get("id")) in approved_ids]
         attempts = read_attempts(paths["attempts"])
-        item, note = select_item(items, now, attempts, forced_id=args.item)
+
+        # An item this lane already opened a pull request for stays blocked
+        # until that pull request is merged or closed, or until the register
+        # closes the item. The 72-hour backoff is not the right instrument for
+        # this: it expires, and the lane would open a second pull request for
+        # the same defect on night four, and a third on night seven.
+        pr_blocked = {}
+        for entry in items:
+            branch = pending_pr_branch(attempts, str(entry.get("id")))
+            if branch is None:
+                continue
+            state = pr_state(runner, entry.get("remote"), branch)
+            if state in ("MERGED", "CLOSED"):
+                log("%s: the pull request on %s is %s; the item is free again"
+                    % (entry.get("id"), branch, state.lower()))
+                continue
+            pr_blocked[str(entry.get("id"))] = (branch, state)
+
+        item, note = select_item(items, now, attempts, forced_id=args.item,
+                                 pr_blocked=set(pr_blocked))
 
         if item is None:
+            if pr_blocked:
+                for blocked_id, (branch, state) in sorted(pr_blocked.items()):
+                    log("%s: a pull request from an earlier run is still %s on %s"
+                        % (blocked_id, state.lower(), branch or "an unrecorded branch"))
+                log("outcome: pr-pending -- merge or close it and the item comes back")
+                return 0
             if args.item and str(args.item) not in approved_ids and any(
                     str(entry.get("id")) == str(args.item) for entry in merged):
                 note = ("%s is in the register but the status file does not list it as "
@@ -1166,7 +1683,10 @@ def main(argv=None, runner=None, codex_runner=None):
                 % " ".join(codex_argv(clone_dir,
                                       os.path.join(paths["state_dir"],
                                                    "%s-%s.last.md" % (stamp, item["id"])),
-                                      "<prompt>")))
+                                      "<prompt>", codex_overrides())))
+            if check:
+                log("dry run: the check would run as: %s"
+                    % " ".join(pr_check_argv(clone_dir, check)))
             log("dry run: nothing else was written, nothing was cloned, no pull request.")
             return 0
 

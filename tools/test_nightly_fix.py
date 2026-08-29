@@ -66,18 +66,48 @@ def label(argv):
         return "clone"
     if exe == "gh" and rest[:2] == ["pr", "create"]:
         return "pr-create"
+    if exe == "gh" and rest[:2] == ["pr", "view"]:
+        return "pr-view"
     if exe == "git":
         if "rev-parse" in rest:
             return "git-rev-parse"
-        for verb in ("checkout", "status", "add", "commit", "push"):
+        if "status" in rest:
+            return "git-status-z" if "-z" in rest else "git-status"
+        for verb in ("checkout", "add", "commit", "push"):
             if verb in rest:
                 return "git-" + verb
         return "git-other"
     if exe.startswith("codex"):
+        if "mcp" in rest:
+            return "codex-mcp-list"
+        if "sandbox" in rest:
+            return "pr-check"
         return "codex"
+    if exe == "env":
+        return "check-warm"
     if exe.endswith("bash"):
         return "pr-check"
     return exe
+
+
+# What `codex mcp list` prints once the isolation overrides have landed: every
+# row disabled. Names only -- no command, no argument, no environment.
+MCP_ALL_DISABLED = (
+    "Name              Status    Auth       \n"
+    "apify             disabled  Unsupported\n"
+    "node_repl         disabled  Unsupported\n"
+    "screenpipe        disabled  Unsupported\n"
+    "\n"
+    "Name                 Url                                Status    Auth       \n"
+    "openaiDeveloperDocs  https://example.invalid/mcp        disabled  Unsupported\n"
+)
+
+MCP_ONE_ENABLED = (
+    "Name              Status    Auth       \n"
+    "apify             disabled  Unsupported\n"
+    "node_repl         enabled   Unsupported\n"
+    "screenpipe        disabled  Unsupported\n"
+)
 
 
 class FakeRunner(object):
@@ -108,6 +138,10 @@ class FakeRunner(object):
             self.branch = argv[-1]
         if name == "git-rev-parse" and name not in self.script:
             return nf.Result(0, "%s\n" % (self.branch or ""))
+        if name == "codex-mcp-list" and name not in self.script:
+            return nf.Result(0, MCP_ALL_DISABLED)
+        if name == "pr-view" and name not in self.script:
+            return nf.Result(1, "no pull requests found")
         rc, out = self.script.get(name, (0, ""))
         return nf.Result(rc, out)
 
@@ -613,7 +647,7 @@ class TestTrial(Harness):
         runner = FakeRunner({"git-status": (0, " M tools/morning-pack.sh"),
                              "pr-check": (1, "1 failed")})
         rc, out = self.run_main("--trial", runner=runner)
-        self.assertEqual(0, rc)
+        self.assertEqual(nf.OUTCOME_EXIT_CODES["pr-check-failed"], rc)
         self.assertNotIn("git-commit", runner.labels())
         self.assertNotIn("pr-create", runner.labels())
         self.assertEqual("pr-check-failed", self.attempts()[-1]["outcome"])
@@ -685,7 +719,7 @@ class TestTrial(Harness):
         runner = FakeRunner({"git-status": (0, " M tools/morning-pack.sh"),
                              "git-rev-parse": (0, "main\n")})
         rc, out = self.run_main("--trial", runner=runner)
-        self.assertEqual(0, rc)
+        self.assertEqual(nf.OUTCOME_EXIT_CODES["wrong-branch"], rc)
         labels = runner.labels()
         self.assertIn("git-rev-parse", labels)
         for forbidden in ("pr-check", "git-add", "git-commit", "git-push",
@@ -698,7 +732,7 @@ class TestTrial(Harness):
         runner = FakeRunner({"git-status": (0, " M f"),
                              "git-rev-parse": (128, "fatal: not a git repository\n")})
         rc, _ = self.run_main("--trial", runner=runner)
-        self.assertEqual(0, rc)
+        self.assertEqual(nf.OUTCOME_EXIT_CODES["wrong-branch"], rc)
         self.assertNotIn("git-commit", runner.labels())
         self.assertEqual("wrong-branch", self.attempts()[-1]["outcome"])
 
@@ -740,8 +774,9 @@ class TestLive(Harness):
         rc, out = self.run_main("--live", runner=runner)
         self.assertEqual(0, rc)
         labels = runner.labels()
-        self.assertEqual(["clone", "git-checkout", "codex", "git-status",
-                          "git-rev-parse", "pr-check", "git-add", "git-commit",
+        self.assertEqual(["clone", "git-checkout", "codex-mcp-list", "codex",
+                          "git-status", "git-rev-parse", "pr-check",
+                          "git-status-z", "git-add", "git-commit",
                           "git-push", "pr-create"], labels)
         self.assertEqual(1, labels.count("git-push"))
         self.assertEqual(1, labels.count("pr-create"))
@@ -774,10 +809,10 @@ class TestLive(Harness):
         self.assertIn("merge is Anthony's", body)
         self.assertIn("Verify", body)
 
-    def test_a_failing_codex_records_an_attempt_and_exits_zero(self):
+    def test_a_failing_codex_records_an_attempt_and_exits_non_zero(self):
         runner = FakeRunner({"codex": (1, "model error")})
         rc, _ = self.run_main("--live", runner=runner)
-        self.assertEqual(0, rc)
+        self.assertEqual(nf.OUTCOME_EXIT_CODES["codex-failed"], rc)
         self.assertEqual("codex-failed", self.attempts()[-1]["outcome"])
         self.assertNotIn("git-push", runner.labels())
 
@@ -852,13 +887,561 @@ class TestSupportFiles(unittest.TestCase):
         self.assertIn('launchctl bootout "${DOMAIN}/${LABEL}"', text)
         self.assertIn('launchctl bootstrap "${DOMAIN}" "${DEST}"', text)
 
-    def test_documentation_is_plain_and_at_most_fifty_lines(self):
+    def test_documentation_is_plain_and_short(self):
+        # The cap was 50 until 2026-08-28, when the review found the doc was
+        # describing a sandbox that did not exist. Saying what Codex can and
+        # cannot reach, honestly, costs six lines. The cap is about keeping the
+        # doc plain, not about keeping a false claim short.
         text = self.read("docs/NIGHTLY-FIX.md")
-        self.assertLessEqual(len(text.splitlines()), 50)
+        self.assertLessEqual(len(text.splitlines()), 60)
         for phrase in ("What it does each night", "What it never does",
                        "How an item becomes eligible", "How to arm it after merge",
-                       "How to read the morning log", "fast-forwards or syncs"):
+                       "How to read the morning log", "fast-forwards or syncs",
+                       "What Codex is allowed to reach"):
             self.assertIn(phrase, text)
+
+
+
+# ------------------------------------------------------------ codex isolation
+
+# A config shaped like the real one: quoted names, unquoted names, and dotted
+# sub-tables that must collapse to their parent. No values -- names only.
+CONFIG_FIXTURE = """
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[mcp_servers.node_repl]
+command = "node"
+
+[mcp_servers.node_repl.env]
+NODE_PATH = "somewhere"
+
+[mcp_servers."firecrawl-mcp"]
+command = "npx"
+
+[mcp_servers."firecrawl-mcp".tools.firecrawl_scrape]
+enabled = true
+
+[mcp_servers.screenpipe]
+command = "bun"
+
+[plugins."github@openai-curated"]
+enabled = true
+
+[plugins."computer-use@openai-bundled"]
+enabled = true
+
+[plugins.simple]
+enabled = true
+
+[projects."/Users/someone/code"]
+trust_level = "trusted"
+"""
+
+
+class TestCodexIsolationArgv(unittest.TestCase):
+    def test_every_server_and_plugin_name_is_found_once(self):
+        servers, plugins = nf.codex_tool_names(CONFIG_FIXTURE)
+        self.assertEqual(["firecrawl-mcp", "node_repl", "screenpipe"], servers)
+        self.assertEqual(["computer-use@openai-bundled", "github@openai-curated",
+                          "simple"], plugins)
+
+    def test_other_sections_are_not_mistaken_for_tools(self):
+        servers, plugins = nf.codex_tool_names(CONFIG_FIXTURE)
+        self.assertNotIn("/Users/someone/code", servers + plugins)
+
+    def test_an_empty_or_missing_config_yields_nothing(self):
+        self.assertEqual(([], []), nf.codex_tool_names(""))
+        self.assertEqual(([], []), nf.codex_tool_names(None))
+
+    def test_names_are_quoted_only_when_toml_requires_it(self):
+        servers, plugins = nf.codex_tool_names(CONFIG_FIXTURE)
+        argv = nf.codex_isolation_argv(servers, plugins)
+        # hyphens and underscores are legal bare TOML keys; "@" is not
+        self.assertIn("mcp_servers.firecrawl-mcp.enabled=false", argv)
+        self.assertIn("mcp_servers.node_repl.enabled=false", argv)
+        self.assertIn('plugins."github@openai-curated".enabled=false', argv)
+        self.assertIn("plugins.simple.enabled=false", argv)
+        self.assertNotIn('plugins."simple".enabled=false', argv)
+
+    def test_every_named_tool_gets_its_own_override(self):
+        servers, plugins = nf.codex_tool_names(CONFIG_FIXTURE)
+        argv = nf.codex_isolation_argv(servers, plugins)
+        for name in servers:
+            self.assertTrue(any(a.startswith("mcp_servers.") and name in a for a in argv),
+                            "no override for server %s" % name)
+        for name in plugins:
+            self.assertTrue(any(a.startswith("plugins.") and name in a for a in argv),
+                            "no override for plugin %s" % name)
+
+    def test_the_features_and_approval_policy_are_switched_off(self):
+        argv = nf.codex_isolation_argv([], [])
+        for feature in ("plugins", "apps", "browser_use", "browser_use_external",
+                        "browser_use_full_cdp_access", "computer_use",
+                        "code_mode_host", "memories", "chronicle"):
+            self.assertEqual(["--disable", feature],
+                             argv[argv.index(feature) - 1:argv.index(feature) + 1])
+        self.assertIn("approval_policy=never", argv)
+
+    def test_the_codex_command_carries_the_overrides_and_no_model(self):
+        overrides = nf.codex_isolation_argv(*nf.codex_tool_names(CONFIG_FIXTURE))
+        argv = nf.codex_argv("/tmp/clone", "/tmp/last.md", "the prompt", overrides)
+        self.assertEqual([nf.codex_binary(), "exec"], argv[:2])
+        self.assertEqual(["-C", "/tmp/clone", "-s", "workspace-write",
+                          "-o", "/tmp/last.md", "the prompt"], argv[-7:])
+        for override in overrides:
+            self.assertIn(override, argv)
+        self.assertNotIn("-m", argv)
+        self.assertNotIn("--model", argv)
+
+    def test_the_mcp_list_command_uses_the_same_overrides(self):
+        overrides = nf.codex_isolation_argv(["a"], ["b"])
+        argv = nf.codex_mcp_list_argv(overrides)
+        self.assertEqual([nf.codex_binary()], argv[:1])
+        self.assertEqual(["mcp", "list"], argv[-2:])
+        for override in overrides:
+            self.assertIn(override, argv)
+
+
+class TestMcpListParsing(unittest.TestCase):
+    def test_an_all_disabled_table_leaves_nothing_live(self):
+        rows = nf.parse_mcp_list(MCP_ALL_DISABLED)
+        self.assertEqual(4, len(rows))
+        self.assertEqual(["disabled"] * 4, [state for _, state in rows])
+        self.assertEqual([], nf.mcp_rows_still_live(MCP_ALL_DISABLED))
+
+    def test_one_enabled_row_is_reported_by_name(self):
+        self.assertEqual(["node_repl"], nf.mcp_rows_still_live(MCP_ONE_ENABLED))
+
+    def test_both_tables_are_read_and_headers_skipped(self):
+        names = [name for name, _ in nf.parse_mcp_list(MCP_ALL_DISABLED)]
+        self.assertIn("node_repl", names)
+        self.assertIn("openaiDeveloperDocs", names)
+        self.assertNotIn("Name", names)
+
+    def test_a_status_it_cannot_read_counts_as_live(self):
+        text = "Name    Status\nweird   somethingelse\n"
+        self.assertEqual([("weird", "unknown")], nf.parse_mcp_list(text))
+        self.assertEqual(["weird"], nf.mcp_rows_still_live(text))
+
+    def test_empty_output_has_no_rows(self):
+        self.assertEqual([], nf.parse_mcp_list(""))
+
+
+class TestIsolationIsVerifiedBeforeCodexRuns(Harness):
+    def test_a_still_enabled_server_stops_the_run_before_codex(self):
+        runner = FakeRunner({"codex-mcp-list": (0, MCP_ONE_ENABLED)})
+        rc, out = self.run_main("--live", runner=runner)
+        self.assertEqual(nf.OUTCOME_EXIT_CODES["codex-isolation-failed"], rc)
+        self.assertIn("codex-mcp-list", runner.labels())
+        self.assertNotIn("codex", runner.labels())
+        self.assertEqual("codex-isolation-failed", self.attempts()[-1]["outcome"])
+        self.assertIn("node_repl", self.attempts()[-1]["detail"])
+
+    def test_an_mcp_list_that_fails_stops_the_run(self):
+        runner = FakeRunner({"codex-mcp-list": (127, "command not found")})
+        rc, _ = self.run_main("--live", runner=runner)
+        self.assertEqual(nf.OUTCOME_EXIT_CODES["codex-isolation-failed"], rc)
+        self.assertNotIn("codex", runner.labels())
+
+    def test_an_empty_table_is_not_taken_as_proof(self):
+        runner = FakeRunner({"codex-mcp-list": (0, "")})
+        rc, _ = self.run_main("--live", runner=runner)
+        self.assertEqual(nf.OUTCOME_EXIT_CODES["codex-isolation-failed"], rc)
+        self.assertNotIn("codex", runner.labels())
+
+    def test_the_log_records_names_and_statuses_only(self):
+        runner = FakeRunner({"git-status": (0, " M tools/morning-pack.sh")})
+        self.run_main("--trial", runner=runner)
+        log = [f for f in self.state_files() if f.endswith(".codex.log")]
+        self.assertEqual(1, len(log))
+        with open(os.path.join(self.state, log[0]), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("node_repl disabled", text)
+        self.assertIn("<isolation overrides>", text)
+        self.assertNotIn("Unsupported", text)          # the Auth column
+        self.assertNotIn("example.invalid", text)      # the Url column
+
+
+# ------------------------------------------------------------------ exit codes
+
+class TestExitCodes(Harness):
+    def test_every_failure_code_is_distinct_and_non_zero(self):
+        codes = list(nf.OUTCOME_EXIT_CODES.values())
+        self.assertEqual(len(codes), len(set(codes)))
+        for outcome, code in nf.OUTCOME_EXIT_CODES.items():
+            with self.subTest(outcome=outcome):
+                self.assertGreater(code, 2, "2 is reserved for safety/config")
+
+    def test_each_failure_outcome_returns_its_own_code(self):
+        cases = [
+            ("clone-failed", {"clone": (1, "denied")}, "--live"),
+            ("branch-failed", {"git-checkout": (1, "nope")}, "--live"),
+            ("codex-isolation-failed", {"codex-mcp-list": (0, MCP_ONE_ENABLED)}, "--live"),
+            ("codex-failed", {"codex": (1, "model error")}, "--live"),
+            ("git-status-failed", {"git-status": (1, "boom")}, "--live"),
+            ("wrong-branch", {"git-status": (0, " M f"),
+                              "git-rev-parse": (0, "main\n")}, "--live"),
+            ("unsafe-diff", {"git-status": (0, " M f"),
+                             "git-status-z": (0, "?? secrets.env\0")}, "--live"),
+            ("pr-check-failed", {"git-status": (0, " M f"),
+                                 "pr-check": (1, "1 failed")}, "--live"),
+            ("commit-failed", {"git-status": (0, " M f"),
+                               "git-status-z": (0, " M f\0"),
+                               "git-commit": (1, "boom")}, "--live"),
+            ("push-failed", {"git-status": (0, " M f"),
+                             "git-status-z": (0, " M f\0"),
+                             "git-push": (1, "denied")}, "--live"),
+            ("pr-create-failed", {"git-status": (0, " M f"),
+                                  "git-status-z": (0, " M f\0"),
+                                  "pr-create": (1, "denied")}, "--live"),
+        ]
+        for outcome, script, mode in cases:
+            with self.subTest(outcome=outcome):
+                self.setUp()
+                try:
+                    rc, _ = self.run_main(mode, runner=FakeRunner(script))
+                    self.assertEqual(nf.OUTCOME_EXIT_CODES[outcome], rc)
+                    self.assertEqual(outcome, self.attempts()[-1]["outcome"])
+                finally:
+                    self.tearDown()
+
+    def test_deliberate_stand_downs_stay_at_zero(self):
+        cases = [
+            ("no-changes", {}, "--live", None),
+            ("committed-locally", {"git-status": (0, " M f"),
+                                   "git-status-z": (0, " M f\0")}, "--trial", None),
+            ("pr-opened", {"git-status": (0, " M f"),
+                           "git-status-z": (0, " M f\0"),
+                           "pr-create": (0, "https://example.invalid/pull/1\n")},
+             "--live", None),
+            ("pr-check-refused", {}, "--live", "cd ../elsewhere && pytest"),
+        ]
+        for outcome, script, mode, check in cases:
+            with self.subTest(outcome=outcome):
+                self.setUp()
+                try:
+                    if check is not None:
+                        self.write_status([item(pr_check=check)])
+                    rc, _ = self.run_main(mode, runner=FakeRunner(script))
+                    self.assertEqual(0, rc)
+                    self.assertEqual(outcome, self.attempts()[-1]["outcome"])
+                finally:
+                    self.tearDown()
+
+    def test_nothing_eligible_is_zero(self):
+        self.write_status([item(status="closed")], eligible_ids=[])
+        rc, _ = self.run_main("--live", runner=FakeRunner())
+        self.assertEqual(0, rc)
+
+    def test_the_wrapper_hands_the_code_straight_to_launchd(self):
+        with open(os.path.join(_ROOT, "tools", "nightly-fix.sh"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn('exec /usr/bin/python3 tools/nightly-fix.py --live "$@"', text)
+        self.assertNotIn("|| true", text)
+        self.assertNotIn("exit 0", text)
+
+
+# ------------------------------------------------------- a pull request pending
+
+class TestPullRequestPending(Harness):
+    def attempt(self, outcome, branch="fix/map-1-20260824", at_="2026-08-24T02:30:00"):
+        return {"id": "MAP-1", "at": at_, "mode": "live",
+                "outcome": outcome, "detail": "", "branch": branch}
+
+    def test_the_branch_of_the_last_opened_pull_request_is_remembered(self):
+        records = [self.attempt("codex-failed", branch="fix/map-1-20260821"),
+                   self.attempt("pr-opened", branch="fix/map-1-20260824")]
+        self.assertEqual("fix/map-1-20260824", nf.pending_pr_branch(records, "MAP-1"))
+
+    def test_no_pull_request_ever_opened_reads_as_none(self):
+        self.assertIsNone(nf.pending_pr_branch([self.attempt("codex-failed")], "MAP-1"))
+        self.assertIsNone(nf.pending_pr_branch([], "MAP-1"))
+
+    def test_a_later_stand_down_does_not_clear_the_pending_pull_request(self):
+        records = [self.attempt("pr-opened"),
+                   self.attempt("pr-pending", at_="2026-08-27T02:30:00")]
+        self.assertEqual("fix/map-1-20260824", nf.pending_pr_branch(records, "MAP-1"))
+
+    def test_an_older_record_without_a_branch_still_blocks(self):
+        records = [{"id": "MAP-1", "at": "2026-08-24T02:30:00", "outcome": "pr-opened"}]
+        self.assertEqual("", nf.pending_pr_branch(records, "MAP-1"))
+        self.assertEqual("UNKNOWN", nf.pr_state(FakeRunner(), "org/repo", ""))
+
+    def test_github_answers_are_read_and_anything_else_is_unknown(self):
+        for reply, expected in ((json.dumps({"state": "MERGED"}), "MERGED"),
+                                (json.dumps({"state": "closed"}), "CLOSED"),
+                                (json.dumps({"state": "OPEN"}), "OPEN"),
+                                ("not json", "UNKNOWN")):
+            with self.subTest(reply=reply):
+                runner = FakeRunner({"pr-view": (0, reply)})
+                self.assertEqual(expected, nf.pr_state(runner, "org/repo", "fix/x"))
+        self.assertEqual("UNKNOWN",
+                         nf.pr_state(FakeRunner({"pr-view": (1, "no pr")}), "o/r", "fix/x"))
+
+    def test_an_open_pull_request_blocks_the_item_past_the_backoff(self):
+        # four days later: the 72 h backoff has long expired
+        nf.write_attempts(os.path.join(self.state, "attempts.json"),
+                          [self.attempt("pr-opened")])
+        runner = FakeRunner({"pr-view": (0, json.dumps({"state": "OPEN"}))})
+        rc, out = self.run_main("--live", runner=runner, now="2026-08-28T02:30:00")
+        self.assertEqual(0, rc)
+        self.assertIn("pr-pending", out)
+        self.assertNotIn("clone", runner.labels())
+        self.assertNotIn("codex", runner.labels())
+
+    def test_github_being_unreachable_also_blocks(self):
+        nf.write_attempts(os.path.join(self.state, "attempts.json"),
+                          [self.attempt("pr-opened")])
+        runner = FakeRunner({"pr-view": (1, "gh: could not connect")})
+        rc, out = self.run_main("--live", runner=runner, now="2026-08-28T02:30:00")
+        self.assertEqual(0, rc)
+        self.assertIn("pr-pending", out)
+        self.assertNotIn("clone", runner.labels())
+
+    def test_a_merged_pull_request_frees_the_item_again(self):
+        nf.write_attempts(os.path.join(self.state, "attempts.json"),
+                          [self.attempt("pr-opened")])
+        runner = FakeRunner({"pr-view": (0, json.dumps({"state": "MERGED"})),
+                             "git-status": (0, " M f"),
+                             "git-status-z": (0, " M f\0")})
+        rc, out = self.run_main("--live", runner=runner, now="2026-08-28T02:30:00")
+        self.assertEqual(0, rc)
+        self.assertIn("clone", runner.labels())
+
+    def test_forcing_the_item_by_hand_does_not_beat_the_pending_pull_request(self):
+        nf.write_attempts(os.path.join(self.state, "attempts.json"),
+                          [self.attempt("pr-opened")])
+        runner = FakeRunner({"pr-view": (0, json.dumps({"state": "OPEN"}))})
+        rc, out = self.run_main("--live", "--item", "MAP-1", runner=runner,
+                                now="2026-08-28T02:30:00")
+        self.assertEqual(0, rc)
+        self.assertNotIn("clone", runner.labels())
+
+    def test_the_new_attempt_record_saves_the_branch(self):
+        runner = FakeRunner({"git-status": (0, " M f"),
+                             "git-status-z": (0, " M f\0"),
+                             "pr-create": (0, "https://example.invalid/pull/1\n")})
+        self.run_main("--live", runner=runner)
+        self.assertEqual("fix/map-1-20260827", self.attempts()[-1]["branch"])
+
+
+# --------------------------------------------------------------- staging rail
+
+class TestPorcelainParsing(unittest.TestCase):
+    def test_codes_and_paths_come_apart(self):
+        self.assertEqual([(" M", "a.py"), ("??", "b.txt")],
+                         nf.parse_porcelain_z(" M a.py\0?? b.txt\0"))
+
+    def test_a_path_with_a_space_survives(self):
+        self.assertEqual([("??", "two words.txt")],
+                         nf.parse_porcelain_z("?? two words.txt\0"))
+
+    def test_a_rename_keeps_the_new_path_and_drops_the_old(self):
+        self.assertEqual([("R ", "new.py"), (" M", "c.py")],
+                         nf.parse_porcelain_z("R  new.py\0old.py\0 M c.py\0"))
+
+    def test_empty_output_is_empty(self):
+        self.assertEqual([], nf.parse_porcelain_z(""))
+        self.assertEqual([], nf.parse_porcelain_z(None))
+
+
+class TestStagingRail(unittest.TestCase):
+    def setUp(self):
+        self.clone = tempfile.mkdtemp(prefix="nightly-fix-rail-")
+
+    def tearDown(self):
+        shutil.rmtree(self.clone, ignore_errors=True)
+
+    def refuse(self, entries):
+        return nf.unsafe_staged_paths(entries, self.clone)
+
+    def test_an_ordinary_change_passes(self):
+        self.assertEqual([], self.refuse([(" M", "tools/morning-pack.sh")]))
+
+    def test_untracked_credential_names_are_refused(self):
+        for name in (".env", "config/defects.env", "key.pem", "id_rsa",
+                     "GITHUB_TOKEN.txt", "my-secret.txt", "credentials.yml",
+                     "auth.json"):
+            with self.subTest(name=name):
+                self.assertTrue(self.refuse([("??", name)]),
+                                "%s should have been refused" % name)
+
+    def test_the_credential_rule_is_case_insensitive(self):
+        self.assertTrue(self.refuse([("??", "My.Secret.Notes")]))
+
+    def test_a_tracked_file_with_a_scary_name_is_not_refused_for_the_name(self):
+        # already in the repository: the rail is about what Codex ADDS
+        self.assertEqual([], self.refuse([(" M", "tools/token_helper.py")]))
+
+    def test_anything_outside_the_clone_is_refused(self):
+        problems = self.refuse([(" M", "../elsewhere/file.py")])
+        self.assertEqual(1, len(problems))
+        self.assertIn("outside the clone", problems[0])
+
+    def test_a_file_over_a_megabyte_is_refused(self):
+        big = os.path.join(self.clone, "big.bin")
+        with open(big, "wb") as fh:
+            fh.write(b"0" * (nf.MAX_STAGED_BYTES + 1))
+        problems = self.refuse([(" M", "big.bin")])
+        self.assertEqual(1, len(problems))
+        self.assertIn("over the", problems[0])
+
+    def test_a_file_just_under_the_limit_passes(self):
+        small = os.path.join(self.clone, "small.bin")
+        with open(small, "wb") as fh:
+            fh.write(b"0" * nf.MAX_STAGED_BYTES)
+        self.assertEqual([], self.refuse([(" M", "small.bin")]))
+
+
+class TestStagingRailInARun(Harness):
+    def test_a_credential_file_stops_the_commit_and_exits_non_zero(self):
+        runner = FakeRunner({"git-status": (0, " M f"),
+                             "git-status-z": (0, " M f\0?? .env\0")})
+        rc, _ = self.run_main("--live", runner=runner)
+        self.assertEqual(nf.OUTCOME_EXIT_CODES["unsafe-diff"], rc)
+        for forbidden in ("git-add", "git-commit", "git-push", "pr-create"):
+            self.assertNotIn(forbidden, runner.labels())
+        self.assertEqual("unsafe-diff", self.attempts()[-1]["outcome"])
+
+    def test_the_run_log_lists_what_would_have_been_staged(self):
+        runner = FakeRunner({"git-status": (0, " M f"),
+                             "git-status-z": (0, " M tools/morning-pack.sh\0"),
+                             "pr-create": (0, "https://example.invalid/pull/1\n")})
+        self.run_main("--live", runner=runner)
+        name = [f for f in self.state_files() if f == "20260827-MAP-1.md"]
+        self.assertEqual(1, len(name))
+        with open(os.path.join(self.state, name[0]), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("About to stage 1 path(s)", text)
+        self.assertIn("tools/morning-pack.sh", text)
+
+    def test_the_rail_reads_the_tree_after_the_check_has_run(self):
+        runner = FakeRunner({"git-status": (0, " M f"),
+                             "git-status-z": (0, " M f\0"),
+                             "pr-create": (0, "https://example.invalid/pull/1\n")})
+        self.run_main("--live", runner=runner)
+        labels = runner.labels()
+        self.assertLess(labels.index("pr-check"), labels.index("git-status-z"))
+        self.assertLess(labels.index("git-status-z"), labels.index("git-add"))
+
+
+# ------------------------------------------------------------- a leftover clone
+
+class TestLeftoverClone(Harness):
+    def test_a_leftover_clone_is_logged_not_crashed(self):
+        leftover = os.path.join(self.clones, "MAP-1-20260827")
+        os.makedirs(os.path.join(leftover, ".git"))
+        rc, out = self.run_main("--live", runner=FakeRunner())
+        self.assertEqual(0, rc)
+        self.assertEqual("clone-exists", self.attempts()[-1]["outcome"])
+        self.assertIn("clone-exists", out)
+        self.assertTrue(os.path.isdir(leftover))
+
+    def test_the_worktree_rail_still_guards_the_clone_parent(self):
+        os.makedirs(self.clones)
+        os.makedirs(os.path.join(self.clones, ".git"))
+        rc, out = self.run_main("--live", runner=FakeRunner())
+        self.assertEqual(2, rc)
+        self.assertIn("SAFETY", out)
+
+
+# ------------------------------------------------- stale status and severity
+
+class TestStatusFreshness(Harness):
+    def write_status_at(self, generated_at):
+        with open(self.status_path, "w") as fh:
+            json.dump({
+                "schema": "defect-status/v1",
+                "generated_at": generated_at,
+                "nightly_eligible": ["MAP-1"],
+                "items": [item()],
+            }, fh)
+
+    def test_a_stale_status_stands_the_lane_down_at_zero(self):
+        self.write_status_at("2026-08-25T05:45:00-07:00")   # ~45 h before NOW
+        runner = FakeRunner()
+        rc, out = self.run_main("--live", runner=runner)
+        self.assertEqual(0, rc)
+        self.assertIn("status-stale", out)
+        self.assertIn("hours old", out)
+        self.assertEqual([], runner.labels())
+
+    def test_a_fresh_status_is_acted_on(self):
+        self.write_status_at("2026-08-26T21:45:00-07:00")   # ~7 h before NOW
+        runner = FakeRunner()
+        rc, out = self.run_main("--live", runner=runner)
+        self.assertEqual(0, rc)
+        self.assertNotIn("status-stale", out)
+        self.assertIn("clone", runner.labels())
+
+    def test_a_status_without_a_timestamp_is_treated_as_fresh(self):
+        with open(self.status_path, "w") as fh:
+            json.dump({"schema": "defect-status/v1", "nightly_eligible": ["MAP-1"],
+                       "items": [item()]}, fh)
+        runner = FakeRunner()
+        rc, out = self.run_main("--live", runner=runner)
+        self.assertEqual(0, rc)
+        self.assertIn("no generated_at", out)
+
+
+class TestSeverityIsPartOfEligibility(unittest.TestCase):
+    def test_a_p0_is_never_taken_unattended(self):
+        reason = nf.ineligibility_reason(item(severity="P0"), at(NOW), [])
+        self.assertIsNotNone(reason)
+        self.assertIn("P0", reason)
+
+    def test_p1_and_below_are_still_fine(self):
+        for severity in ("P1", "P2", "p2", "note", None):
+            with self.subTest(severity=severity):
+                self.assertIsNone(
+                    nf.ineligibility_reason(item(severity=severity), at(NOW), []))
+
+
+# ------------------------------------------------------- the check is sandboxed
+
+class TestSandboxedCheck(unittest.TestCase):
+    def test_the_check_runs_under_a_codex_seatbelt(self):
+        argv = nf.pr_check_argv("/tmp/clone", "pytest -q")
+        self.assertEqual([nf.codex_binary(), "sandbox",
+                          "--permission-profile", nf.CODEX_SANDBOX_PROFILE,
+                          "-C", "/tmp/clone", "--", "/usr/bin/env"], argv[:8])
+        self.assertEqual(["/bin/bash", "-o", "pipefail", "-c", "pytest -q"], argv[-5:])
+
+    def test_the_scratch_cache_locations_are_passed_in(self):
+        argv = nf.pr_check_argv("/tmp/clone", "pytest -q")
+        for assignment in nf.CHECK_ENV:
+            self.assertIn(assignment, argv)
+            self.assertTrue(assignment.split("=", 1)[1].startswith("/tmp/"))
+
+    def test_the_check_string_is_one_argument_and_is_never_split(self):
+        nasty = "pytest -q && echo 'a b' | tail -1"
+        self.assertEqual(nasty, nf.pr_check_argv("/tmp/c", nasty)[-1])
+
+    def test_the_warm_up_never_takes_anything_from_the_register(self):
+        runner = FakeRunner()
+        self.assertTrue(nf.warm_check_scratch(runner, "uvx --with pytest python -m pytest"))
+        self.assertEqual(1, len(runner.calls))
+        self.assertEqual(list(nf.CHECK_WARM_ARGV), runner.calls[0][-len(nf.CHECK_WARM_ARGV):])
+        self.assertNotIn("--with-editable", " ".join(runner.calls[0]))
+
+    def test_a_check_that_does_not_use_uv_skips_the_warm_up(self):
+        runner = FakeRunner()
+        self.assertFalse(nf.warm_check_scratch(runner, "python -m pytest -q"))
+        self.assertEqual([], runner.calls)
+
+
+class TestSandboxedCheckInARun(Harness):
+    def test_the_check_is_run_through_codex_sandbox_in_the_clone(self):
+        runner = FakeRunner({"git-status": (0, " M f"),
+                             "git-status-z": (0, " M f\0")})
+        self.run_main("--trial", runner=runner)
+        checks = [c for c in runner.calls if label(c) == "pr-check"]
+        self.assertEqual(1, len(checks))
+        self.assertEqual("sandbox", checks[0][1])
+        self.assertIn(item()["pr_check"], checks[0])
+        self.assertEqual([os.path.join(self.clones, "MAP-1-20260827")],
+                         runner.cwd_of("pr-check"))
 
 
 if __name__ == "__main__":
