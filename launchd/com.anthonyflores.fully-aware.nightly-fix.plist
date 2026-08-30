@@ -12,6 +12,31 @@
   pushes to a default branch, never force-pushes, and never merges.
   Merge is Anthony's.
 
+  What the Codex process is allowed to reach, stated exactly. Its shell runs
+  under a workspace-write sandbox, which covers model-generated shell commands
+  and nothing else. So on top of that, every MCP server named in the global
+  Codex config is switched off by name on the command line, the whole plugin
+  system is switched off (that is what removes the mail, chat, notes, drive,
+  GitHub and computer-history connectors), and the app, browser, computer-use,
+  code-mode, memory and chronicle features are switched off. Those are command
+  line overrides for the one run; the global config file is never edited. The
+  lane VERIFIES this before it launches the model, by running the Codex server
+  list with the same overrides and refusing to start unless every row reads
+  disabled.
+
+  What is NOT restricted: reads. A workspace-write sandbox limits writes, not
+  reads, so Codex can still read files elsewhere on this Mac. The answer to
+  that is on the way out: before committing, the lane lists every changed and
+  untracked path and refuses to stage an untracked file named like a
+  credential, anything over a megabyte, or anything resolving outside the
+  clone. The item's own check also runs inside a Codex seatbelt that denies
+  the network and denies writes outside the clone.
+
+  The exit code means something now. 0 is a pull request opened or a
+  deliberate stand down; 2 is a lock, config or safety refusal; 3 and above
+  say the lane tried and could not finish, one number per reason. The morning
+  digest reads that number out of launchctl.
+
   02:30 is deliberate: it finishes long before the 05:45 boot pack and the 06:15
   daily scan, so the morning brief can report what the night did.
 
