@@ -82,15 +82,20 @@ def _status(tmp_path, items, generated_hours_ago=1.0, name="defects-status.json"
 
 def _run(status=None, marker_dir=None, tool_name="Task", session_id="sess-abc",
          **env_overrides):
-    """Run the hook exactly as the harness would. Returns (rc, stderr)."""
+    """Run the hook exactly as the harness would. Returns (rc, stderr).
+
+    ``session_id=None`` omits the key entirely -- the payload shape a harness
+    that forgot to send an id would produce.
+    """
     payload = {
-        "session_id": session_id,
         "transcript_path": "/tmp/does-not-exist.jsonl",
         "cwd": "/tmp",
         "hook_event_name": "PreToolUse",
         "tool_name": tool_name,
         "tool_input": {"subagent_type": "general-purpose", "prompt": "go"},
     }
+    if session_id is not None:
+        payload["session_id"] = session_id
     env = _clean_env(
         DEFECT_GATE_STATUS=status if status is not None else "/nonexistent/x.json",
         DEFECT_GATE_MARKER_DIR=marker_dir,
@@ -211,6 +216,54 @@ def test_block_message_is_short_and_actionable(tmp_path):
     assert "Fix: One deletion commit" in err
     assert "touch ~/.claude/defect-fix-mode/sess-xyz" in err
     assert "~/code/fully-aware/state/DEFECTS.md" in err
+
+
+def test_the_message_says_how_to_clear_the_block_after_fixing_it(tmp_path):
+    """The hook reads the status file, not the register: fixing it is not enough
+    on its own, and nothing used to say so (review 2026-08-28, GATE-INSTALL-2)."""
+    status = _status(tmp_path, [_item(ident="LEAK-1", days_open=9)])
+    rc, err = _run(status=status)
+    assert rc == 2
+    assert "tools/verify-defects.py" in err
+    assert "refresh the status so the gate reopens" in err
+
+
+def test_a_payload_with_no_session_id_is_told_to_use_the_all_marker(tmp_path):
+    """With no id there is no per-session marker to create; the old text printed
+    a literal <session_id>, which is not even valid shell (GATE-INSTALL-6)."""
+    status = _status(tmp_path, [_item(ident="LEAK-1", days_open=9)])
+    rc, err = _run(status=status, session_id=None)
+    assert rc == 2
+    assert "<session_id>" not in err
+    assert "touch ~/.claude/defect-fix-mode/ALL" in err
+    assert "tools/verify-defects.py" in err
+
+
+def test_an_empty_session_id_gets_the_same_all_marker_instruction(tmp_path):
+    status = _status(tmp_path, [_item(ident="LEAK-1", days_open=9)])
+    rc, err = _run(status=status, session_id="")
+    assert rc == 2
+    assert "<session_id>" not in err
+    assert "touch ~/.claude/defect-fix-mode/ALL" in err
+
+
+def test_the_all_marker_the_message_names_actually_opens_the_gate(tmp_path):
+    """The instruction has to be one a session can follow and get through."""
+    status = _status(tmp_path, [_item(ident="LEAK-1", days_open=9)])
+    markers = _marker(tmp_path, "ALL")
+    rc, err = _run(status=status, marker_dir=markers, session_id=None)
+    assert rc == 0, err
+    assert err == ""
+
+
+def test_an_accepted_p0_never_blocks_however_old_it_is(tmp_path):
+    """A standing decision not to fix something must not jam every session shut
+    (ruling E 2026-08-26; the register records it, the gate ignores it)."""
+    status = _status(tmp_path, [_item(ident="LEAK-3", days_open=400,
+                                      status="accepted")])
+    rc, err = _run(status=status)
+    assert rc == 0, err
+    assert err == ""
 
 
 def test_p0_open_six_days_passes(tmp_path):

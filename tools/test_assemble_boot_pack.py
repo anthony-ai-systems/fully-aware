@@ -943,13 +943,14 @@ def _defect_item(item_id, severity="P1", owner="session", status="open",
 # The summary line from the spec, verbatim -- the ONE line every session sees.
 EXPECTED_SUMMARY = ("DEFECTS -- P0: 3 (oldest 6d) · P1: 9 · P2: 7 · "
                     "fixed since yesterday: 1 · yours today: 4 · "
-                    "no real check yet: 4")
+                    "no real check yet: 4 · accepted: 1")
 
 DEFAULT_COUNTS = {
     "P0": {"open": 3, "oldest_days": 6},
     "P1": {"open": 9, "oldest_days": 12},
     "P2": {"open": 7, "oldest_days": 30},
     "fixed_since_last": 1, "provisional": 4, "deferred": 0, "error": 0,
+    "accepted": 1,
     "open_by_owner": {"anthony": 4, "codex": 5, "session": 10},
 }
 

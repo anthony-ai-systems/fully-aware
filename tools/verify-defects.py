@@ -15,14 +15,29 @@ Contract for one item (register ``rules.verify``): ``bash -c <verify>`` from
 launchd run sees the same tools as a shell. Exit 0 -> ``fixed``; any other exit
 -> ``open``; timeout -> ``error``. A ``provisional`` item is never run (its
 verify is a known placeholder); an item whose ``not_before`` is still in the
-future is ``deferred`` and never run.
+future is ``deferred`` and never run; an item carrying an ``accepted`` reason is
+a standing decision not to fix it, is never run, is never open, and never reaches
+the defect gate -- it keeps its place in the register with the reason and the
+ruling date beside it.
+
+Dates are LOCAL dates, not UTC ones. ``today`` is the day on Anthony's own wall
+clock, so an evening run cannot age every open defect by an extra day, and the
+defect gate's own fallback (``tools/hooks/defect_gate.py``, which reads the local
+date) computes the same number this file records.
 
 History carry-forward (why ``days_open`` can be trusted): the previous status
 file is read before the run. An item that was open and is open again keeps its
 original ``open_since``; an item that was fixed and is open again starts its
 clock today; an item never seen before inherits the register's ``since`` date. A
 newly fixed item gets today's ``fixed_at``; an already-fixed item keeps the one
-it had, which is what makes "fixed since yesterday" honest.
+it had.
+
+"Fixed since yesterday" counts only what THIS run learned: an item whose
+``fixed_at`` falls after the day the previous status file was written. With no
+previous status file -- a first run, or one after the file was lost -- the answer
+is 0, because "every check that happened to pass the first time it ran" is not a
+list of fixes. Two runs on the same local day therefore report the second one's
+new fixes only, never the first run's again.
 
 Class D30 (read-only over everything except its own two ``state/`` outputs,
 stateless, non-enforcing, report-only). It never edits the register, never
@@ -122,6 +137,18 @@ def parse_date(value):
         return None
 
 
+def local_date(now):
+    """The LOCAL calendar date of an instant, as an ISO string.
+
+    Every date this tool records -- ``open_since``, ``fixed_at``,
+    ``last_verified``, and the ``today`` every age is measured against -- is the
+    day on the wall clock Anthony reads. A UTC date rolls at 17:00 local and
+    would age every open defect a day early; the defect gate's own fallback uses
+    the local date, so the file and the hook would then disagree.
+    """
+    return now.astimezone().date().isoformat()
+
+
 def days_between(start, today):
     """Whole days from an ISO start date to an ISO today (never negative)."""
     a = parse_date(start)
@@ -129,6 +156,19 @@ def days_between(start, today):
     if a is None or b is None:
         return 0
     return max(0, (b - a).days)
+
+
+def is_accepted(item):
+    """True when the item carries an ``accepted`` reason (a standing decision).
+
+    An accepted item is a known problem nobody is going to fix, by ruling. Its
+    check is never run, it is never open, it never reaches the defect gate, and
+    it is never anyone's work for today -- but it stays in the register, in its
+    own group, with the reason and the ruling date written next to it. Deleting
+    it would be the lie; counting it as open would be the nag.
+    """
+    value = (item or {}).get("accepted")
+    return isinstance(value, str) and bool(value.strip())
 
 
 def tail(text, limit=STDERR_TAIL_CHARS):
@@ -159,8 +199,8 @@ def load_register(path):
     return data
 
 
-def load_previous(path):
-    """Previous status records by id -- ``{}`` on any problem (history is a bonus)."""
+def load_previous_doc(path):
+    """The previous status document -- ``{}`` on any problem (history is a bonus)."""
     if not path or not os.path.isfile(path):
         return {}
     try:
@@ -168,13 +208,40 @@ def load_previous(path):
             data = json.load(fh)
     except (OSError, ValueError):
         return {}
-    if not isinstance(data, dict):
-        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def previous_records(doc):
+    """``{id: record}`` from a previous status document."""
     out = {}
-    for rec in data.get("items") or []:
+    for rec in (doc or {}).get("items") or []:
         if isinstance(rec, dict) and rec.get("id"):
             out[rec["id"]] = rec
     return out
+
+
+def previous_run_date(doc):
+    """The LOCAL date the previous status file was generated, or ``None``.
+
+    This is what "fixed since yesterday" is measured against. ``None`` -- no
+    previous file, or one with no usable stamp -- means there is nothing to
+    compare with, and the honest count of new fixes is zero.
+    """
+    stamp = (doc or {}).get("generated_at")
+    if not isinstance(stamp, str) or not stamp.strip():
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(stamp.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return parse_date(stamp).isoformat() if parse_date(stamp) else None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return local_date(parsed)
+
+
+def load_previous(path):
+    """Previous status records by id -- ``{}`` on any problem (history is a bonus)."""
+    return previous_records(load_previous_doc(path))
 
 
 # --------------------------------------------------------------------------- #
@@ -262,6 +329,8 @@ def run_verify(command, runner=None, clock=None):
 # --------------------------------------------------------------------------- #
 def plan_item(item, today):
     """What the loop will do with one item: ``('run', None)`` or a skip status."""
+    if is_accepted(item):
+        return "skip", "accepted"
     if item.get("provisional") is True:
         return "skip", "provisional"
     nb = parse_date(item.get("not_before"))
@@ -312,6 +381,7 @@ def evaluate_item(item, previous, today, runner=None, clock=None):
         "system": oneline(item.get("system")),
         "symptom": oneline(item.get("symptom")),
         "fix_hint": oneline(item.get("fix_hint")),
+        "accepted": oneline(item.get("accepted")) or None,
         "status": status,
         "exit": code,
         "last_verified": today if action == "run" else None,
@@ -338,7 +408,24 @@ def _yours_sort_key(rec):
             -(rec.get("days_open") or 0), rec.get("id", ""))
 
 
-def build_counts(records, today):
+def is_new_fix(rec, previous_run):
+    """True when THIS run is the first to learn the item is fixed.
+
+    ``previous_run`` is the local date the previous status file was written. An
+    item counts only when its ``fixed_at`` falls AFTER that day: an item already
+    reported fixed is not news, and with no previous file (``previous_run`` is
+    None) nothing can honestly be called a new fix.
+    """
+    if (rec or {}).get("status") != "fixed":
+        return False
+    fixed_at = parse_date(rec.get("fixed_at"))
+    prev = parse_date(previous_run)
+    if fixed_at is None or prev is None:
+        return False
+    return fixed_at > prev
+
+
+def build_counts(records, today, previous_run=None):
     """The counts block: per-severity open + oldest, plus the standing tallies."""
     counts = {}
     for sev in SEVERITIES:
@@ -349,7 +436,8 @@ def build_counts(records, today):
             "oldest_days": max([r.get("days_open") or 0 for r in opens] or [0]),
         }
     counts["fixed_since_last"] = len(
-        [r for r in records if r["status"] == "fixed" and r.get("fixed_at") == today])
+        [r for r in records if is_new_fix(r, previous_run)])
+    counts["accepted"] = len([r for r in records if r["status"] == "accepted"])
     counts["provisional"] = len([r for r in records if r["status"] == "provisional"])
     counts["deferred"] = len([r for r in records if r["status"] == "deferred"])
     counts["error"] = len([r for r in records if r["status"] == "error"])
@@ -378,18 +466,24 @@ def summary_line(counts):
     owners = counts.get("open_by_owner") or {}
     return ("DEFECTS -- P0: %d%s · P1: %d · P2: %d · "
             "fixed since yesterday: %d · yours today: %d · "
-            "no real check yet: %d"
+            "no real check yet: %d · accepted: %d"
             % (p0_open, oldest, int(p1.get("open") or 0), int(p2.get("open") or 0),
                int(counts.get("fixed_since_last") or 0),
                int(owners.get("anthony") or 0),
-               int(counts.get("provisional") or 0)))
+               int(counts.get("provisional") or 0),
+               int(counts.get("accepted") or 0)))
 
 
 def build_status(register, now, previous=None, runner=None, clock=None,
-                 only=None):
-    """Run the loop over the register and return the defect-status/v1 document."""
+                 only=None, previous_run=None):
+    """Run the loop over the register and return the defect-status/v1 document.
+
+    ``previous_run`` is the local date of the PREVIOUS status file (see
+    ``previous_run_date``). It is what the "fixed since yesterday" count is
+    measured against; ``None`` means there is no previous run and the count is 0.
+    """
     previous = previous or {}
-    today = now.date().isoformat()
+    today = local_date(now)
     records = []
     for item in register.get("items", []):
         if not isinstance(item, dict) or not item.get("id"):
@@ -399,7 +493,7 @@ def build_status(register, now, previous=None, runner=None, clock=None,
         records.append(evaluate_item(item, previous.get(item.get("id")), today,
                                      runner=runner, clock=clock))
 
-    counts = build_counts(records, today)
+    counts = build_counts(records, today, previous_run=previous_run)
     yours = [r["id"] for r in sorted(
         [r for r in records if r["status"] == "open" and r["owner"] == "anthony"],
         key=_yours_sort_key)]
@@ -410,6 +504,11 @@ def build_status(register, now, previous=None, runner=None, clock=None,
     return {
         "schema": STATUS_SCHEMA,
         "generated_at": now.isoformat(timespec="seconds"),
+        # The local day this run belongs to, and the local day of the run it is
+        # compared with. Both are recorded so a reader never has to re-derive a
+        # date from a timestamp in another zone.
+        "today": today,
+        "previous_run": previous_run,
         "register_updated": register.get("updated", ""),
         "counts": counts,
         "yours_today": yours,
@@ -437,13 +536,15 @@ def _bullet(rec, today):
         line += " — fix: %s" % rec["fix_hint"]
     if rec.get("status") == "error" and rec.get("stderr_tail"):
         line += " — the check errored: %s" % rec["stderr_tail"]
+    if rec.get("status") == "accepted" and rec.get("accepted"):
+        line += " — accepted: %s" % rec["accepted"]
     return line
 
 
 def _groups(status):
     """(heading, [records]) in render order -- who can act, then the exceptions."""
     records = status.get("items") or []
-    today = (status.get("generated_at") or "")[:10]
+    previous_run = status.get("previous_run")
     out = []
     known = set()
     for owner, heading in OWNER_GROUPS:
@@ -453,12 +554,13 @@ def _groups(status):
     out.append((OTHER_OWNERS_HEADING,
                 [r for r in records
                  if r["status"] == "open" and r["owner"] not in known]))
+    out.append(("Accepted, not being fixed",
+                [r for r in records if r["status"] == "accepted"]))
     out.append(("No real check yet",
                 [r for r in records if r["status"] == "provisional"]))
     out.append(("Deferred", [r for r in records if r["status"] == "deferred"]))
     out.append(("Fixed since yesterday",
-                [r for r in records
-                 if r["status"] == "fixed" and r.get("fixed_at") == today]))
+                [r for r in records if is_new_fix(r, previous_run)]))
     out.append(("Check errored", [r for r in records if r["status"] == "error"]))
     return [(heading, sorted(recs, key=_sort_key)) for heading, recs in out]
 
@@ -466,7 +568,7 @@ def _groups(status):
 def render_md(status):
     """The plain-English defect list. No commands, no jargon -- fix hints only."""
     lines = [MD_TITLE, "", summary_line(status.get("counts")), ""]
-    today = (status.get("generated_at") or "")[:10]
+    today = status.get("today") or (status.get("generated_at") or "")[:10]
     for heading, recs in _groups(status):
         lines.append("## %s (%d)" % (heading, len(recs)))
         for rec in recs:
@@ -532,6 +634,9 @@ def _dry_run_report(register, today, out, only=None):
             out.write("would run   %-10s %s / %s\n"
                       % (item["id"], item.get("severity", "?"),
                          item.get("owner", "?")))
+        elif skip == "accepted":
+            out.write("would skip  %-10s accepted (not being fixed)\n"
+                      % item["id"])
         elif skip == "deferred":
             out.write("would skip  %-10s deferred until %s\n"
                       % (item["id"], item.get("not_before")))
@@ -576,7 +681,8 @@ def main(argv=None):
             now = now.replace(tzinfo=datetime.timezone.utc)
     else:
         now = datetime.datetime.now(datetime.timezone.utc)
-    today = now.date().isoformat()
+    today = local_date(now)
+    previous_doc = load_previous_doc(args.status_out)
 
     if args.dry_run:
         _dry_run_report(register, today, sys.stdout, only=args.only)
@@ -588,7 +694,9 @@ def main(argv=None):
             sys.stderr.write("verify-defects: no item %r in the register\n"
                              % args.only)
             return 0
-        status = build_status(register, now, previous=load_previous(args.status_out),
+        status = build_status(register, now,
+                              previous=previous_records(previous_doc),
+                              previous_run=previous_run_date(previous_doc),
                               only=args.only)
         rec = status["items"][0]
         sys.stdout.write("%s: %s (exit %s, %dms)\n"
@@ -599,7 +707,9 @@ def main(argv=None):
         sys.stdout.write("  nothing written (single-item run)\n")
         return 0
 
-    status = build_status(register, now, previous=load_previous(args.status_out))
+    status = build_status(register, now,
+                          previous=previous_records(previous_doc),
+                          previous_run=previous_run_date(previous_doc))
 
     status_out = os.path.abspath(args.status_out)
     md_out = os.path.abspath(args.md_out)

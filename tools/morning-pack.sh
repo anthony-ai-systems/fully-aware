@@ -29,13 +29,22 @@ set -uo pipefail  # NOT -e: a per-repo generation failure must degrade, not abor
 # The armed LaunchAgent invokes this script with launchd's bare PATH
 # (/usr/bin:/bin:/usr/sbin:/sbin), which lacks Homebrew -- so `gh` is invisible
 # and every surface degrades with gh_missing (open_prs + cold-load probes).
-# Prepend the Homebrew bin dirs so scheduled runs see the same tools as a shell.
-export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}"
+# Prepend the Homebrew bin dirs so scheduled runs see the same tools as a shell,
+# and ~/.local/bin with them: uv, uvx and codex live only there, and this is the
+# ONE environment contract the three lanes share (tools/nightly-fix.sh,
+# tools/daily-scan/run-daily-scan.sh and tools/verify-defects.py all build the
+# same prefix). A step added here that reaches for uvx must not exit 127 under
+# launchd while passing by hand.
+export PATH="/opt/homebrew/bin:/usr/local/bin:${HOME}/.local/bin:${PATH}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIGS_DIR="${REPO_ROOT}/tools/configs"
 SURFACES_DIR="${REPO_ROOT}/state/surfaces"
 LOG_DIR="${REPO_ROOT}/state/logs"
+# Written when the defect register step fails, removed when it succeeds. The
+# digest reads it, so a failed register is a line a session sees rather than a
+# warning buried in a launchd log while the pack shows yesterday's counts.
+DEFECTS_FAILED="${REPO_ROOT}/state/defects-status.FAILED"
 PY="${FULLY_AWARE_PYTHON:-/usr/bin/python3}"
 GEN="${REPO_ROOT}/tools/generate-surface.py"
 ASM="${REPO_ROOT}/tools/assemble-boot-pack.py"
@@ -91,9 +100,20 @@ echo "morning-pack: surfaces regenerated -- ${ok} ok, ${failed} failed, ${skippe
 # Degrade-not-abort, same contract as the surface loop: a broken register or a
 # crashed loop logs a WARNING and the pack proceeds over whatever status file
 # already exists. A FAILING verify is not a failure here -- it is the data.
+#
+# But it must not be SILENT: a failure here alone used to leave a fresh-looking
+# pack carrying yesterday's counts with no mark on it, and the gate quietly
+# stopped enforcing 36 hours later. So the failure leaves a marker file behind,
+# which the digest turns into a line on its first screen.
 echo "morning-pack: verifying the defect register"
-"${PY}" "${REPO_ROOT}/tools/verify-defects.py" \
-    || echo "morning-pack: WARNING defect verify FAILED (exit $?); continuing" >&2
+if "${PY}" "${REPO_ROOT}/tools/verify-defects.py"; then
+    rm -f "${DEFECTS_FAILED}"
+else
+    defects_rc=$?
+    printf 'verify-defects FAILED exit=%s at=%s\n' \
+        "${defects_rc}" "$(date "+%Y-%m-%dT%H:%M:%S%z")" > "${DEFECTS_FAILED}"
+    echo "morning-pack: WARNING defect verify FAILED (exit ${defects_rc}); marker at ${DEFECTS_FAILED}; continuing" >&2
+fi
 
 # Imprint bulk export (audit P1-1): dump the captured-judgment store to a local
 # markdown file so sessions have an on-disk bulk channel (grep on demand) and

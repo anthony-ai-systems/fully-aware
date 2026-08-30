@@ -21,6 +21,8 @@ Each item has:
 - `verify`: a read-only shell check that exits 0 when the problem is fixed.
 - `fix_hint`: the next useful repair step.
 - `provisional`: whether the current check is only a placeholder.
+- `accepted`: an optional sentence saying the item will not be fixed, why, and
+  under which ruling.
 - `not_before`: an optional date before which the item is left alone.
 - `source`: where the item came from.
 - `added`: the date the item was written down here.
@@ -30,14 +32,54 @@ Each item has:
 
 `tools/morning-pack.sh` refreshes the surfaces, then runs
 `tools/verify-defects.py` before assembling the boot pack. Every check gets 60
-seconds and runs from the home folder. Today's results go to
+seconds and runs from the home folder. Accepted items are skipped along with
+placeholders and later-dated ones. Today's results go to
 `state/defects-status.json` and the readable list `state/DEFECTS.md`.
 
 A failed check leaves the item open and does not stop the pack. A check that
-cannot finish is an error. Placeholders and later-dated items are skipped.
+cannot finish is an error. Placeholders and later-dated items are skipped. If
+the register step itself fails, the loop leaves `state/defects-status.FAILED`
+behind with the exit code and the time, and the boot digest says so on its first
+line instead of quietly showing yesterday's counts as if they were today's.
 
 The defect summary is then section 0 of the full boot pack, the first line of
-the boot digest, and the summary line near the top of `state/DEFECTS.md`.
+the boot digest, and the summary line near the top of `state/DEFECTS.md`. When
+the status file is older than the pack it was folded into, both places carry its
+age, so old counts never read as this morning's.
+
+## Dates and counting fixes
+
+Every date here is a local date, the one on the wall clock, not a UTC date. An
+evening run and the next morning's run therefore report the same age for the
+same defect, and the defect gate, which works from the local date too, computes
+the same number.
+
+"Fixed since yesterday" counts only what the run just learned: an item whose fix
+date falls after the day the previous status file was written. On a first run,
+or after the status file is lost, the answer is zero. Checks that happen to pass
+the first time they ever run are not fixes, and two runs on the same day never
+report the same fix twice.
+
+## How a check must behave
+
+A check has to fail when it cannot see what it is looking at. A missing folder,
+a checkout that moved, a repository the token can no longer read, a listing that
+never loaded: all of those leave the item open. Reporting "fixed" because the
+target vanished is the one failure this register cannot tolerate, because
+nothing downstream can tell that answer apart from a real repair.
+
+Where a check reads an absence as proof (a deleted file, a removed repository),
+it must first prove it can still see the container that absence sits in.
+
+## Accepting something instead of fixing it
+
+Some problems are real, understood, and still not going to be worked: the only
+repair would cross a line a ruling has drawn. Writing one sentence in the item's
+`accepted` field records that decision, with the ruling date, and the item stops
+being work: its check never runs, it never counts as open, it never reaches the
+defect gate, and it never appears in today's list. It keeps its place in the
+register under its own heading, "Accepted, not being fixed", so the exposure is
+still written down; clearing the field puts it straight back in play.
 
 ## Private values
 
