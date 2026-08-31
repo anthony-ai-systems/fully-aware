@@ -106,7 +106,9 @@ echo "morning-pack: surfaces regenerated -- ${ok} ok, ${failed} failed, ${skippe
 # stopped enforcing 36 hours later. So the failure leaves a marker file behind,
 # which the digest turns into a line on its first screen.
 echo "morning-pack: verifying the defect register"
-if "${PY}" "${REPO_ROOT}/tools/verify-defects.py"; then
+# FULLY_AWARE_PUSH=1 arms the push edge (tools/notify.py) for this one call:
+# a defect newly at open-P0 reaches the phone. Tests and hand runs never set it.
+if FULLY_AWARE_PUSH=1 "${PY}" "${REPO_ROOT}/tools/verify-defects.py"; then
     rm -f "${DEFECTS_FAILED}"
 else
     defects_rc=$?

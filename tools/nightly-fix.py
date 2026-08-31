@@ -88,6 +88,10 @@ UTC = datetime.timezone.utc
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import notify  # noqa: E402  (the push edge; opt-in via FULLY_AWARE_PUSH=1)
+
 DEFAULT_STATUS_FILE = os.path.join(REPO_ROOT, "state", "defects-status.json")
 DEFAULT_REGISTER_FILE = os.path.join(REPO_ROOT, "registers", "defects.json")
 DEFAULT_STATE_DIR = os.path.join(REPO_ROOT, "state", "nightly-fix")
@@ -123,6 +127,34 @@ OUTCOME_EXIT_CODES = {
     "push-failed": 12,
     "pr-create-failed": 13,
 }
+
+# --- the push edge ---------------------------------------------------------
+#
+# Outcomes that need a human reach the phone; deliberate stand-downs stay in
+# the digest. The wrapper (nightly-fix.sh) opts the live lane in with
+# FULLY_AWARE_PUSH=1; tests never set it, so exercising every outcome against
+# fixtures stays off the network.
+
+
+def outcome_push(item_id, outcome, note="", pr_url=None):
+    """``(title, message, priority)`` when a human must act, else ``None``.
+
+    Two tiers only: a pull request waiting on a merge is a default-priority
+    push; every tried-and-could-not-finish outcome is high. Stand-downs
+    (no-changes, backoff, pr-pending, refused check, ...) return ``None`` --
+    they are the digest's business, and a channel that pings on routine
+    outcomes gets muted.
+    """
+    if outcome == "pr-opened":
+        return ("Nightly fixer: PR opened for %s" % item_id,
+                "Waiting on your merge. %s" % (pr_url or note or ""),
+                "default")
+    if outcome in OUTCOME_EXIT_CODES:
+        return ("Nightly fixer could not finish %s" % item_id,
+                "%s: %s -- %s (run log in state/nightly-fix/)"
+                % (item_id, outcome, note or "no detail"),
+                "high")
+    return None
 
 PATH_PREFIX = "/opt/homebrew/bin:/usr/local/bin:" + os.path.expanduser("~/.local/bin")
 
@@ -1246,6 +1278,9 @@ def run_item(item, mode, now, paths, runner, codex_runner=None):
         log("run log: %s" % run_log)
         if code:
             log("exit %d: the lane could not finish this item" % code)
+        plan = outcome_push(item_id, outcome, note, pr_url)
+        if plan:
+            notify.push(plan[0], plan[1], priority=plan[2])
         return code
 
     # The recorded check is validated BEFORE anything is cloned or Codex is
@@ -1562,6 +1597,13 @@ def main(argv=None, runner=None, codex_runner=None):
         status = load_status(paths["status"])
     except MissingStatus as exc:
         log(str(exc))
+        # Same class of silence as a stale status: the morning job never
+        # produced its file, and without this push nobody learns until the
+        # next session boots.
+        notify.push("Nightly fixer standing down: no morning status",
+                    "%s -- the 05:45 morning job may never have run. "
+                    "Run tools/morning-pack.sh, then check its launchd lane."
+                    % exc, priority="high")
         return 0
     except ConfigError as exc:
         log("configuration problem: %s" % exc)
@@ -1602,6 +1644,15 @@ def main(argv=None, runner=None, codex_runner=None):
             log("the morning status file is %d hours old (limit %d); standing down"
                 % (int(age // 3600), STATUS_MAX_AGE_S // 3600))
             log("outcome: status-stale -- re-run the morning pack, then this lane")
+            # Standing down is right, but a %d-hour-old status means the 05:45
+            # job stopped -- exactly the silent-death the audit found, so this
+            # one stand-down does reach the phone.
+            notify.push("Nightly fixer standing down: morning status stale",
+                        "The status file is %d hours old (limit %d) -- the "
+                        "05:45 morning job may be dead. Re-run "
+                        "tools/morning-pack.sh, then check its launchd lane."
+                        % (int(age // 3600), STATUS_MAX_AGE_S // 3600),
+                        priority="high")
             return 0
         if age is None:
             log("the morning status file has no generated_at; treating it as fresh")
@@ -1694,12 +1745,19 @@ def main(argv=None, runner=None, codex_runner=None):
 
     except SafetyError as exc:
         log("SAFETY: %s" % exc)
+        notify.push("Nightly fixer: safety stop",
+                    "A safety rail refused to continue: %s" % exc,
+                    priority="high")
         return 2
     except ConfigError as exc:
         log("configuration problem: %s" % exc)
+        notify.push("Nightly fixer: configuration stop",
+                    "The lane could not run: %s" % exc, priority="high")
         return 2
     except OSError as exc:
         log("configuration problem: filesystem operation failed: %s" % exc)
+        notify.push("Nightly fixer: configuration stop",
+                    "Filesystem operation failed: %s" % exc, priority="high")
         return 2
     finally:
         if lock is not None:
