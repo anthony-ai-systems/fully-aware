@@ -634,3 +634,38 @@ def test_the_real_register_records_leak3_as_accepted_not_open():
     assert vd.plan_item(item, "2026-08-28") == ("skip", "accepted")
     # ...and it does not duplicate what LEAK-1 and LEAK-2 already check.
     assert "LEAK-1" in item["symptom"] and "LEAK-2" in item["symptom"]
+
+
+def _rec(item_id, severity="P0", status="open"):
+    return {"id": item_id, "severity": severity, "status": status,
+            "symptom": "%s is broken" % item_id}
+
+
+def test_new_p0_with_no_previous_file_reports_nothing():
+    assert vd.new_p0_ids([_rec("A-1")], {}) == []
+
+
+def test_a_p0_absent_from_the_previous_file_is_new():
+    prev = {"B-1": _rec("B-1")}
+    assert vd.new_p0_ids([_rec("A-1"), _rec("B-1")], prev) == ["A-1"]
+
+
+def test_a_p0_already_open_last_time_is_not_news():
+    prev = {"A-1": _rec("A-1")}
+    assert vd.new_p0_ids([_rec("A-1")], prev) == []
+
+
+def test_an_escalation_from_p1_to_p0_is_new():
+    prev = {"A-1": _rec("A-1", severity="P1")}
+    assert vd.new_p0_ids([_rec("A-1")], prev) == ["A-1"]
+
+
+def test_a_fixed_p0_that_reopened_is_new():
+    prev = {"A-1": _rec("A-1", status="fixed")}
+    assert vd.new_p0_ids([_rec("A-1")], prev) == ["A-1"]
+
+
+def test_fixed_and_lower_severity_items_never_push():
+    prev = {"A-1": _rec("A-1", severity="P1")}
+    now = [_rec("A-1", status="fixed"), _rec("B-1", severity="P1")]
+    assert vd.new_p0_ids(now, prev) == []

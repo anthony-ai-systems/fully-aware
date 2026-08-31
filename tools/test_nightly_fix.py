@@ -1446,3 +1446,37 @@ class TestSandboxedCheckInARun(Harness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OutcomePushTests(unittest.TestCase):
+    """The push-edge mapping: what reaches the phone and what stays digest-only."""
+
+    def test_pr_opened_is_a_default_priority_push_carrying_the_url(self):
+        plan = nf.outcome_push("MAP-1", "pr-opened",
+                               pr_url="https://github.com/x/y/pull/9")
+        self.assertIsNotNone(plan)
+        title, message, priority = plan
+        self.assertIn("MAP-1", title)
+        self.assertIn("https://github.com/x/y/pull/9", message)
+        self.assertEqual(priority, "default")
+
+    def test_every_could_not_finish_outcome_is_a_high_priority_push(self):
+        for outcome in nf.OUTCOME_EXIT_CODES:
+            plan = nf.outcome_push("MAP-1", outcome, note="the detail")
+            self.assertIsNotNone(plan, outcome)
+            title, message, priority = plan
+            self.assertEqual(priority, "high", outcome)
+            self.assertIn(outcome, message)
+            self.assertIn("the detail", message)
+
+    def test_stand_downs_never_push(self):
+        for outcome in ("no-changes", "clone-exists", "pr-check-refused",
+                        "committed-locally", "pr-pending", "status-stale"):
+            self.assertIsNone(nf.outcome_push("MAP-1", outcome), outcome)
+
+    def test_the_lane_never_pushes_without_the_opt_in_flag(self):
+        # nf imports the real notify module; with FULLY_AWARE_PUSH unset the
+        # whole edge is inert, which is what keeps every other test in this
+        # file off the network.
+        self.assertNotEqual(os.environ.get("FULLY_AWARE_PUSH"), "1")
+        self.assertFalse(nf.notify.push("t", "m"))
