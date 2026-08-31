@@ -144,6 +144,12 @@ if [ -x "${IMPRINT_PY}" ]; then
         || echo "morning-pack: WARNING imprint health persist FAILED (exit $?); continuing" >&2
 fi
 
+echo "morning-pack: generating automation map"
+"${PY}" "${REPO_ROOT}/tools/generate-automation-map.py" || {
+    rc=$?
+    echo "morning-pack: WARNING automation map generation FAILED (exit ${rc}); continuing" >&2
+}
+
 echo "morning-pack: assembling boot pack"
 "${PY}" "${ASM}" "$@"
 asm_rc=$?
