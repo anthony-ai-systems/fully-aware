@@ -15,6 +15,10 @@ set -uo pipefail
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 
+# Arm the push edge (tools/notify.py): needs-a-human outcomes reach the phone.
+# Only the live wrappers set this flag, so tests and hand runs stay silent.
+export FULLY_AWARE_PUSH=1
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 

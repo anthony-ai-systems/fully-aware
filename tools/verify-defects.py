@@ -107,6 +107,11 @@ OTHER_OWNERS_HEADING = "Waiting on someone else"
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+_TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _TOOLS_DIR)
+import notify  # noqa: E402  (the push edge; opt-in via FULLY_AWARE_PUSH=1)
+
 
 class RegisterError(Exception):
     """A hard failure: the register itself is missing or unusable (exit 2)."""
@@ -406,6 +411,28 @@ def _yours_sort_key(rec):
     """Anthony's P0s first; after that, age outranks lower severities."""
     return (0 if rec.get("severity") == "P0" else 1,
             -(rec.get("days_open") or 0), rec.get("id", ""))
+
+
+def new_p0_ids(records, previous):
+    """Items that are open P0 now and were not open P0 in the previous status.
+
+    The comparison is against the previous FILE, not against time: the morning
+    job writes once a day, so a defect that appears (or escalates to P0) pushes
+    once and then lives in the digest. No previous file means a first run or a
+    rebuilt one -- everything would look new, and a burst of pushes on a
+    rebuild helps nobody, so nothing is reported.
+    """
+    if not previous:
+        return []
+    fresh = []
+    for rec in records:
+        if rec.get("severity") != "P0" or rec.get("status") != "open":
+            continue
+        prev = previous.get(rec.get("id")) or {}
+        if prev.get("severity") == "P0" and prev.get("status") == "open":
+            continue
+        fresh.append(rec.get("id"))
+    return fresh
 
 
 def is_new_fix(rec, previous_run):
@@ -734,6 +761,20 @@ def main(argv=None):
 
     sys.stderr.write("verify-defects: %s\n" % summary_line(status["counts"]))
     sys.stderr.write("  status: %s\n  list:   %s\n" % (status_out, md_out))
+
+    # The push edge: a defect newly at open-P0 reaches the phone once, here,
+    # after the files are safely written. Opt-in (FULLY_AWARE_PUSH=1, set by
+    # morning-pack.sh); a failed push costs nothing but the push.
+    fresh = new_p0_ids(status["items"], previous_records(previous_doc))
+    if fresh:
+        first = next(r for r in status["items"] if r.get("id") == fresh[0])
+        notify.push(
+            "Defect register: %d new P0%s" % (len(fresh),
+                                              "" if len(fresh) == 1 else "s"),
+            "%s. First symptom: %s"
+            % (", ".join(str(i) for i in fresh),
+               oneline(first.get("symptom") or "")[:200]),
+            priority="high")
     return 0
 
 
