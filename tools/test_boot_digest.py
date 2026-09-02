@@ -699,6 +699,14 @@ with open(os.path.join(root, "event-log"), "a", encoding="utf-8") as fh:
 sys.exit(0)
 '''
 
+_SHIM_AUTOMATION_MAP = '''#!/usr/bin/env python3
+import os, sys
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(root, "event-log"), "a", encoding="utf-8") as fh:
+    fh.write("automation-map\\n")
+sys.exit(int(os.environ.get("SHIM_AUTOMATION_MAP_RC", "0")))
+'''
+
 _SHIM_VERIFIER = '''#!/usr/bin/env python3
 import os, sys
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -722,6 +730,7 @@ class WrapperExecution(unittest.TestCase):
         shutil.copy2(_WRAPPER, os.path.join(tools, "morning-pack.sh"))
         for name, src in (("assemble-boot-pack.py", _SHIM_ASSEMBLER),
                           ("boot-digest.py", _SHIM_DIGEST),
+                          ("generate-automation-map.py", _SHIM_AUTOMATION_MAP),
                           ("generate-surface.py", _SHIM_GENERATOR),
                           ("verify-defects.py", _SHIM_VERIFIER)):
             path = os.path.join(tools, name)
@@ -730,12 +739,14 @@ class WrapperExecution(unittest.TestCase):
             os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
         return os.path.join(tools, "morning-pack.sh")
 
-    def _run(self, tmp, args=(), assembler_rc=0, verifier_rc=0):
+    def _run(self, tmp, args=(), assembler_rc=0, verifier_rc=0,
+             automation_map_rc=0):
         wrapper = self._fixture(tmp)
         env = dict(os.environ)
         env["FULLY_AWARE_PYTHON"] = sys.executable
         env["SHIM_ASSEMBLER_RC"] = str(assembler_rc)
         env["SHIM_VERIFIER_RC"] = str(verifier_rc)
+        env["SHIM_AUTOMATION_MAP_RC"] = str(automation_map_rc)
         proc = subprocess.run(["bash", wrapper] + list(args), env=env, cwd=tmp,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return proc
@@ -761,7 +772,8 @@ class WrapperExecution(unittest.TestCase):
             self.assertEqual(self._assembler_args(tmp), [""])
             self.assertTrue(os.path.isfile(self._digest(tmp)))
             self.assertEqual(self._events(tmp),
-                             ["generator", "verifier", "assembler", "digest"])
+                             ["generator", "verifier", "automation-map",
+                              "assembler", "digest"])
 
     def test_preview_args_skip_the_digest_entirely(self):
         """--stdout / --out-json previews must not rewrite boot state."""
@@ -780,7 +792,8 @@ class WrapperExecution(unittest.TestCase):
                     self.assertIn("args passed, skipping boot digest", out)
                     self.assertNotIn("generating boot digest", out)
                     self.assertEqual(self._events(tmp),
-                                     ["generator", "verifier", "assembler"])
+                                     ["generator", "verifier", "automation-map",
+                                      "assembler"])
 
     def test_failing_verifier_degrades_and_assembler_still_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -789,7 +802,18 @@ class WrapperExecution(unittest.TestCase):
             self.assertIn("defect verify FAILED (exit 7)",
                           proc.stderr.decode("utf-8"))
             self.assertEqual(self._events(tmp),
-                             ["generator", "verifier", "assembler", "digest"])
+                             ["generator", "verifier", "automation-map",
+                              "assembler", "digest"])
+
+    def test_automation_map_runs_before_assembler_and_degrades(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, automation_map_rc=7)
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8"))
+            self.assertIn("automation map generation FAILED (exit 7)",
+                          proc.stderr.decode("utf-8"))
+            self.assertEqual(self._events(tmp),
+                             ["generator", "verifier", "automation-map",
+                              "assembler", "digest"])
 
     def test_failing_assembler_propagates_its_status_with_args(self):
         with tempfile.TemporaryDirectory() as tmp:
