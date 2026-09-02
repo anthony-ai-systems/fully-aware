@@ -144,6 +144,13 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # an identical digest.
 NIGHTLY_DIR = os.path.join(_REPO_ROOT, "state", "nightly-fix")
 
+# Where plan-status's ledger.py export leaves the generated lane snapshot. It
+# lives OUTSIDE this repo (the ledgers are estate-wide, not fully-aware's), and
+# the digest reads it directly rather than through the pack: a session that
+# reads only the digest still needs to see which lanes are stalled and what
+# waits on Anthony.
+PLANS_SNAPSHOT = os.path.expanduser("~/code/state/plans-snapshot.json")
+
 # The digest is read in SESSIONS, whose cwd is arbitrary (folder = activity, but
 # not this folder). A repo-relative pointer resolves against the wrong directory
 # there, so both the pack pointer and the [truncated] markers name the pack by
@@ -653,6 +660,61 @@ def nightly_line(state_dir=None):
     return "NIGHTLY -- %s: %s" % (item_id, outcome or "outcome not recorded")
 
 
+def plans_line(path=None):
+    """ONE line about where every registered plan lane stands.
+
+    Read straight from the snapshot ledger.py export writes, not from the pack:
+    the digest is what a fresh session actually reads, and a stalled lane or a
+    lane waiting on Anthony is invisible everywhere else it looks.
+
+    ``PLANS -- 5 lanes: 1 stalled (x idle 9d) - 3 waiting on Anthony - 12
+    unregistered plan files``, with only the nonzero parts. Never fatal: a
+    missing or unreadable snapshot costs the counts, not the line.
+    """
+    path = PLANS_SNAPSHOT if path is None else path
+    if not os.path.isfile(path):
+        return "PLANS -- no snapshot (ledger.py export writes it)"
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            raise ValueError("not an object")
+    except (OSError, ValueError):
+        return "PLANS -- snapshot unreadable"
+
+    lanes = data.get("lanes")
+    lanes = [l for l in lanes if isinstance(l, dict)] if isinstance(lanes, list) else []
+    unregistered = data.get("unregistered_plan_files")
+    unregistered = len(unregistered) if isinstance(unregistered, list) else 0
+
+    stalled = [l for l in lanes if l.get("health") == "stalled"]
+    waiting = [l for l in lanes if l.get("health") == "waiting"]
+    complete = [l for l in lanes if l.get("health") == "complete"]
+
+    def _idle(lane):
+        days = lane.get("idle_days")
+        return days if isinstance(days, int) and not isinstance(days, bool) else 0
+
+    segments = []
+    if stalled:
+        worst = max(stalled, key=_idle)
+        segments.append("%d stalled (%s idle %dd)"
+                        % (len(stalled), worst.get("name", "?"), _idle(worst)))
+    if waiting:
+        segments.append("%d waiting on Anthony" % len(waiting))
+    if complete:
+        segments.append("%d complete" % len(complete))
+    if unregistered:
+        segments.append("%d unregistered plan files" % unregistered)
+
+    if not lanes:
+        head = "PLANS -- no registered lanes"
+        return compress(head + (" · " + segments[0] if segments else ""))
+    if not segments:
+        return compress("PLANS -- %d lanes: all active" % len(lanes))
+    return compress("PLANS -- %d lanes: %s" % (len(lanes), " · ".join(segments)))
+
+
 def attention_lines(pack):
     """One line per repo that is behind its origin default branch or carries queue items.
 
@@ -687,7 +749,7 @@ def attention_lines(pack):
 
 
 def collect(now, pack, daily_brief=None, daily_brief_path=None,
-            extra_warnings=None):
+            extra_warnings=None, plans_snapshot=None):
     """Fold the pack into the digest model (plain lists, shed-able).
 
     ``extra_warnings`` are pre-rendered lines from THIS run's own probes (the
@@ -706,6 +768,7 @@ def collect(now, pack, daily_brief=None, daily_brief_path=None,
     return {
         "defects": defect_lines(now, pack),
         "nightly": nightly_line(),
+        "plans": plans_line(plans_snapshot),
         "generated_at": generated_at or "unknown",
         "age_hours": age_hours,
         "stale": gen is not None and (now - gen).total_seconds() > STALE_PACK,
@@ -770,7 +833,9 @@ def render_md(model, imprint=None):
         lines.extend(model["defects"])
     if model.get("nightly"):
         lines.append(model["nightly"])
-    if model.get("defects") or model.get("nightly"):
+    if model.get("plans"):
+        lines.append(model["plans"])
+    if model.get("defects") or model.get("nightly") or model.get("plans"):
         lines.append("")
     lines.extend([header, ""])
     lines.extend(_section(model["warnings"], "WARNINGS",
@@ -793,7 +858,7 @@ def render_md(model, imprint=None):
 
 def build_digest(now, pack, daily_brief=None, daily_brief_path=None,
                  cap_tokens=HARD_CAP_TOKENS, imprint=None,
-                 extra_warnings=None):
+                 extra_warnings=None, plans_snapshot=None):
     """Build the digest markdown. ``now`` is injectable for determinism.
 
     The 500-token shed loop runs WITHOUT the imprint section: the IMPRINT
@@ -801,7 +866,8 @@ def build_digest(now, pack, daily_brief=None, daily_brief_path=None,
     docstring), so it must never pressure the shed loop into dropping
     warnings/attention lines that the cap exists to protect.
     """
-    model = collect(now, pack, daily_brief, daily_brief_path, extra_warnings)
+    model = collect(now, pack, daily_brief, daily_brief_path, extra_warnings,
+                    plans_snapshot=plans_snapshot)
     md = render_md(model)
     while est_tokens(md) > cap_tokens:
         if not _shed_one(model):
@@ -858,6 +924,9 @@ def main(argv=None):
                     default=_default("state", "imprint-store.md"),
                     help="imprint markdown export to summarize (absent -> no "
                          "IMPRINT section)")
+    ap.add_argument("--plans-snapshot", default=PLANS_SNAPSHOT,
+                    help="plans-snapshot.json written by ledger.py export "
+                         "(missing -> absence line, never fatal)")
     ap.add_argument("--out", default=_default("state", "BOOT-DIGEST.md"))
     ap.add_argument("--stdout", action="store_true",
                     help="write the digest to stdout (skips the file write)")
@@ -877,7 +946,8 @@ def main(argv=None):
                       daily_brief_path=args.daily_scan,
                       cap_tokens=args.cap_tokens,
                       imprint=imprint_lines(load_imprint(args.imprint), now=now),
-                      extra_warnings=launchctl_warnings())
+                      extra_warnings=launchctl_warnings(),
+                      plans_snapshot=args.plans_snapshot)
 
     if args.stdout:
         sys.stdout.write(md)

@@ -191,16 +191,19 @@ class SectionAssembly(unittest.TestCase):
             i1 = md.index("## 1. Topology manifest")
             i2 = md.index("## 2. State surfaces")
             i3 = md.index("## 3. Unified decision queue")
-            i4 = md.index("## 4. Scan / priorities feed")
+            i_plans = md.index("## 4. Plans (ledger-backed, generated)")
+            i4 = md.index("## 5. Scan / priorities feed")
             self.assertLess(i1, i2)
             self.assertLess(i2, i3)
-            self.assertLess(i3, i4)
+            self.assertLess(i3, i_plans)
+            self.assertLess(i_plans, i4)
 
     def test_sidecar_section_key_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, sidecar = self._build(tmp)
             self.assertEqual(list(sidecar["sections"].keys()),
-                             ["topology", "surfaces", "decision_queue", "scan"])
+                             ["topology", "surfaces", "decision_queue",
+                              "plans", "scan"])
             self.assertEqual(sidecar["schema"], "boot-pack/v1")
 
     def test_header_states_advisory_not_law(self):
@@ -378,7 +381,7 @@ class ScanValidation(unittest.TestCase):
             self.assertEqual(arts["scan-targets.json"]["status"], "rejected-major")
             self.assertEqual(arts["intentions.json"]["status"], "absent")
             # cycle survived: pack still assembled with all 4 sections
-            self.assertIn("## 4. Scan / priorities feed", md)
+            self.assertIn("## 5. Scan / priorities feed", md)
             self.assertIn("weights.json (required): OK", md)
             self.assertIn("WARNING", md)
 
@@ -901,7 +904,7 @@ class ScanAbsenceCopy(unittest.TestCase):
             cache = os.path.join(tmp, "surfaces")
             _write_surface(cache, _surface("synth-a", NOW.isoformat()))
             md, _ = ab.build_pack(NOW, _manifest(), _backlog(), cache, None)
-            scan_sec = md[md.index("## 4."):]
+            scan_sec = md[md.index("## 5."):]
             self.assertIn("scan consumption dir not configured", scan_sec)
             self.assertIn("pass --scan-consumption-dir", scan_sec)
             self.assertIn("[config |", scan_sec)
@@ -917,12 +920,92 @@ class ScanAbsenceCopy(unittest.TestCase):
             empty = os.path.join(tmp, "empty-scan")
             os.makedirs(empty)
             md, sidecar = ab.build_pack(NOW, _manifest(), _backlog(), cache, empty)
-            scan_sec = md[md.index("## 4."):]
+            scan_sec = md[md.index("## 5."):]
             self.assertIn("no scan artifacts found at %s" % empty, scan_sec)
             self.assertNotIn("scan consumption dir not configured", scan_sec)
             self.assertFalse(sidecar["sections"]["scan"]["present"])
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Section 4: plans (plans-snapshot.json written by ledger.py export)
+# --------------------------------------------------------------------------- #
+def _plans_snapshot(generated=None, lanes=None, unregistered=None):
+    """A synthetic plans snapshot -- shape only, no real lane or plan names."""
+    return {
+        "generated": generated or NOW.isoformat(),
+        "idle_threshold_days": 7,
+        "lanes": lanes if lanes is not None else [
+            {"name": "synth-lane",
+             "step": "First sentence. Second sentence.",
+             "waiting_on_anthony": ["Merge the synthetic PR. Extra detail."],
+             "blocked": [],
+             "updated": "2026-07-23",
+             "idle_days": 0,
+             "health": "waiting",
+             "health_phrase": "waiting on Anthony 1 day",
+             "finish_line": [{"text": "item one", "met": True}],
+             "finish_progress": "1/2",
+             "stations": {}},
+        ],
+        "unregistered_plan_files": unregistered if unregistered is not None else [
+            {"path": "/nonexistent/NEXT_SESSION-orphan.json",
+             "mtime": "2026-07-01T00:00:00+00:00"},
+        ],
+    }
+
+
+class PlansSection(unittest.TestCase):
+    def _build(self, tmp, snapshot=None, path=None, configured=True):
+        cache = os.path.join(tmp, "surfaces")
+        _write_surface(cache, _surface("synth-a", NOW.isoformat()))
+        if not configured:
+            return ab.build_pack(NOW, _manifest(), _backlog(), cache, None)
+        snap_path = path or os.path.join(tmp, "plans-snapshot.json")
+        if snapshot is not None:
+            _write(snap_path, snapshot)
+        return ab.build_pack(NOW, _manifest(), _backlog(), cache, None,
+                             plans_snapshot_path=snap_path)
+
+    def test_lane_line_carries_step_progress_and_what_waits_on_anthony(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md, sidecar = self._build(tmp, _plans_snapshot())
+            self.assertIn("## 4. Plans", md)
+            self.assertIn(
+                "synth-lane: waiting on Anthony 1 day -- First sentence.", md)
+            # first sentence ONLY -- the pack is a pointer, not the plan
+            self.assertNotIn("Second sentence.", md)
+            self.assertIn("finish line 1/2", md)
+            self.assertIn("waiting on Anthony: Merge the synthetic PR.", md)
+            self.assertIn("1 plan file(s) not registered", md)
+            self.assertIn("NEXT_SESSION-orphan.json", md)
+            self.assertIn("[plans-snapshot.json | ", md)
+            self.assertTrue(sidecar["sections"]["plans"]["present"])
+
+    def test_missing_snapshot_degrades_to_a_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "nope", "plans-snapshot.json")
+            md, sidecar = self._build(tmp, None, path=missing)
+            self.assertIn("no plans snapshot at", md)
+            self.assertTrue(any("plans snapshot unavailable" in w
+                                for w in sidecar["warnings"]),
+                            sidecar["warnings"])
+
+    def test_unconfigured_snapshot_says_so_without_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md, sidecar = self._build(tmp, configured=False)
+            self.assertIn("plans snapshot not configured", md)
+            self.assertFalse([w for w in sidecar["warnings"] if "plans" in w],
+                             sidecar["warnings"])
+
+    def test_stale_snapshot_warns(self):
+        old = (NOW - datetime.timedelta(hours=40)).isoformat()
+        with tempfile.TemporaryDirectory() as tmp:
+            _, sidecar = self._build(tmp, _plans_snapshot(generated=old))
+            self.assertTrue(any("plans snapshot STALE" in w
+                                for w in sidecar["warnings"]),
+                            sidecar["warnings"])
 
 
 # --------------------------------------------------------------------------- #
@@ -1089,7 +1172,7 @@ class DefectsSection(unittest.TestCase):
             _, sidecar = self._build(tmp, _defect_status())
             self.assertEqual(list(sidecar["sections"].keys()),
                              ["defects", "topology", "surfaces",
-                              "decision_queue", "scan"])
+                              "decision_queue", "plans", "scan"])
             d = sidecar["sections"]["defects"]
             self.assertEqual(sorted(d.keys()),
                              ["counts", "generated_at", "rendered_ids",

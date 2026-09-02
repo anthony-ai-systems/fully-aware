@@ -86,6 +86,9 @@ NEXT_SESSION_SUMMARY_CHARS = 200
 STALE_TOPOLOGY = 7 * 24 * 3600
 STALE_SURFACES = 24 * 3600
 STALE_DECISIONS = 1 * 3600
+# ledger.py rewrites the plans snapshot on every register/append/regen; a
+# snapshot older than a day-and-a-half means no session touched any lane.
+STALE_PLANS = 36 * 3600
 # The defect loop runs inside the same 05:45 wrapper as this assembler, so a
 # status file older than a day-and-a-half means that step did not run.
 STALE_DEFECTS = 36 * 3600
@@ -642,14 +645,53 @@ def load_scan(scan_dir, now):
             "as_of": now.isoformat(timespec="seconds"), "artifacts": artifacts}
 
 
+def _first_sentence(text):
+    """First sentence of a plain-English note (period-space boundary)."""
+    text = (text or "").strip()
+    cut = text.find(". ")
+    return text[:cut + 1] if cut != -1 else text
+
+
+def load_plans(path, now):
+    """plans-snapshot.json (written by ledger.py export) is OPTIONAL and
+    degrades on any problem -- a missing or stale snapshot is a WARNING,
+    never fatal."""
+    empty = {"present": False, "path": path, "warn": None, "lanes": [],
+             "unregistered": [], "generated": ""}
+    if not path:
+        return empty
+    if not os.path.isfile(path):
+        empty["warn"] = ("plans snapshot unavailable: no file at %s "
+                         "(ledger.py export writes it)" % path)
+        return empty
+    try:
+        data = _load_json(path)
+    except (OSError, ValueError) as exc:
+        empty["warn"] = "plans snapshot unreadable: %s" % exc
+        return empty
+    generated = data.get("generated", "")
+    warn = None
+    ts = parse_ts(generated)
+    if ts is None:
+        warn = "plans snapshot generated time unparseable (%r)" % generated
+    elif (now - ts).total_seconds() > STALE_PLANS:
+        warn = "plans snapshot STALE (generated %s, >36h old)" % generated
+    return {"present": True, "path": path, "warn": warn,
+            "lanes": data.get("lanes") or [],
+            "unregistered": data.get("unregistered_plan_files") or [],
+            "generated": generated}
+
+
 # --------------------------------------------------------------------------- #
 # model assembly
 # --------------------------------------------------------------------------- #
 def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
-            adjudication=None, defects=None):
+            adjudication=None, defects=None, plans=None):
     """Build the section data model + warnings + open-items. Pure data (no md)."""
     adjudication = adjudication or {"present": False, "queues": [],
                                     "reason": None}
+    plans = plans or {"present": False, "path": None, "warn": None,
+                      "lanes": [], "unregistered": [], "generated": ""}
     defects = defects or {"configured": False, "present": False, "path": None,
                           "reason": None}
     warnings = []
@@ -779,7 +821,11 @@ def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
         return (epoch, q["source"], q["summary"])
     queue.sort(key=_qkey)
 
-    # -- section 4: scan feed -------------------------------------------------
+    # -- section 4: plans (ledger-backed) -------------------------------------
+    if plans.get("warn"):
+        warnings.append(plans["warn"])
+
+    # -- section 5: scan feed -------------------------------------------------
     scan = load_scan(scan_dir, now)
     if scan.get("present"):
         for a in scan.get("artifacts", []):
@@ -808,6 +854,7 @@ def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
         "topology": topo_entries,
         "surfaces": surface_repos,
         "queue": queue,
+        "plans": plans,
         "scan": scan,
         "backlog": backlog,
         "backlog_summary": backlog_summary,
@@ -1032,8 +1079,47 @@ def render_queue(model, now):
     return "\n".join(lines)
 
 
+def render_plans(model, now):
+    plans = model["plans"]
+    lines = ["## 4. Plans (ledger-backed, generated)",
+             "_one line per registered lane, generated from the per-project "
+             "ledgers via plans-snapshot.json (ledger.py export). The ledger "
+             "is truth; this section is a view -- append events, never "
+             "hand-edit._", ""]
+    if not plans.get("present"):
+        if not plans.get("path"):
+            lines.append("- plans snapshot not configured (pass "
+                         "--plans-snapshot; ledger.py export writes it) %s"
+                         % tag("config", ""))
+        else:
+            lines.append("- no plans snapshot at %s %s"
+                         % (plans["path"], tag("plans-snapshot.json", "")))
+        lines.append("")
+        return "\n".join(lines)
+    src = tag("plans-snapshot.json", plans.get("generated", ""))
+    for lane in plans["lanes"]:
+        bits = ["- %s: %s -- %s" % (lane.get("name", "?"),
+                                    lane.get("health_phrase", "?"),
+                                    _first_sentence(lane.get("step", "")))]
+        if lane.get("finish_progress"):
+            bits.append("finish line %s" % lane["finish_progress"])
+        if lane.get("waiting_on_anthony"):
+            bits.append("waiting on Anthony: " + "; ".join(
+                _first_sentence(w) for w in lane["waiting_on_anthony"]))
+        lines.append(" | ".join(bits) + " " + src)
+    unreg = plans.get("unregistered") or []
+    if unreg:
+        names = ", ".join(os.path.basename(u.get("path", "?")) for u in unreg)
+        lines.append("- %d plan file(s) not registered (invisible to every "
+                     "lane view): %s %s" % (len(unreg), names, src))
+    if not plans["lanes"] and not unreg:
+        lines.append("- (empty) no registered lanes %s" % src)
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_scan(model, now):
-    lines = ["## 4. Scan / priorities feed",
+    lines = ["## 5. Scan / priorities feed",
              "_scan-consumption-interface-v1 (weights / scan-targets / "
              "suppression / optional intentions); PR #150 ratified -- real "
              "consumption, each artifact validated independently_", ""]
@@ -1108,6 +1194,7 @@ def render_md(model, now):
     body += render_topology(model, now) + "\n"
     body += render_surfaces(model, now) + "\n"
     body += render_queue(model, now) + "\n"
+    body += render_plans(model, now) + "\n"
     body += render_scan(model, now)
     if not body.endswith("\n"):
         body += "\n"
@@ -1136,11 +1223,12 @@ def _drop_one_next_lane(model):
 
 def build_pack(now, manifest, backlog, surfaces_cache_dir, scan_dir,
                adjudication_dir=None, cap_tokens=HARD_CAP_TOKENS,
-               defects_status_path=None):
+               defects_status_path=None, plans_snapshot_path=None):
     """Assemble (markdown, sidecar_dict). ``now`` is injectable for determinism."""
     model = collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
                     adjudication=load_adjudication(adjudication_dir),
-                    defects=load_defects(defects_status_path))
+                    defects=load_defects(defects_status_path),
+                    plans=load_plans(plans_snapshot_path, now))
 
     # truncation loop: shed lowest-priority next_lanes until under the cap.
     md = render_md(model, now)
@@ -1173,6 +1261,11 @@ def build_pack(now, manifest, backlog, surfaces_cache_dir, scan_dir,
         "surfaces": model["surfaces"],
         "decision_queue": {"projection": True, "absorbs_ratification": False,
                            "items": model["queue"]},
+        "plans": {"present": model["plans"].get("present", False),
+                  "generated": model["plans"].get("generated", ""),
+                  "lanes": model["plans"].get("lanes", []),
+                  "unregistered_plan_files":
+                      model["plans"].get("unregistered", [])},
         "scan": model["scan"],
     })
 
@@ -1256,6 +1349,11 @@ def main(argv=None):
                     default=_default("state", "defects-status.json"),
                     help="defect-status/v1 file written by verify-defects.py "
                          "(missing -> section 0 says so and a WARNING is raised)")
+    ap.add_argument("--plans-snapshot",
+                    default=os.path.expanduser(
+                        "~/code/state/plans-snapshot.json"),
+                    help="plans-snapshot.json written by ledger.py export "
+                         "(missing or >36h old -> WARNING, never fatal)")
     ap.add_argument("--out-md", default=_default("state", "BOOT-PACK.md"))
     ap.add_argument("--out-json", default=_default("state", "boot-pack.json"))
     ap.add_argument("--stdout", action="store_true",
@@ -1270,7 +1368,8 @@ def main(argv=None):
                                  args.surfaces_cache_dir,
                                  args.scan_consumption_dir,
                                  adjudication_dir=args.adjudication_dir,
-                                 defects_status_path=args.defects_status)
+                                 defects_status_path=args.defects_status,
+                                 plans_snapshot_path=args.plans_snapshot)
         if args.stdout:
             sys.stdout.write(md)
             _report(sys.stderr, sidecar, dest="stdout")
