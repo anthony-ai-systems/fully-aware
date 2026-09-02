@@ -1283,7 +1283,8 @@ class DefectLines(unittest.TestCase):
         self.assertNotIn("DEFECTS", md)
         lines = md.splitlines()
         self.assertEqual(lines[1][:8], "NIGHTLY ")
-        self.assertEqual(lines[3][:15], "Pack generated:")
+        self.assertEqual(lines[2][:6], "PLANS ")
+        self.assertEqual(lines[4][:15], "Pack generated:")
 
     def test_section_present_but_countless_says_so(self):
         md = bd.build_digest(NOW, _defect_pack(counts={}))
@@ -1575,6 +1576,85 @@ class NightlyLine(unittest.TestCase):
                      "Outcome: %s\n\n## What happened\n\n- did a thing\n"
                      % (item_id, outcome))
         return path
+
+
+class PlansLine(unittest.TestCase):
+    """One line so a session can see where every registered plan lane stands."""
+
+    @staticmethod
+    def _snapshot(directory, lanes, unregistered=0):
+        path = os.path.join(directory, "plans-snapshot.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"generated": NOW.isoformat(),
+                       "idle_threshold_days": 7,
+                       "lanes": lanes,
+                       "unregistered_plan_files": [
+                           {"path": "/nonexistent/NEXT_SESSION-%d.json" % i,
+                            "mtime": "2026-07-01T00:00:00+00:00"}
+                           for i in range(unregistered)]}, fh)
+        return path
+
+    @staticmethod
+    def _lane(name, health, idle_days=0):
+        return {"name": name, "step": "A synthetic step.",
+                "waiting_on_anthony": [], "blocked": [],
+                "updated": "2026-07-23", "idle_days": idle_days,
+                "health": health, "health_phrase": health,
+                "finish_line": [], "finish_progress": "0/1", "stations": {}}
+
+    def test_a_missing_snapshot_names_what_writes_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(bd.plans_line(os.path.join(tmp, "nope.json")),
+                             "PLANS -- no snapshot (ledger.py export writes it)")
+
+    def test_stalled_waiting_and_unregistered_counts_in_one_line(self):
+        lanes = [self._lane("synth-stalled", "stalled", idle_days=9),
+                 self._lane("synth-w1", "waiting"),
+                 self._lane("synth-w2", "waiting"),
+                 self._lane("synth-w3", "waiting"),
+                 self._lane("synth-active", "active")]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._snapshot(tmp, lanes, unregistered=12)
+            self.assertEqual(
+                bd.plans_line(path),
+                "PLANS -- 5 lanes: 1 stalled (synth-stalled idle 9d) · "
+                "3 waiting on Anthony · 12 unregistered plan files")
+
+    def test_all_active_lanes_say_so_rather_than_listing_nothing(self):
+        lanes = [self._lane("synth-%d" % i, "active") for i in range(5)]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._snapshot(tmp, lanes, unregistered=0)
+            self.assertEqual(bd.plans_line(path), "PLANS -- 5 lanes: all active")
+
+    def test_an_unreadable_snapshot_costs_the_counts_not_the_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "plans-snapshot.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("{not json")
+            self.assertEqual(bd.plans_line(path), "PLANS -- snapshot unreadable")
+
+    def test_no_registered_lanes_still_reports_orphan_plan_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(bd.plans_line(self._snapshot(tmp, [], 0)),
+                             "PLANS -- no registered lanes")
+            self.assertEqual(bd.plans_line(self._snapshot(tmp, [], 3)),
+                             "PLANS -- no registered lanes · "
+                             "3 unregistered plan files")
+
+    def test_the_line_reaches_the_digest_right_after_nightly(self):
+        lanes = [self._lane("synth-stalled", "stalled", idle_days=9)]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._snapshot(tmp, lanes, unregistered=0)
+            with unittest.mock.patch.object(bd, "NIGHTLY_DIR",
+                                            os.path.join(tmp, "nope")):
+                md = bd.build_digest(NOW, _pack(), plans_snapshot=path,
+                                     cap_tokens=60)
+        lines = md.splitlines()
+        self.assertIn("NIGHTLY -- lane not armed", lines)
+        plans = [ln for ln in lines if ln.startswith("PLANS -- ")]
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(lines.index(plans[0]),
+                         lines.index("NIGHTLY -- lane not armed") + 1)
 
 
 class WrapperEnvironmentAndMarker(unittest.TestCase):
