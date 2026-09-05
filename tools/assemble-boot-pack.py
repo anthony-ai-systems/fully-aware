@@ -14,11 +14,12 @@ Fully Aware macro session loads regardless of cwd:
   2. State surfaces       -- the fold of every discoverable surface (surface/v1,
                              produced by generate-surface.py; normally state/surfaces/).
   3. Unified decision queue -- a PROJECTION (routes, never absorbs ratification)
-                             over four feeds: surface decisions[], next-session
+                             over five feeds: surface decisions[], next-session
                              human_only[] (via the M1 next_session.py parser),
-                             a hand-maintained ratification backlog, and the
+                             a hand-maintained ratification backlog, the
                              atlas-v2 adjudication queues (checkbox files the
-                             nightly ripple sweep writes into the vault).
+                             nightly ripple sweep writes into the vault), and
+                             the weekly Atlas DECAY review queue.
   4. Scan / priorities feed -- consumes scan-consumption-interface-v1 artifacts
                              (weights / scan-targets / suppression / optional
                              intentions) from a configurable --scan-consumption-dir.
@@ -35,7 +36,8 @@ Provenance: every entry is tagged ``[source | as_of]``. Degraded sources
 (missing/invalid surface, invalid/absent scan artifact) surface a WARNING block
 at the top of the pack -- never a silent omission, never a crash.
 
-Staleness thresholds (spec SS3.1): topology 7d, surfaces 24h, decision items 1h.
+Staleness thresholds (spec SS3.1): topology 7d, surfaces 24h, daily decision
+items 1h, and the Monday DECAY review 7d.
 Stale entries render a ``STALE(<age>)`` prefix -- never dropped, never silently
 trusted.
 
@@ -86,6 +88,10 @@ NEXT_SESSION_SUMMARY_CHARS = 200
 STALE_TOPOLOGY = 7 * 24 * 3600
 STALE_SURFACES = 24 * 3600
 STALE_DECISIONS = 1 * 3600
+# Atlas DECAY is a weekly Monday feed. Its run stays visible after this
+# threshold (with a stale marker); age never removes unresolved review work.
+STALE_DECAY = 7 * 24 * 3600
+DECAY_CADENCE = "weekly (Monday)"
 # ledger.py rewrites the plans snapshot on every register/append/regen; a
 # snapshot older than a day-and-a-half means no session touched any lane.
 STALE_PLANS = 36 * 3600
@@ -108,6 +114,8 @@ SCAN_ARTIFACTS = [
 ]
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DEFAULT_ATLAS_PENDING_DIR = os.path.expanduser(
+    "~/code/anthony-wiki-vault/adjudication/pending")
 
 
 class AssembleError(Exception):
@@ -311,6 +319,212 @@ def load_adjudication(pending_dir):
                        "findings": findings, "actioned": actioned,
                        "as_of": fname[len(prefix):-len(".md")]})
     return {"present": True, "queues": queues, "reason": None}
+
+
+# Atlas-v2 M4 weekly decay queue. This is intentionally a separate loader from
+# the daily prefixes above: applying the daily one-hour freshness rule to a
+# Monday DECAY run would report it stale almost immediately. The producer's
+# write_decay_queue() emits DECAY-YYYY-MM-DD.md, then uses numeric suffixes
+# (-2, -3, ...) when a date is written more than once.
+_DECAY_FILENAME_RE = re.compile(
+    r"^DECAY-(?P<date>\d{4}-\d{2}-\d{2})"
+    r"(?:-(?P<suffix>\d+))?\.md$")
+_DECAY_CHECKS = (
+    ("STILL TRUE", re.compile(
+        r"^\s*-\s*\[[xX]\]\s*\*\*STILL TRUE\*\*")),
+    ("NEEDS UPDATE", re.compile(
+        r"^\s*-\s*\[[xX]\]\s*\*\*NEEDS UPDATE\*\*")),
+    ("DEFER", re.compile(
+        r"^\s*-\s*\[[xX]\]\s*\*\*DEFER\*\*")),
+)
+
+
+def _empty_decay(decay_dir=None, reason=None):
+    """Return the stable shape for an absent or degraded DECAY feed."""
+    return {
+        "configured": bool(decay_dir),
+        "present": False,
+        "path": decay_dir,
+        "file": None,
+        "source_file": None,
+        "as_of": "",
+        "suffix": None,
+        "cadence": DECAY_CADENCE,
+        "freshness": "unknown",
+        "age_days": None,
+        "freshness_threshold_seconds": STALE_DECAY,
+        # No counts are emitted for an absent run. In particular, zero does
+        # not mean the producer found no work: write_decay_queue() intentionally
+        # writes nothing for an empty result.
+        "state_counts": {},
+        "counts": {},
+        "items": [],
+        "retention": "unresolved records retained regardless of age",
+        "reason": reason,
+    }
+
+
+def _decay_candidate(path, name):
+    """Return a sortable candidate for a producer-named queue file, or None."""
+    match = _DECAY_FILENAME_RE.fullmatch(name)
+    if not match or not os.path.isfile(path):
+        return None
+    try:
+        run_date = datetime.date.fromisoformat(match.group("date"))
+    except ValueError:
+        return None
+    # The unsuffixed producer output is the first run for a date. Suffixes are
+    # numeric, so -10 must sort after -2 (lexical sorting gets this wrong).
+    suffix = int(match.group("suffix")) if match.group("suffix") else None
+    suffix_rank = suffix if suffix is not None else 1
+    return (run_date, suffix_rank, name, suffix)
+
+
+def _parse_decay_queue(text):
+    """Parse producer-compatible DECAY blocks into state-only projections.
+
+    The producer's apply loop recognizes the same three bold checkbox labels.
+    We retain only a block id/path, its checked labels, and the derived state;
+    queue bodies are deliberately not copied into the boot pack.
+    """
+    items = []
+    current = None
+    for raw in text.splitlines():
+        if raw.startswith("### "):
+            if current is not None:
+                items.append(current)
+            heading = raw[4:].strip()
+            path_match = re.match(r"`([^`]+)`", heading)
+            item_id = path_match.group(1) if path_match else heading
+            current = {"id": item_id, "path": item_id, "checked": []}
+            continue
+        if current is None:
+            continue
+        for label, pattern in _DECAY_CHECKS:
+            if pattern.match(raw):
+                if label not in current["checked"]:
+                    current["checked"].append(label)
+                break
+    if current is not None:
+        items.append(current)
+    if not items:
+        return None, "DECAY queue contains no ### review sections"
+
+    counts = {
+        "total": len(items),
+        "reviewed": 0,
+        "needs_update": 0,
+        "deferred": 0,
+        "pending": 0,
+        "unchecked": 0,
+    }
+    for item in items:
+        checked = item["checked"]
+        if len(checked) == 1 and checked[0] == "STILL TRUE":
+            state = "reviewed"
+        elif len(checked) == 1 and checked[0] == "NEEDS UPDATE":
+            state = "needs_update"
+        elif len(checked) == 1 and checked[0] == "DEFER":
+            state = "deferred"
+        else:
+            # No checked box is pending. Multiple checked boxes are an
+            # inconsistent human edit and remain pending rather than being
+            # mistaken for a resolution.
+            state = "pending"
+        item["state"] = state
+        counts[state] += 1
+        if not checked:
+            counts["unchecked"] += 1
+    return items, counts
+
+
+def load_decay(decay_dir, now=None):
+    """Load the newest Atlas weekly DECAY queue from ``decay_dir``.
+
+    ``None`` means the feed is unconfigured and remains silent. A configured
+    directory that is missing, unreadable, empty, or contains an unreadable or
+    malformed selected queue returns a reason for the WARNING block. The
+    newest run is selected by date and numeric suffix; old unresolved runs are
+    retained and marked stale rather than discarded.
+    """
+    if not decay_dir:
+        return _empty_decay()
+    if not os.path.isdir(decay_dir):
+        return _empty_decay(
+            decay_dir,
+            "DECAY feed directory does not exist: %s" % decay_dir)
+    try:
+        names = os.listdir(decay_dir)
+    except OSError as exc:
+        return _empty_decay(
+            decay_dir, "unreadable DECAY feed directory: %s" % exc)
+
+    candidates = []
+    for name in names:
+        path = os.path.join(decay_dir, name)
+        candidate = _decay_candidate(path, name)
+        if candidate is not None:
+            candidates.append((candidate, path))
+    if not candidates:
+        return _empty_decay(
+            decay_dir,
+            "no DECAY queue run at %s (producer emits no file when the result "
+            "is empty; no work cannot be inferred)" % decay_dir)
+
+    candidate, selected_path = max(candidates, key=lambda pair: pair[0][:3])
+    run_date, _suffix_rank, file_name, suffix = candidate
+    try:
+        with open(selected_path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        return _empty_decay(
+            decay_dir, "DECAY queue %s unreadable: %s" % (file_name, exc))
+
+    items, parsed = _parse_decay_queue(text)
+    if items is None:
+        return _empty_decay(
+            decay_dir, "DECAY queue %s invalid: %s" % (file_name, parsed))
+
+    as_of = run_date.isoformat()
+    run_ts = parse_ts(as_of)
+    reference_now = now or datetime.datetime.now(datetime.timezone.utc)
+    age_seconds = max(0, (reference_now - run_ts).total_seconds()) \
+        if run_ts else 0
+    freshness = "fresh" if age_seconds <= STALE_DECAY else "stale"
+    return {
+        "configured": True,
+        "present": True,
+        "path": decay_dir,
+        "file": file_name,
+        "source_file": selected_path,
+        "as_of": as_of,
+        "suffix": suffix,
+        "cadence": DECAY_CADENCE,
+        "freshness": freshness,
+        "age_days": int(age_seconds // (24 * 3600)),
+        "freshness_threshold_seconds": STALE_DECAY,
+        "state_counts": parsed,
+        "counts": parsed,
+        "items": items,
+        "retention": "unresolved records retained regardless of age",
+        "reason": None,
+    }
+
+
+def _refresh_decay_freshness(decay, now):
+    """Apply injected pack time to a loaded DECAY result."""
+    decay = dict(decay)
+    if not decay.get("present"):
+        return decay
+    ts = parse_ts(decay.get("as_of", ""))
+    if ts is None:
+        decay["freshness"] = "unknown"
+        decay["age_days"] = None
+        return decay
+    age_seconds = max(0, (now - ts).total_seconds())
+    decay["freshness"] = "fresh" if age_seconds <= STALE_DECAY else "stale"
+    decay["age_days"] = int(age_seconds // (24 * 3600))
+    return decay
 
 
 # --------------------------------------------------------------------------- #
@@ -686,10 +900,12 @@ def load_plans(path, now):
 # model assembly
 # --------------------------------------------------------------------------- #
 def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
-            adjudication=None, defects=None, plans=None):
+            adjudication=None, defects=None, plans=None, decay=None):
     """Build the section data model + warnings + open-items. Pure data (no md)."""
     adjudication = adjudication or {"present": False, "queues": [],
                                     "reason": None}
+    decay = _refresh_decay_freshness(
+        decay or load_decay(None), now)
     plans = plans or {"present": False, "path": None, "warn": None,
                       "lanes": [], "unregistered": [], "generated": ""}
     defects = defects or {"configured": False, "present": False, "path": None,
@@ -812,6 +1028,33 @@ def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
             "source": "adjudication:atlas-v2",
             "as_of": aq["as_of"],
         })
+    # feed e: Atlas-v2 M4 weekly DECAY review. This remains a single queue
+    # item so the existing digest/attention projection keeps working, while
+    # the sidecar's typed section carries the per-state counts for the digest.
+    if decay.get("configured") and not decay.get("present"):
+        warnings.append("DECAY feed unavailable: %s"
+                        % decay.get("reason", "?"))
+    if decay.get("present"):
+        counts = decay.get("state_counts") or {}
+        queue.append({
+            "summary": (
+                "atlas-v2 weekly DECAY review (%s): %d item(s) -- "
+                "%d reviewed, "
+                "%d needs update, %d deferred, %d pending -- %s"
+                % (decay.get("freshness", "unknown"),
+                   counts.get("total", 0), counts.get("reviewed", 0),
+                   counts.get("needs_update", 0), counts.get("deferred", 0),
+                   counts.get("pending", 0), decay.get("file", "?"))),
+            "kind": "decay",
+            "source": "adjudication:atlas-v2",
+            "as_of": decay.get("as_of", ""),
+            "cadence": decay.get("cadence", DECAY_CADENCE),
+            "freshness": decay.get("freshness", "unknown"),
+            "stale_after_seconds": STALE_DECAY,
+            "state_counts": counts,
+            "counts": counts,
+            "file": decay.get("file"),
+        })
     # deterministic order: oldest waiting first (missing as_of sorts last),
     # tie-break by source then summary.
     def _qkey(q):
@@ -837,14 +1080,10 @@ def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
 
     # -- open items -----------------------------------------------------------
     open_items = [
-        "COS v2 event contract wiring: section 3 (unified decision queue) is "
-        "specified by SS3.1 as a projection over the COS v2 event contract, with "
-        "mission-control as a second head over the same projection. No concrete "
-        "COS v2 event SOURCE exists on disk yet, so this assembler projects over "
-        "the four available feeds (surface decisions[], next-session "
-        "human_only[], ratification backlog, atlas-v2 adjudication) instead. "
-        "Wire the COS v2 event source into this projection when it lands -- do "
-        "NOT invent a reader.",
+        "COS v2 is retired. IRIS convergence remains a proposed aggregate-health "
+        "contract under the existing telemetry project, not a live external "
+        "consumer of this pack. Confirm project binding and approved fields "
+        "before implementing the adapter; reuse the existing manager and pulse.",
     ]
 
     return {
@@ -857,6 +1096,7 @@ def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
         "plans": plans,
         "scan": scan,
         "backlog": backlog,
+        "decay": decay,
         "backlog_summary": backlog_summary,
         "warnings": warnings,
         "open_items": open_items,
@@ -1055,18 +1295,42 @@ def render_surfaces(model, now):
 
 
 def render_queue(model, now):
+    decay = model.get("decay") or {}
+    feed_note = (", and the weekly DECAY review"
+                 if decay.get("configured") else "")
     lines = ["## 3. Unified decision queue (projection -- routes, never absorbs)",
              "_one ordered inbox, oldest waiting first; projection over surface "
              "decisions[], next-session human_only[], the ratification "
-             "backlog, and the atlas-v2 adjudication queues. See OPEN-ITEMS "
+             "backlog, the atlas-v2 adjudication queues%s. See OPEN-ITEMS "
+             % feed_note,
              "for COS v2 wiring._", ""]
     if not model["queue"]:
         lines.append("- (empty) no decisions, human-only items, or backlog "
-                     "entries across the manifest.")
+                     "entries across the manifest%s."
+                     % (" or DECAY run" if decay.get("configured") else ""))
     for q in model["queue"]:
-        sp = stale_prefix(now, q["as_of"], STALE_DECISIONS)
+        threshold = q.get("stale_after_seconds", STALE_DECISIONS)
+        if (isinstance(threshold, bool) or not isinstance(threshold, int)
+                or threshold < 0):
+            threshold = STALE_DECISIONS
+        sp = stale_prefix(now, q["as_of"], threshold)
         lines.append("- %s[%s] %s %s"
                      % (sp, q["kind"], q["summary"], tag(q["source"], q["as_of"])))
+    if decay.get("configured") and not decay.get("present"):
+        # decay_review.py intentionally writes no queue file when there are no
+        # past-horizon beliefs. Keep that distinction visible: no run evidence
+        # is not evidence that there was no work.
+        reason = decay.get("reason", "") or ""
+        if reason.startswith("no DECAY queue run"):
+            lines.append("- [decay] weekly DECAY: no run recorded -- "
+                         "producer may emit no file when the result is empty; "
+                         "no work cannot be inferred %s"
+                         % tag("adjudication:atlas-v2",
+                               decay.get("as_of", "")))
+        else:
+            lines.append("- [decay] weekly DECAY unavailable -- see WARNINGS %s"
+                         % tag("adjudication:atlas-v2",
+                               decay.get("as_of", "")))
     bs = model.get("backlog_summary")
     if bs and bs.get("present"):
         note = (" (seed placeholder skipped)"
@@ -1223,12 +1487,14 @@ def _drop_one_next_lane(model):
 
 def build_pack(now, manifest, backlog, surfaces_cache_dir, scan_dir,
                adjudication_dir=None, cap_tokens=HARD_CAP_TOKENS,
-               defects_status_path=None, plans_snapshot_path=None):
+               defects_status_path=None, plans_snapshot_path=None,
+               decay_dir=None):
     """Assemble (markdown, sidecar_dict). ``now`` is injectable for determinism."""
     model = collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
                     adjudication=load_adjudication(adjudication_dir),
                     defects=load_defects(defects_status_path),
-                    plans=load_plans(plans_snapshot_path, now))
+                    plans=load_plans(plans_snapshot_path, now),
+                    decay=load_decay(decay_dir, now=now))
 
     # truncation loop: shed lowest-priority next_lanes until under the cap.
     md = render_md(model, now)
@@ -1261,6 +1527,29 @@ def build_pack(now, manifest, backlog, surfaces_cache_dir, scan_dir,
         "surfaces": model["surfaces"],
         "decision_queue": {"projection": True, "absorbs_ratification": False,
                            "items": model["queue"]},
+    })
+    if model["decay"].get("configured"):
+        sections["decay"] = {
+            "present": model["decay"].get("present", False),
+            "path": model["decay"].get("path"),
+            "file": model["decay"].get("file"),
+            "source_file": model["decay"].get("source_file"),
+            "as_of": model["decay"].get("as_of", ""),
+            "suffix": model["decay"].get("suffix"),
+            "cadence": model["decay"].get("cadence", DECAY_CADENCE),
+            "freshness": model["decay"].get("freshness", "unknown"),
+            "age_days": model["decay"].get("age_days"),
+            "freshness_threshold_seconds":
+                model["decay"].get("freshness_threshold_seconds", STALE_DECAY),
+            "state_counts": model["decay"].get("state_counts", {}),
+            "counts": model["decay"].get("counts",
+                                           model["decay"].get("state_counts", {})),
+            "items": model["decay"].get("items", []),
+            "retention": model["decay"].get(
+                "retention", "unresolved records retained regardless of age"),
+            "reason": model["decay"].get("reason"),
+        }
+    sections.update({
         "plans": {"present": model["plans"].get("present", False),
                   "generated": model["plans"].get("generated", ""),
                   "lanes": model["plans"].get("lanes", []),
@@ -1340,11 +1629,14 @@ def main(argv=None):
                     help="scan-consumption-interface-v1 artifact dir "
                          "(absent -> section renders 'no scan artifacts found')")
     ap.add_argument("--adjudication-dir",
-                    default=os.path.expanduser(
-                        "~/code/anthony-wiki-vault/adjudication/pending"),
+                    default=_DEFAULT_ATLAS_PENDING_DIR,
                     help="atlas-v2 adjudication pending dir (read-only; the "
                          "newest AUTO-APPLY-/BACKLOG-/RIPPLE-*.md per prefix "
                          "feeds the decision queue)")
+    ap.add_argument("--decay-dir", default=_DEFAULT_ATLAS_PENDING_DIR,
+                    help="atlas-v2 weekly DECAY pending dir (read-only; "
+                         "newest DECAY-YYYY-MM-DD[-N].md feeds the decision "
+                         "queue; missing run is warning-visible)")
     ap.add_argument("--defects-status",
                     default=_default("state", "defects-status.json"),
                     help="defect-status/v1 file written by verify-defects.py "
@@ -1368,6 +1660,7 @@ def main(argv=None):
                                  args.surfaces_cache_dir,
                                  args.scan_consumption_dir,
                                  adjudication_dir=args.adjudication_dir,
+                                 decay_dir=args.decay_dir,
                                  defects_status_path=args.defects_status,
                                  plans_snapshot_path=args.plans_snapshot)
         if args.stdout:

@@ -112,11 +112,11 @@ Every entry is tagged `[source | as_of]`.
      placeholder skipped) [tools/configs/ratification-backlog.json | <as_of>]`.
      Real items must **not** carry the flag.
    Staleness threshold **1h**.
-   **OPEN-ITEM (COS v2):** SS3.1 specifies this queue as a projection over the
-   COS v2 event contract, with mission-control as a second head. No concrete
-   COS v2 event *source* exists on disk yet, so the assembler projects over the
-   three feeds above and records the COS v2 wiring as an explicit `OPEN-ITEM` in
-   the pack. It does **not** invent a COS v2 reader.
+   **OPEN-ITEM (IRIS convergence):** COS v2 is retired. The current aggregate
+   health connection is a design under the existing IRIS telemetry project.
+   Confirm its binding and approved fields before implementing an adapter;
+   reuse the existing manager, pulse and plans intake. This pack does not
+   claim a live IRIS consumer.
 4. **Scan / priorities feed** -- consumes the `scan-consumption-interface-v1`
    artifacts (`weights.json`, `scan-targets.json`, `suppression.json`, optional
    `intentions.json`) from a configurable `--scan-consumption-dir`. Each artifact

@@ -1,0 +1,11 @@
+{
+  "schema": "decay-fixture/v1",
+  "producer": "scripts/decay_review.py",
+  "sha256": "a169a8b6c0ed07ce5d0dbd5e555b5470644dc783fec743eda94bf1e229f1795f",
+  "producer_sha256": "a169a8b6c0ed07ce5d0dbd5e555b5470644dc783fec743eda94bf1e229f1795f",
+  "source_contract": "DECAY-YYYY-MM-DD[-N].md with ### blocks and STILL TRUE, NEEDS UPDATE, DEFER checkboxes",
+  "fixture_files": [
+    "DECAY-2026-08-31.md"
+  ],
+  "content_scope": "synthetic paths and synthetic belief text only"
+}

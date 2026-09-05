@@ -11,7 +11,7 @@
 #   3. installs + bootstraps the com.macroseat.taste-distiller LaunchAgent
 #      (RunAtLoad + every 15 min)
 #   4. prints verification + measured hook overhead (<200ms acceptance bar)
-set -uo pipefail
+set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LA="$HOME/Library/LaunchAgents"
@@ -20,6 +20,11 @@ LABEL="com.macroseat.taste-distiller"
 SETTINGS="$HOME/.claude/settings.json"
 MARKER="macroseat-managed-hook"
 HOOK_CMD="python3 $HERE/distill_spool_hook.py # $MARKER"
+
+# Resolve and validate the exact executables before changing hooks or launchd.
+PREPARED="$(mktemp -t macroseat-launchagent)"
+trap 'rm -f "$PREPARED"' EXIT
+python3 "$HERE/prepare_launch_agent.py" --out "$PREPARED"
 
 # -- 1. macroseat namespace + registry seed ----------------------------------
 CFG="${IMPRINT_CONFIG:-$HOME/.config/imprint/config.json}"
@@ -57,7 +62,7 @@ PY
 
 # -- 3. LaunchAgent ----------------------------------------------------------
 mkdir -p "$HOME/.optimus/logs"
-cp "$HERE/$LABEL.plist" "$LA/$LABEL.plist"
+cp "$PREPARED" "$LA/$LABEL.plist"
 launchctl bootout "$GUI/$LABEL" 2>/dev/null || true  # re-run safety
 launchctl bootstrap "$GUI" "$LA/$LABEL.plist"
 echo "armed: $LABEL (RunAtLoad + 900s)"

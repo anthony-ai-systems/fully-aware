@@ -3,7 +3,7 @@
   "environment": "atlas",
   "repo_path": "/Users/anthonyflores/code/atlas",
   "canonical": true,
-  "role": "PARKED (v1, ruled 2026-08-11): knowledge-layer repo, never deployed locally, dark since 2026-07-16. Salvageable IP indexed in vault build-plans/rulings/2026-08-08-atlas-salvage-index.md; revival routes through the separate Atlas-v2 GO decision. Rich-lineage fork; default branch is master.",
+  "role": "ARCHIVED legacy Atlas v1, retained for provenance. Active Atlas-v2 runs from anthony-wiki-vault/scripts (ripple_sweep, ripple_check, decay_review, claim_distill, atlas_mcp); see docs/CONVERGENCE-RECOVERY.md. Do not revive v1 or wait for the historical v2 GO prompt. Runtime deployment status is separate from this archived repository.",
   "default_branch": "master",
   "gh_repo": "anthony-ai-systems/atlas",
   "cold_load": [

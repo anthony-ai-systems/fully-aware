@@ -6,17 +6,23 @@
 	<string>com.macroseat.taste-distiller</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/bin/bash</string>
-		<string>-lc</string>
-		<string>exec python3 "$HOME/code/fully-aware/tools/taste-distiller/taste_distiller.py"</string>
+		<string>@@PYTHON@@</string>
+		<string>@@WORKER@@</string>
 	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>MACROSEAT_CLAUDE_BIN</key>
+		<string>@@CLAUDE@@</string>
+		<key>PATH</key>
+		<string>@@PATH@@</string>
+	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StartInterval</key>
 	<integer>900</integer>
 	<key>StandardOutPath</key>
-	<string>/Users/anthonyflores/.optimus/logs/taste-distiller.log</string>
+	<string>@@LOGS@@/taste-distiller.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/anthonyflores/.optimus/logs/taste-distiller.err.log</string>
+	<string>@@LOGS@@/taste-distiller.err.log</string>
 </dict>
 </plist>
