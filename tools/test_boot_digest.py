@@ -86,7 +86,7 @@ class Header(unittest.TestCase):
         md = bd.build_digest(NOW, _pack())
         self.assertTrue(md.startswith(bd.TITLE + "\n"), md[:120])
         self.assertIn("advisory, not law", md)
-        self.assertIn("Pack generated: %s (3h ago)" % GENERATED, md)
+        self.assertIn("Pack generated: %s" % GENERATED, md)
 
     def test_full_pack_pointer_is_the_last_line(self):
         md = bd.build_digest(NOW, _pack())
@@ -104,7 +104,8 @@ class Header(unittest.TestCase):
 
     def test_unparseable_generated_at_degrades_to_age_unknown(self):
         md = bd.build_digest(NOW, _pack(generated_at="whenever"))
-        self.assertIn("age unknown", md)
+        self.assertIn("Pack generated: unknown", md)
+        self.assertNotIn("ago", md)
         self.assertNotIn("STALE", md)
 
 
@@ -116,7 +117,7 @@ class Staleness(unittest.TestCase):
     def test_pack_older_than_36h_is_flagged(self):
         old = (NOW - datetime.timedelta(hours=40)).isoformat(timespec="seconds")
         md = bd.build_digest(NOW, _pack(generated_at=old))
-        self.assertIn("(40h ago) STALE (>36h)", md)
+        self.assertIn("STALE (>36h)", md)
 
     def test_boundary_is_exclusive_at_36h(self):
         at_36 = (NOW - datetime.timedelta(hours=36)).isoformat(timespec="seconds")
@@ -368,8 +369,7 @@ class ImprintSection(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             md = bd.build_digest(NOW, _pack(),
                                  imprint=self._lines(self._summary(tmp, age_hours=30)))
-            self.assertIn("WARNING: imprint export STALE: 30h old -- 05:45 "
-                          "export may have failed", md)
+            self.assertIn("WARNING: imprint export STALE (>26h at digest generation); exported", md)
 
     def test_export_at_the_26h_boundary_is_not_flagged(self):
         """Exclusive, like the pack's own 36h boundary: 26h clean, past it stale."""
@@ -388,7 +388,7 @@ class ImprintSection(unittest.TestCase):
             stamp = NOW.timestamp() - 3 * 3600
             os.utime(db, (stamp, stamp))
             lines = self._lines(self._summary(tmp), db_path=db)
-            self.assertIn("- live store last written 3h ago", lines)
+            self.assertIn("- live store last written 2026-07-23T09:00:00+00:00", lines)
 
     def test_absent_live_store_drops_only_that_line(self):
         with tempfile.TemporaryDirectory() as tmp:

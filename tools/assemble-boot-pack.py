@@ -1080,14 +1080,10 @@ def collect(now, manifest, backlog, surfaces_cache_dir, scan_dir,
 
     # -- open items -----------------------------------------------------------
     open_items = [
-        "COS v2 event contract wiring: section 3 (unified decision queue) is "
-        "specified by SS3.1 as a projection over the COS v2 event contract, with "
-        "mission-control as a second head over the same projection. No concrete "
-        "COS v2 event SOURCE exists on disk yet, so this assembler projects over "
-        "the four available feeds (surface decisions[], next-session "
-        "human_only[], ratification backlog, atlas-v2 adjudication) instead. "
-        "Wire the COS v2 event source into this projection when it lands -- do "
-        "NOT invent a reader.",
+        "COS v2 is retired. IRIS convergence remains a proposed aggregate-health "
+        "contract under the existing telemetry project, not a live external "
+        "consumer of this pack. Confirm project binding and approved fields "
+        "before implementing the adapter; reuse the existing manager and pulse.",
     ]
 
     return {

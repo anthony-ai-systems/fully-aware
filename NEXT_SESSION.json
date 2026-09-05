@@ -1,16 +1,16 @@
 {
   "schema": "next-session/v2",
-  "written_at": "2026-08-08T23:30:00-07:00",
+  "written_at": "2026-09-05T00:00:00Z",
   "environment": "fully-aware",
   "status": "in-progress",
-  "summary": "M4 is armed: the boot-pack LaunchAgent runs tools/morning-pack.sh daily at 05:45 and the SessionStart digest hook is live. The imprint bulk-export lane has been running since 2026-08-07 (bulk export + IMPRINT digest section, intake staleness probe, daily-scan provenance note). automation-map v1 merged as PR #15. A full memory-wiring audit completed 2026-08-08 -- report plus addendum live in state/ (local-only) -- and the consumer-doc truth-up it surfaced is in flight: the Iris console, boot-pack/v1's only external consumer, was archived 2026-08-04 (anthony-wiki-vault c54cb6c), so the docs claiming a live consumer are being retired.",
+  "summary": "Dated reconciliation: Fully Aware aggregates Imprint exports and Atlas-v2 adjudication into the daily boot pack and digest. Atlas v1 is intentionally archived; active Atlas-v2 is in anthony-wiki-vault/scripts. IRIS runs in the existing Codex control-center task and vault IRIS tree; iris-ios holds direction only. Approved convergence repairs are in the super-audit branch pending review and controlled runtime deployment. A branch or green tests do not establish deployed health.",
   "next_action": {
     "who": "agent",
-    "what": "read state/audit-memory-wiring-2026-08-08.md addendum for the ranked fix sequence; freshness guards, next-session projection, and automation-map content fixes are in open PRs"
+    "what": "Review the convergence recovery PR and docs/CONVERGENCE-RECOVERY.md. After operator merge and scoped deployment, validate content-free taste health, dual Atlas feeds and weekly decay visibility. No live replay or new IRIS scheduler."
   },
   "pitfalls": [
     "Check open PRs on anthony-ai-systems/fully-aware before starting new surface/digest work.",
     "LaunchAgents run from this checkout's main -- never edit main directly, use a worktree."
   ],
-  "launch_one_liner": "Boot from state/BOOT-DIGEST.md; lane state lives in ~/code/NEXT_SESSION-iris-ecosystem.json and the vault audit build-plan."
+  "launch_one_liner": "Boot from state/BOOT-DIGEST.md; read docs/CONVERGENCE-RECOVERY.md for active system ownership and deployment gates."
 }

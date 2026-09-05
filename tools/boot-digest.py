@@ -334,14 +334,15 @@ def imprint_lines(summary, now=None, db_path=IMPRINT_DB):
                      "(line-format drift?)")
     age = now_ts - summary["mtime"]
     if age > STALE_EXPORT:
-        lines.append("- WARNING: imprint export STALE: %dh old -- 05:45 export "
-                     "may have failed" % (age // 3600))
+        lines.append("- WARNING: imprint export STALE (>26h at digest generation); exported %s -- 05:45 export may have failed"
+                     % datetime.datetime.fromtimestamp(summary["mtime"], datetime.timezone.utc).isoformat())
     lines.append("- full export: %s (%.1f MB; grep on demand, `imprint history "
                  "<urn>` for provenance)"
                  % (summary["path"], summary["bytes"] / (1024.0 * 1024.0)))
     live = live_store_mtime(db_path)
     if live is not None:
-        lines.append("- live store last written %s" % _ago(now_ts - live))
+        lines.append("- live store last written %s"
+                     % datetime.datetime.fromtimestamp(live, datetime.timezone.utc).isoformat())
     lines.append("")
     # Independent byte cap (defensive; the summary is ~5 lines in practice).
     # Shedding from the tail keeps the warnings, which are the point.
@@ -824,7 +825,7 @@ def collect(now, pack, daily_brief=None, daily_brief_path=None,
         "taste_health": taste_health,
         "decay": decay_line(pack),
         "plans": plans_line(plans_snapshot),
-        "generated_at": generated_at or "unknown",
+        "generated_at": generated_at if gen is not None else "unknown",
         "age_hours": age_hours,
         "stale": gen is not None and (now - gen).total_seconds() > STALE_PACK,
         "warnings": warnings,
@@ -875,11 +876,7 @@ def render_md(model, imprint=None):
     ``imprint`` is a pre-rendered line list (see ``imprint_lines``); it sits
     between the daily-brief line and the pack pointer.
     """
-    if model["age_hours"] is None:
-        age = "age unknown"
-    else:
-        age = "%dh ago" % model["age_hours"]
-    header = "Pack generated: %s (%s)" % (model["generated_at"], age)
+    header = "Pack generated: %s" % model["generated_at"]
     if model["stale"]:
         header += " STALE (>36h)"
 
