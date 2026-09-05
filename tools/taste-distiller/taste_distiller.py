@@ -397,7 +397,8 @@ def _claude_bin():
 def call_model(prompt):
     proc = subprocess.run(
         [_claude_bin(), "-p", "--model", "haiku"],
-        input=prompt, capture_output=True, text=True, timeout=MODEL_TIMEOUT_SECS)
+        input=prompt, capture_output=True, text=True, timeout=MODEL_TIMEOUT_SECS,
+        env=dict(os.environ, IMPRINT_CAPTURE_ORIGIN="automation"))
     if proc.returncode != 0:
         raise RuntimeError("claude -p failed rc=%d: %s"
                            % (proc.returncode, proc.stderr.strip()[:400]))

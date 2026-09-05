@@ -301,6 +301,7 @@ def child_env():
         env.pop(key, None)
     env["PATH"] = _prefixed_path(env.get("PATH", ""))
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["IMPRINT_CAPTURE_ORIGIN"] = "automation"
     return env
 
 
