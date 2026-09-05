@@ -787,6 +787,20 @@ def taste_health_line(path, now):
         return "TASTE: DEGRADED; health unavailable or malformed (no success inferred)"
 
 
+def decay_line(pack):
+    decay = (pack.get("sections") or {}).get("decay")
+    if not decay:
+        return None
+    counts = decay.get("state_counts")
+    keys = ("total", "pending", "needs_update", "deferred", "reviewed")
+    if not decay.get("present") or not isinstance(counts, dict) or any(
+            type(counts.get(k)) is not int or counts[k] < 0 for k in keys):
+        return "DECAY: weekly feed unavailable; pending work unknown"
+    return ("DECAY: %d total; %d pending, %d needs update, %d deferred, %d reviewed; weekly; observed %s%s"
+            % tuple([counts[k] for k in keys] + [decay.get("as_of", "unknown"),
+                    " STALE (work retained)" if decay.get("freshness") != "fresh" else ""]))
+
+
 def collect(now, pack, daily_brief=None, daily_brief_path=None,
             extra_warnings=None, plans_snapshot=None, taste_health=None):
     """Fold the pack into the digest model (plain lists, shed-able).
@@ -808,6 +822,7 @@ def collect(now, pack, daily_brief=None, daily_brief_path=None,
         "defects": defect_lines(now, pack),
         "nightly": nightly_line(),
         "taste_health": taste_health,
+        "decay": decay_line(pack),
         "plans": plans_line(plans_snapshot),
         "generated_at": generated_at or "unknown",
         "age_hours": age_hours,
@@ -877,6 +892,8 @@ def render_md(model, imprint=None):
         lines.append(model["plans"])
     if model.get("taste_health"):
         lines.append(model["taste_health"])
+    if model.get("decay"):
+        lines.append(model["decay"])
     if model.get("defects") or model.get("nightly") or model.get("plans"):
         lines.append("")
     lines.extend([header, ""])
