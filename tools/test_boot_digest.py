@@ -32,6 +32,7 @@ def _load_digest():
         "boot_digest", os.path.join(_HERE, "boot-digest.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    mod.PLANS_SNAPSHOT = "/synthetic/not-configured/plans-snapshot.json"
     return mod
 
 

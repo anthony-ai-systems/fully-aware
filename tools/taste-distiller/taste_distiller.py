@@ -137,14 +137,22 @@ def read_queue(path):
     return entries, bad
 
 
-def load_ledger(path):
+def load_ledger(path, strict=False):
     if not os.path.exists(path):
         return {}
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
+        if strict and (not isinstance(data, dict) or any(
+                not isinstance(r, dict) or not isinstance(r.get("status"), str)
+                or isinstance(r.get("attempts", 0), bool)
+                or not isinstance(r.get("attempts", 0), int)
+                or r.get("attempts", 0) < 0 for r in data.values())):
+            raise ValueError("invalid ledger shape")
         return data if isinstance(data, dict) else {}
     except ValueError:
+        if strict:
+            raise
         # A corrupt ledger must not wedge the worker forever; preserve the
         # evidence and start fresh (ingest sha-dedupe absorbs the re-scans).
         shutil.copy2(path, path + ".corrupt")
@@ -391,7 +399,15 @@ def build_prompt(excerpt, markers, registry):
 
 
 def _claude_bin():
-    return shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
+    pinned = os.environ.get("MACROSEAT_CLAUDE_BIN")
+    if pinned:
+        if not os.path.isabs(pinned) or not os.path.isfile(pinned) or not os.access(pinned, os.X_OK):
+            raise RuntimeError("MACROSEAT_CLAUDE_BIN must name an executable absolute file")
+        return pinned
+    found = shutil.which("claude")
+    if found:
+        return os.path.abspath(found)
+    raise RuntimeError("claude unavailable; prepare LaunchAgent with MACROSEAT_CLAUDE_BIN")
 
 
 def call_model(prompt):
@@ -580,10 +596,27 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="macro-seat taste distiller worker")
     ap.add_argument("--session", metavar="ID",
                     help="force ONE session: bypass ledger + quiet gate for it")
+    ap.add_argument("--prepare-failed-replay", metavar="OUTPUT",
+                    help="write a failed-only manifest; never execute or alter retry state")
+    ap.add_argument("--replay-batch-size", type=int, default=6)
     args = ap.parse_args(argv)
+    if args.prepare_failed_replay and args.session:
+        ap.error("manifest preparation cannot force a session")
 
     data_root, operator = load_imprint_config()
     root = macroseat_root(data_root, operator)
+    if args.prepare_failed_replay:
+        entries, bad = read_queue(queue_path(root))
+        if bad:
+            raise ValueError("malformed queue records; resolve before replay selection")
+        manifest = failed_replay_manifest(load_ledger(ledger_path(root), strict=True), entries,
+                                          args.replay_batch_size)
+        # Exclusive create prevents an accidental overwrite of an approved manifest.
+        fd = os.open(args.prepare_failed_replay, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=2)
+            fh.write("\n")
+        return 0
     os.makedirs(root, mode=0o700, exist_ok=True)
     tighten_modes(root)
 
@@ -595,7 +628,14 @@ def main(argv=None):
         except OSError:
             print("taste-distiller: another instance holds the lock; exiting")
             return 0
-        return _drain(root, force_session=args.session)
+        try:
+            return _drain(root, force_session=args.session)
+        except (OSError, ValueError, TypeError) as exc:
+            health = health_snapshot({}, batch_count=0, batch_errors=0)
+            health.update(status="degraded", failure="worker_state_unavailable")
+            write_health(root, health)
+            print("taste-distiller: worker state unavailable (%s)" % type(exc).__name__, file=sys.stderr)
+            return 1
     finally:
         lock.close()
 
@@ -615,11 +655,51 @@ def _retryable(record):
             and record.get("attempts", 1) < RETRY_LIMIT)
 
 
+def health_snapshot(ledger, *, batch_count, batch_errors, bad_queue=0):
+    errors = [r for r in ledger.values() if r.get("status") == "error"]
+    exhausted = sum(r.get("attempts", 1) >= RETRY_LIMIT for r in errors)
+    missing = sum(r.get("status") == "transcript_missing" for r in ledger.values())
+    return {"schema": "taste-distiller-health/v1",
+            "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "status": "degraded" if errors or missing or bad_queue else "healthy",
+            "errors": len(errors), "retry_exhausted": exhausted,
+            "transcript_missing": missing, "queue_bad_records": bad_queue,
+            "batch_count": batch_count, "batch_errors": batch_errors}
+
+
+def write_health(root, snapshot):
+    path = os.path.join(root, "distill-health.json")
+    fd, temporary = tempfile.mkstemp(prefix=".health-", dir=root)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(snapshot, fh, sort_keys=True)
+            fh.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def failed_replay_manifest(ledger, entries, batch_size=6):
+    """Prepare identifiers only; do not reset ledger or invoke a model."""
+    if not 1 <= batch_size <= 6:
+        raise ValueError("replay batches must contain 1..6 sessions")
+    queued = {e["session_id"] for e in entries}
+    failed = sorted(sid for sid, r in ledger.items()
+                    if r.get("status") == "error" and sid in queued)
+    unavailable = sum(r.get("status") == "error" and sid not in queued
+                      for sid, r in ledger.items())
+    return {"schema": "taste-distiller-replay/v1", "execution_authorized": False,
+            "selection": "error status only; excludes successful and transcript_missing records",
+            "batch_size": batch_size, "failed_without_queue_entry": unavailable,
+            "batches": [failed[i:i + batch_size] for i in range(0, len(failed), batch_size)]}
+
+
 def _drain(root, force_session=None):
     quiet_secs = int(os.environ.get("MACROSEAT_QUIET_SECONDS",
                                     str(DEFAULT_QUIET_SECONDS)))
     entries, bad = read_queue(queue_path(root))
-    ledger = load_ledger(ledger_path(root))
+    ledger = load_ledger(ledger_path(root), strict=True)
     registry = load_registry(registry_path(root))
 
     pending, waiting, seen = [], 0, set()
@@ -644,10 +724,12 @@ def _drain(root, force_session=None):
     print("taste-distiller: queue=%d bad=%d quiet-wait=%d pending=%d batch=%d registry=%d"
           % (len(entries), bad, waiting, len(pending), len(batch), len(registry)))
 
+    batch_errors = 0
     for entry in batch:
         record = process_session(entry, registry, now_iso)
         prior = ledger.get(entry["session_id"], {})
         if record["status"] == "error":
+            batch_errors += 1
             record["attempts"] = prior.get("attempts", 0) + 1
         ledger[entry["session_id"]] = record
         save_ledger(ledger_path(root), ledger)  # per-session: a kill loses nothing
@@ -658,7 +740,9 @@ def _drain(root, force_session=None):
     remaining = len(pending) - len(batch)
     if remaining:
         print("taste-distiller: %d session(s) remain; next tick continues" % remaining)
-    return 0
+    write_health(root, health_snapshot(ledger, batch_count=len(batch),
+                                       batch_errors=batch_errors, bad_queue=bad))
+    return 1 if batch and batch_errors == len(batch) else 0
 
 
 if __name__ == "__main__":

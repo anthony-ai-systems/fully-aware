@@ -748,8 +748,47 @@ def attention_lines(pack):
     return lines
 
 
+def default_taste_health():
+    config_path = os.environ.get("IMPRINT_CONFIG", os.path.expanduser("~/.config/imprint/config.json"))
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            config = json.load(fh)
+        return os.path.join(config["data_root"], config["operator_slug"], "macroseat", "distill-health.json")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def taste_health_line(path, now):
+    """Content-free semantic health; terminal errors survive an empty worker batch."""
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            health = json.load(fh)
+        keys = ("errors", "retry_exhausted", "transcript_missing", "queue_bad_records", "batch_count", "batch_errors")
+        if not isinstance(health, dict) or health.get("schema") != "taste-distiller-health/v1":
+            raise ValueError("schema")
+        if any(type(health.get(k)) is not int or health[k] < 0 for k in keys):
+            raise ValueError("counts")
+        at = _parse_iso(health.get("generated_at"))
+        if at is None or health.get("status") not in ("healthy", "degraded"):
+            raise ValueError("state")
+        if health["retry_exhausted"] > health["errors"] or health["batch_errors"] > health["batch_count"]:
+            raise ValueError("counts")
+        stale = (now - at).total_seconds() > 45 * 60 or (at - now).total_seconds() > 300
+        degraded = stale or health["status"] == "degraded" or health.get("failure") or any(
+            health[k] for k in ("errors", "retry_exhausted", "transcript_missing", "queue_bad_records"))
+        return ("TASTE: %s; errors %d (%d retry-exhausted), missing %d, bad queue %d; observed %s%s%s"
+                % ("DEGRADED" if degraded else "healthy", health["errors"], health["retry_exhausted"],
+                   health["transcript_missing"], health["queue_bad_records"], health["generated_at"],
+                   "; STALE (>45m or future clock)" if stale else "",
+                   "; worker state unavailable" if health.get("failure") else ""))
+    except (OSError, ValueError, TypeError, OverflowError):
+        return "TASTE: DEGRADED; health unavailable or malformed (no success inferred)"
+
+
 def collect(now, pack, daily_brief=None, daily_brief_path=None,
-            extra_warnings=None, plans_snapshot=None):
+            extra_warnings=None, plans_snapshot=None, taste_health=None):
     """Fold the pack into the digest model (plain lists, shed-able).
 
     ``extra_warnings`` are pre-rendered lines from THIS run's own probes (the
@@ -768,6 +807,7 @@ def collect(now, pack, daily_brief=None, daily_brief_path=None,
     return {
         "defects": defect_lines(now, pack),
         "nightly": nightly_line(),
+        "taste_health": taste_health,
         "plans": plans_line(plans_snapshot),
         "generated_at": generated_at or "unknown",
         "age_hours": age_hours,
@@ -835,6 +875,8 @@ def render_md(model, imprint=None):
         lines.append(model["nightly"])
     if model.get("plans"):
         lines.append(model["plans"])
+    if model.get("taste_health"):
+        lines.append(model["taste_health"])
     if model.get("defects") or model.get("nightly") or model.get("plans"):
         lines.append("")
     lines.extend([header, ""])
@@ -858,7 +900,7 @@ def render_md(model, imprint=None):
 
 def build_digest(now, pack, daily_brief=None, daily_brief_path=None,
                  cap_tokens=HARD_CAP_TOKENS, imprint=None,
-                 extra_warnings=None, plans_snapshot=None):
+                 extra_warnings=None, plans_snapshot=None, taste_health=None):
     """Build the digest markdown. ``now`` is injectable for determinism.
 
     The 500-token shed loop runs WITHOUT the imprint section: the IMPRINT
@@ -867,7 +909,7 @@ def build_digest(now, pack, daily_brief=None, daily_brief_path=None,
     warnings/attention lines that the cap exists to protect.
     """
     model = collect(now, pack, daily_brief, daily_brief_path, extra_warnings,
-                    plans_snapshot=plans_snapshot)
+                    plans_snapshot=plans_snapshot, taste_health=taste_health)
     md = render_md(model)
     while est_tokens(md) > cap_tokens:
         if not _shed_one(model):
@@ -927,6 +969,8 @@ def main(argv=None):
     ap.add_argument("--plans-snapshot", default=PLANS_SNAPSHOT,
                     help="plans-snapshot.json written by ledger.py export "
                          "(missing -> absence line, never fatal)")
+    ap.add_argument("--taste-health", default=default_taste_health(),
+                    help="content-free taste worker health (configured missing feed degrades)")
     ap.add_argument("--out", default=_default("state", "BOOT-DIGEST.md"))
     ap.add_argument("--stdout", action="store_true",
                     help="write the digest to stdout (skips the file write)")
@@ -947,7 +991,8 @@ def main(argv=None):
                       cap_tokens=args.cap_tokens,
                       imprint=imprint_lines(load_imprint(args.imprint), now=now),
                       extra_warnings=launchctl_warnings(),
-                      plans_snapshot=args.plans_snapshot)
+                      plans_snapshot=args.plans_snapshot,
+                      taste_health=taste_health_line(args.taste_health, now))
 
     if args.stdout:
         sys.stdout.write(md)
