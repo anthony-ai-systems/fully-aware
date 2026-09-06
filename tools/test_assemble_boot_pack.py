@@ -15,6 +15,7 @@ import os
 import re
 import tempfile
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -893,6 +894,177 @@ class AdjudicationFeed(unittest.TestCase):
             self.assertTrue(any("adjudication" in w
                                 for w in sidecar["warnings"]),
                             sidecar["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+# Feed e: Atlas-v2 weekly DECAY review queue
+# --------------------------------------------------------------------------- #
+class DecayFeed(unittest.TestCase):
+    _BLOCK = """### `/synthetic/memory/%s.md` (decay, project, 2d over horizon)
+
+> A synthetic belief.
+- **last_verified:** 2026-06-15 · **half-life:** 30d
+%s
+"""
+    _CHECKS = {
+        "reviewed": "- [x] **STILL TRUE** — bump last_verified to today\n"
+                    "- [ ] **NEEDS UPDATE** — content is stale\n"
+                    "- [ ] **DEFER**\n",
+        "needs_update": "- [ ] **STILL TRUE** — bump last_verified to today\n"
+                        "- [x] **NEEDS UPDATE** — content is stale\n"
+                        "- [ ] **DEFER**\n",
+        "deferred": "- [ ] **STILL TRUE** — bump last_verified to today\n"
+                    "- [ ] **NEEDS UPDATE** — content is stale\n"
+                    "- [x] **DEFER**\n",
+        "pending": "- [ ] **STILL TRUE** — bump last_verified to today\n"
+                   "- [ ] **NEEDS UPDATE** — content is stale\n"
+                   "- [ ] **DEFER**\n",
+    }
+    _FIXTURE_DIR = os.path.join(_HERE, "fixtures", "decay")
+    _PRODUCER_SHA256 = (
+        "a169a8b6c0ed07ce5d0dbd5e555b5470644dc783fec743eda94bf1e229f1795f")
+
+    def _queue_file(self, run_date="2026-07-20", states=None):
+        states = states or ["reviewed", "needs_update", "deferred", "pending"]
+        return ("# Decay review queue (Loop 3) — %s\n\n" % run_date
+                + "\n".join(self._BLOCK % ("belief-%02d" % i,
+                                              self._CHECKS[state])
+                                for i, state in enumerate(states, 1)))
+
+    def _build(self, tmp, decay_dir, adjudication_dir=None):
+        cache = os.path.join(tmp, "surfaces")
+        _write_surface(cache, _surface("synth-a", NOW.isoformat()))
+        return ab.build_pack(
+            NOW, _manifest(), _backlog(items=[]), cache, None,
+            adjudication_dir=adjudication_dir, decay_dir=decay_dir)
+
+    def test_fixture_metadata_pins_installed_producer(self):
+        with open(os.path.join(self._FIXTURE_DIR, "producer-metadata.json"),
+                  encoding="utf-8") as fh:
+            metadata = json.load(fh)
+        self.assertEqual(metadata["producer_sha256"], self._PRODUCER_SHA256)
+        self.assertEqual(metadata["sha256"], self._PRODUCER_SHA256)
+        self.assertEqual(metadata["schema"], "decay-fixture/v1")
+        with tempfile.TemporaryDirectory() as tmp:
+            _, sidecar = self._build(tmp, self._FIXTURE_DIR)
+            self.assertEqual(
+                sidecar["sections"]["decay"]["state_counts"], {
+                    "total": 4, "reviewed": 1, "needs_update": 1,
+                    "deferred": 1, "pending": 1, "unchecked": 1})
+
+    def test_decay_only_projects_states_and_weekly_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decay = os.path.join(tmp, "pending")
+            _write(os.path.join(decay, "DECAY-2026-07-20.md"),
+                   self._queue_file())
+            md, sidecar = self._build(tmp, decay)
+            section = sidecar["sections"]["decay"]
+            self.assertTrue(section["present"])
+            self.assertEqual(section["file"], "DECAY-2026-07-20.md")
+            self.assertEqual(section["cadence"], "weekly (Monday)")
+            self.assertEqual(section["freshness"], "fresh")
+            self.assertEqual(section["state_counts"], {
+                "total": 4, "reviewed": 1, "needs_update": 1,
+                "deferred": 1, "pending": 1, "unchecked": 1})
+            self.assertEqual(
+                [i["state"] for i in section["items"]],
+                ["reviewed", "needs_update", "deferred", "pending"])
+            decay_items = [i for i in
+                           sidecar["sections"]["decision_queue"]["items"]
+                           if i["kind"] == "decay"]
+            self.assertEqual(len(decay_items), 1)
+            self.assertEqual(decay_items[0]["stale_after_seconds"],
+                             ab.STALE_DECAY)
+            self.assertIn("weekly DECAY review", md)
+            self.assertIn("1 reviewed, 1 needs update, 1 deferred, 1 pending",
+                          md)
+
+    def test_mixed_feed_preserves_daily_queue_and_uses_weekly_staleness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pending = os.path.join(tmp, "pending")
+            _write(os.path.join(pending, "AUTO-APPLY-2026-07-20.md"),
+                   AdjudicationFeed()._queue_file(1))
+            _write(os.path.join(pending, "DECAY-2026-07-20.md"),
+                   self._queue_file(states=["pending"]))
+            md, sidecar = self._build(tmp, pending, adjudication_dir=pending)
+            items = sidecar["sections"]["decision_queue"]["items"]
+            self.assertTrue(any(i["kind"] == "adjudication" for i in items))
+            self.assertTrue(any(i["kind"] == "decay" for i in items))
+            queue = md[md.index("## 3."):md.index("## 4.")].splitlines()
+            daily_line = [l for l in queue if "mechanical auto-apply" in l][0]
+            decay_line = [l for l in queue if "weekly DECAY review" in l][0]
+            # The same 3-day-old run is stale for the daily feed but fresh for
+            # the weekly Monday feed.
+            self.assertIn("STALE(", daily_line)
+            self.assertNotIn("STALE(", decay_line)
+
+    def test_numeric_suffix_is_ordered_as_a_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decay = os.path.join(tmp, "pending")
+            _write(os.path.join(decay, "DECAY-2026-07-20-2.md"),
+                   self._queue_file(states=["deferred"]))
+            _write(os.path.join(decay, "DECAY-2026-07-20-10.md"),
+                   self._queue_file(states=["reviewed"]))
+            _, sidecar = self._build(tmp, decay)
+            section = sidecar["sections"]["decay"]
+            self.assertEqual(section["file"], "DECAY-2026-07-20-10.md")
+            self.assertEqual(section["suffix"], 10)
+            self.assertEqual(section["state_counts"]["reviewed"], 1)
+
+    def test_old_run_is_marked_stale_but_unresolved_state_is_retained(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decay = os.path.join(tmp, "pending")
+            _write(os.path.join(decay, "DECAY-2026-07-10.md"),
+                   self._queue_file(run_date="2026-07-10",
+                                    states=["pending"]))
+            md, sidecar = self._build(tmp, decay)
+            section = sidecar["sections"]["decay"]
+            self.assertEqual(section["freshness"], "stale")
+            self.assertEqual(section["state_counts"]["pending"], 1)
+            self.assertEqual(len([i for i in
+                                  sidecar["sections"]["decision_queue"]["items"]
+                                  if i["kind"] == "decay"]), 1)
+            self.assertIn("STALE(", [l for l in md.splitlines()
+                                      if l.startswith("- ")
+                                      and "weekly DECAY review" in l][0])
+
+    def test_configured_missing_or_empty_feed_warns_without_claiming_no_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "missing")
+            md, sidecar = self._build(tmp, missing)
+            self.assertIn("decay", sidecar["sections"])
+            self.assertEqual(sidecar["sections"]["decay"]["state_counts"], {})
+            self.assertTrue(any("DECAY feed unavailable" in w
+                                and "does not exist" in w
+                                for w in sidecar["warnings"]))
+            self.assertIn("weekly DECAY unavailable", md)
+
+            empty = os.path.join(tmp, "empty")
+            os.makedirs(empty)
+            empty_md, empty_sidecar = self._build(tmp, empty)
+            self.assertTrue(any("no work cannot be inferred" in w
+                                for w in empty_sidecar["warnings"]))
+            self.assertIn("no run recorded", empty_md)
+            self.assertIn("no work cannot be inferred", empty_md)
+
+    def test_unreadable_selected_file_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decay = os.path.join(tmp, "pending")
+            path = _write(os.path.join(decay, "DECAY-2026-07-20.md"),
+                          self._queue_file(states=["pending"]))
+            with mock.patch.object(ab, "open",
+                                   side_effect=OSError("permission denied")):
+                loaded = ab.load_decay(decay)
+            self.assertFalse(loaded["present"])
+            self.assertIn("unreadable", loaded["reason"])
+            self.assertIn(os.path.basename(path), loaded["reason"])
+
+    def test_unconfigured_feed_is_silent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md, sidecar = self._build(tmp, None)
+            self.assertNotIn("decay", sidecar["sections"])
+            self.assertFalse(any("DECAY" in w for w in sidecar["warnings"]))
+            self.assertNotIn("weekly DECAY review", md)
 
 
 # --------------------------------------------------------------------------- #

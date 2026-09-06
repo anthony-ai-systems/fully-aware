@@ -342,7 +342,7 @@ codex_fresh() {
         printf 'STUB SCAN %s\n' "${DATE}" > "$2"
         return 0
     fi
-    codex exec \
+    IMPRINT_CAPTURE_ORIGIN=automation codex exec \
         -C "${REPO_ROOT}" \
         -s read-only \
         -m "${CODEX_MODEL}" \
@@ -364,7 +364,7 @@ codex_resume() {
     fi
     (
         cd "${REPO_ROOT}" || exit 1
-        codex exec resume "$4" \
+        IMPRINT_CAPTURE_ORIGIN=automation codex exec resume "$4" \
             -m "${CODEX_MODEL}" \
             -c model_reasoning_effort="${CODEX_EFFORT}" \
             -c sandbox_mode="read-only" \
@@ -388,7 +388,7 @@ fable_review() {
         printf 'STUB REVIEW %s\n' "${DATE}" > "$2"
         return 0
     fi
-    claude -p --model "${FABLE_MODEL}" <"$1" >"$2" 2>"$3"
+    IMPRINT_CAPTURE_ORIGIN=automation claude -p --model "${FABLE_MODEL}" <"$1" >"$2" 2>"$3"
 }
 
 # The codex banner prints `session id: <uuid>` before the first turn; that is the

@@ -334,14 +334,15 @@ def imprint_lines(summary, now=None, db_path=IMPRINT_DB):
                      "(line-format drift?)")
     age = now_ts - summary["mtime"]
     if age > STALE_EXPORT:
-        lines.append("- WARNING: imprint export STALE: %dh old -- 05:45 export "
-                     "may have failed" % (age // 3600))
+        lines.append("- WARNING: imprint export STALE (>26h at digest generation); exported %s -- 05:45 export may have failed"
+                     % datetime.datetime.fromtimestamp(summary["mtime"], datetime.timezone.utc).isoformat())
     lines.append("- full export: %s (%.1f MB; grep on demand, `imprint history "
                  "<urn>` for provenance)"
                  % (summary["path"], summary["bytes"] / (1024.0 * 1024.0)))
     live = live_store_mtime(db_path)
     if live is not None:
-        lines.append("- live store last written %s" % _ago(now_ts - live))
+        lines.append("- live store last written %s"
+                     % datetime.datetime.fromtimestamp(live, datetime.timezone.utc).isoformat())
     lines.append("")
     # Independent byte cap (defensive; the summary is ~5 lines in practice).
     # Shedding from the tail keeps the warnings, which are the point.
@@ -748,8 +749,61 @@ def attention_lines(pack):
     return lines
 
 
+def default_taste_health():
+    config_path = os.environ.get("IMPRINT_CONFIG", os.path.expanduser("~/.config/imprint/config.json"))
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            config = json.load(fh)
+        return os.path.join(config["data_root"], config["operator_slug"], "macroseat", "distill-health.json")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def taste_health_line(path, now):
+    """Content-free semantic health; terminal errors survive an empty worker batch."""
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            health = json.load(fh)
+        keys = ("errors", "retry_exhausted", "transcript_missing", "queue_bad_records", "batch_count", "batch_errors")
+        if not isinstance(health, dict) or health.get("schema") != "taste-distiller-health/v1":
+            raise ValueError("schema")
+        if any(type(health.get(k)) is not int or health[k] < 0 for k in keys):
+            raise ValueError("counts")
+        at = _parse_iso(health.get("generated_at"))
+        if at is None or health.get("status") not in ("healthy", "degraded"):
+            raise ValueError("state")
+        if health["retry_exhausted"] > health["errors"] or health["batch_errors"] > health["batch_count"]:
+            raise ValueError("counts")
+        stale = (now - at).total_seconds() > 45 * 60 or (at - now).total_seconds() > 300
+        degraded = stale or health["status"] == "degraded" or health.get("failure") or any(
+            health[k] for k in ("errors", "retry_exhausted", "transcript_missing", "queue_bad_records"))
+        return ("TASTE: %s; errors %d (%d retry-exhausted), missing %d, bad queue %d; observed %s%s%s"
+                % ("DEGRADED" if degraded else "healthy", health["errors"], health["retry_exhausted"],
+                   health["transcript_missing"], health["queue_bad_records"], health["generated_at"],
+                   "; STALE (>45m or future clock)" if stale else "",
+                   "; worker state unavailable" if health.get("failure") else ""))
+    except (OSError, ValueError, TypeError, OverflowError):
+        return "TASTE: DEGRADED; health unavailable or malformed (no success inferred)"
+
+
+def decay_line(pack):
+    decay = (pack.get("sections") or {}).get("decay")
+    if not decay:
+        return None
+    counts = decay.get("state_counts")
+    keys = ("total", "pending", "needs_update", "deferred", "reviewed")
+    if not decay.get("present") or not isinstance(counts, dict) or any(
+            type(counts.get(k)) is not int or counts[k] < 0 for k in keys):
+        return "DECAY: weekly feed unavailable; pending work unknown"
+    return ("DECAY: %d total; %d pending, %d needs update, %d deferred, %d reviewed; weekly; observed %s%s"
+            % tuple([counts[k] for k in keys] + [decay.get("as_of", "unknown"),
+                    " STALE (work retained)" if decay.get("freshness") != "fresh" else ""]))
+
+
 def collect(now, pack, daily_brief=None, daily_brief_path=None,
-            extra_warnings=None, plans_snapshot=None):
+            extra_warnings=None, plans_snapshot=None, taste_health=None):
     """Fold the pack into the digest model (plain lists, shed-able).
 
     ``extra_warnings`` are pre-rendered lines from THIS run's own probes (the
@@ -768,8 +822,10 @@ def collect(now, pack, daily_brief=None, daily_brief_path=None,
     return {
         "defects": defect_lines(now, pack),
         "nightly": nightly_line(),
+        "taste_health": taste_health,
+        "decay": decay_line(pack),
         "plans": plans_line(plans_snapshot),
-        "generated_at": generated_at or "unknown",
+        "generated_at": generated_at if gen is not None else "unknown",
         "age_hours": age_hours,
         "stale": gen is not None and (now - gen).total_seconds() > STALE_PACK,
         "warnings": warnings,
@@ -820,11 +876,7 @@ def render_md(model, imprint=None):
     ``imprint`` is a pre-rendered line list (see ``imprint_lines``); it sits
     between the daily-brief line and the pack pointer.
     """
-    if model["age_hours"] is None:
-        age = "age unknown"
-    else:
-        age = "%dh ago" % model["age_hours"]
-    header = "Pack generated: %s (%s)" % (model["generated_at"], age)
+    header = "Pack generated: %s" % model["generated_at"]
     if model["stale"]:
         header += " STALE (>36h)"
 
@@ -835,6 +887,10 @@ def render_md(model, imprint=None):
         lines.append(model["nightly"])
     if model.get("plans"):
         lines.append(model["plans"])
+    if model.get("taste_health"):
+        lines.append(model["taste_health"])
+    if model.get("decay"):
+        lines.append(model["decay"])
     if model.get("defects") or model.get("nightly") or model.get("plans"):
         lines.append("")
     lines.extend([header, ""])
@@ -858,7 +914,7 @@ def render_md(model, imprint=None):
 
 def build_digest(now, pack, daily_brief=None, daily_brief_path=None,
                  cap_tokens=HARD_CAP_TOKENS, imprint=None,
-                 extra_warnings=None, plans_snapshot=None):
+                 extra_warnings=None, plans_snapshot=None, taste_health=None):
     """Build the digest markdown. ``now`` is injectable for determinism.
 
     The 500-token shed loop runs WITHOUT the imprint section: the IMPRINT
@@ -867,7 +923,7 @@ def build_digest(now, pack, daily_brief=None, daily_brief_path=None,
     warnings/attention lines that the cap exists to protect.
     """
     model = collect(now, pack, daily_brief, daily_brief_path, extra_warnings,
-                    plans_snapshot=plans_snapshot)
+                    plans_snapshot=plans_snapshot, taste_health=taste_health)
     md = render_md(model)
     while est_tokens(md) > cap_tokens:
         if not _shed_one(model):
@@ -927,6 +983,8 @@ def main(argv=None):
     ap.add_argument("--plans-snapshot", default=PLANS_SNAPSHOT,
                     help="plans-snapshot.json written by ledger.py export "
                          "(missing -> absence line, never fatal)")
+    ap.add_argument("--taste-health", default=default_taste_health(),
+                    help="content-free taste worker health (configured missing feed degrades)")
     ap.add_argument("--out", default=_default("state", "BOOT-DIGEST.md"))
     ap.add_argument("--stdout", action="store_true",
                     help="write the digest to stdout (skips the file write)")
@@ -947,7 +1005,8 @@ def main(argv=None):
                       cap_tokens=args.cap_tokens,
                       imprint=imprint_lines(load_imprint(args.imprint), now=now),
                       extra_warnings=launchctl_warnings(),
-                      plans_snapshot=args.plans_snapshot)
+                      plans_snapshot=args.plans_snapshot,
+                      taste_health=taste_health_line(args.taste_health, now))
 
     if args.stdout:
         sys.stdout.write(md)
