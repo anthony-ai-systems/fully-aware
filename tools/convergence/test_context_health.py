@@ -122,6 +122,32 @@ def boot_fixture(*, generated_at=None, decay=None, queue=None):
 
 
 class ContextHealthTests(unittest.TestCase):
+    def test_missing_decay_with_partial_adjudication_remains_partial(self):
+        boot = boot_fixture(queue={"items": [
+            {"kind": "adjudication", "source": "adjudication:atlas-v2", "as_of": "2026-09-06"},
+            {"kind": "adjudication", "source": "adjudication:atlas-v2", "as_of": "invalid"}]})
+        boot["sections"].pop("decay")
+        atlas = build_health(None, None, boot, OBSERVED, OBSERVED)["components"]["atlas"]
+        self.assertEqual(atlas["availability"], PARTIAL)
+        self.assertEqual(atlas["coverage"], "partial")
+        self.assertIsNotNone(atlas["last_verified_at"])
+
+    def test_cli_distinguishes_corrupt_from_missing_snapshots(self):
+        import contextlib, io, tempfile
+        from pathlib import Path
+        from context_health import main
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp).resolve() / "bad.json"
+            bad.write_text("{ malformed")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                main(["--imprint-health", str(bad), "--taste-health", str(bad.parent / "absent"),
+                      "--captured-at", OBSERVED.isoformat(), "--format", "json"])
+            components = json.loads(output.getvalue())["components"]
+            self.assertEqual(components["imprint"]["availability"], INVALID)
+            self.assertEqual(components["taste"]["availability"], "unavailable")
+            self.assertEqual(components["atlas"]["availability"], "unavailable")
+
     def test_healthy_closed_shape_and_distinct_capture(self):
         imprint = imprint_fixture()
         taste = taste_fixture()

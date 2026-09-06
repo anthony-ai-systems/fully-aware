@@ -75,6 +75,8 @@ def capture_atlas(policy, module_path):
     if not path.is_absolute() or any(p.is_symlink() for p in [path, *path.parents]):
         raise ValueError("atlas-module-path-invalid")
     spec = importlib.util.spec_from_file_location("fully_aware_atlas_capture", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("atlas-module-path-invalid")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     claims = []

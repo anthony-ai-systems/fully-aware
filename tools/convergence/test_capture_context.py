@@ -329,6 +329,13 @@ class CapturePacketTests(unittest.TestCase):
 
 
 class CliPublicationTests(unittest.TestCase):
+    def test_directory_atlas_module_is_bounded_unavailable(self):
+        with local_tempdir() as temp:
+            packet = c.capture(policy(), str(Path(temp).resolve()), CAPTURED,
+                imprint_reader=lambda _policy: {"judgments": []})
+            self.assertEqual(packet["atlas"]["status"], "unavailable")
+            self.assertIn("atlas-check-unavailable", packet["limitations"])
+
     def test_cli_summary_is_bounded_and_publication_is_exclusive(self):
         packet = {
             "schema": c.SCHEMA,

@@ -697,13 +697,14 @@ def _build_atlas(
     feed_availability = (decay_availability, adjudication_availability)
     valid_feeds = sum(item == AVAILABLE for item in feed_availability)
     invalid_feeds = sum(item == INVALID for item in feed_availability)
+    partial_feeds = sum(item == PARTIAL for item in feed_availability)
     if pack_reason is not None:
         availability = INVALID
         coverage = UNKNOWN
     elif valid_feeds == 2:
         availability = AVAILABLE
         coverage = "complete"
-    elif valid_feeds == 1:
+    elif valid_feeds == 1 or partial_feeds:
         availability = PARTIAL
         coverage = "partial"
     elif invalid_feeds == 2:
@@ -922,9 +923,14 @@ def main(argv=None):
     captured, issue = _parse_aware_timestamp(args.captured_at, "capture")
     if issue:
         parser.error("captured-at must be timezone-aware")
-    imprint, _, _ = load_input(args.imprint_health)
-    taste, _, _ = load_input(args.taste_health)
-    boot, _, _ = load_input(args.boot_pack)
+    def source(path):
+        data, problem, _digest = load_input(path)
+        # Missing/unconfigured observations are unavailable; malformed or
+        # unreadable configured snapshots are invalid evidence.
+        return data if problem in (None, "unconfigured", "missing") else object()
+    imprint = source(args.imprint_health)
+    taste = source(args.taste_health)
+    boot = source(args.boot_pack)
     report = build_health(imprint, taste, boot, _datetime.datetime.now(UTC), captured)
     print(json.dumps(report, indent=2) if args.format == "json" else render_health(report))
     return 0
