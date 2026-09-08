@@ -71,10 +71,39 @@ class ProjectionTests(unittest.TestCase):
 
     def test_plans_and_boot_have_independent_freshness(self):
         p = plans(); p['generated'] = '2026-09-02T22:00:00Z'
+        p['lanes'][0]['updated'] = '2026-09-01'
         s = view(p=p)['sources']
         self.assertEqual(s['plans']['freshness'], 'stale')
         self.assertEqual(s['boot_pack']['freshness'], 'fresh')
         self.assertEqual(s['clayton']['freshness'], 'fresh')
+        self.assertEqual(s['plans']['projection']['lanes'][0]['updated'], '2026-09-01')
+        self.assertNotIn('lane_0_updated_invalid', s['plans']['issues'])
+
+    def test_lane_updated_validates_calendar_dates_including_leap_day(self):
+        for stamp, expected in (('2024-02-29', '2024-02-29'), ('2023-02-29', None), ('2026-02-30', None)):
+            with self.subTest(stamp=stamp):
+                p = plans(); p['lanes'][0]['updated'] = stamp
+                source = view(p=p)['sources']['plans']
+                self.assertEqual(source['projection']['lanes'][0]['updated'], expected)
+                if expected is None:
+                    self.assertIn('lane_0_updated_invalid', source['issues'])
+                else:
+                    self.assertNotIn('lane_0_updated_invalid', source['issues'])
+
+    def test_lane_updated_keeps_aware_timestamp_support(self):
+        stamp = '2026-09-05T12:00:00-05:00'
+        p = plans(); p['lanes'][0]['updated'] = stamp
+        source = view(p=p)['sources']['plans']
+        self.assertEqual(source['projection']['lanes'][0]['updated'], stamp)
+        self.assertNotIn('lane_0_updated_invalid', source['issues'])
+
+    def test_lane_updated_rejects_naive_and_malformed_timestamps(self):
+        for stamp in ('2026-09-05T17:00:00', 'malformed'):
+            with self.subTest(stamp=stamp):
+                p = plans(); p['lanes'][0]['updated'] = stamp
+                source = view(p=p)['sources']['plans']
+                self.assertIsNone(source['projection']['lanes'][0]['updated'])
+                self.assertIn('lane_0_updated_invalid', source['issues'])
 
     def test_missing_does_not_become_empty(self):
         v = w.build_view(None, None, None, NOW, {'clayton': {'read_error': 'missing'}})
