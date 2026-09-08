@@ -43,6 +43,7 @@ KNOWN_GATE_STATES = {"RUNNING", "IDLE", "HALTED"}
 HALTED_REPORTS = {"HALTED", "HALTED (fleet-kill present)"}
 HEX40 = re.compile(r"^[0-9a-fA-F]{40}$")
 HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
+LANE_DATE_ONLY = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _BIDI = {
     "\u061c", "\u200e", "\u200f", "\u202a", "\u202b", "\u202c",
     "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069",
@@ -98,6 +99,19 @@ def _strict_timestamp(value: Any) -> Tuple[Optional[str], Optional[_datetime.dat
         return text, parsed.astimezone(UTC)
     except (ValueError, OverflowError):
         return None, None
+
+
+def _lane_updated(value: Any) -> Tuple[Optional[str], bool]:
+    """Accept a valid calendar date or an existing aware timestamp."""
+    if isinstance(value, str) and LANE_DATE_ONLY.fullmatch(value):
+        try:
+            _datetime.date.fromisoformat(value)
+        except ValueError:
+            return None, False
+        return value, True
+
+    timestamp, parsed = _strict_timestamp(value)
+    return timestamp, parsed is not None
 
 
 def _coerce_now(value: Any) -> _datetime.datetime:
@@ -585,8 +599,8 @@ def _lane_projection(
     )
     updated = None
     if "updated" in lane and lane.get("updated") is not None:
-        updated, updated_dt = _strict_timestamp(lane.get("updated"))
-        if updated_dt is None:
+        updated, updated_valid = _lane_updated(lane.get("updated"))
+        if not updated_valid:
             issues.add(code_prefix + "_updated_invalid")
             updated = None
     health = lane.get("health")
