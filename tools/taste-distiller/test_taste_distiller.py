@@ -391,6 +391,35 @@ class WorkerTest(unittest.TestCase):
         # Missing transcript is NOT gated (nothing to wait for): ledgered now.
         self.assertEqual(ledger["gone"]["status"], "transcript_missing")
 
+    def test_disappearing_transcript_after_existence_check_is_missing(self):
+        env = {"IMPRINT_CONFIG": self.cfg_path, "MACROSEAT_QUIET_SECONDS": "0"}
+        with unittest.mock.patch.dict(os.environ, env), \
+             unittest.mock.patch.object(td, "extract_turns",
+                                        side_effect=FileNotFoundError("disappeared")), \
+             unittest.mock.patch.object(td, "call_model") as model:
+            rc = td.main([])
+
+        self.assertEqual(rc, 0)
+        ledger = td.load_ledger(td.ledger_path(self.root))
+        self.assertEqual(ledger["sess"]["status"], "transcript_missing")
+        self.assertNotIn("attempts", ledger["sess"])
+        model.assert_not_called()
+
+    def test_non_file_not_found_transcript_error_remains_retryable(self):
+        env = {"IMPRINT_CONFIG": self.cfg_path, "MACROSEAT_QUIET_SECONDS": "0"}
+        with unittest.mock.patch.dict(os.environ, env), \
+             unittest.mock.patch.object(td, "extract_turns",
+                                        side_effect=PermissionError("denied")):
+            rc = td.main([])
+
+        # The synthetic queue also contains a missing transcript, so the
+        # mixed batch keeps the worker's existing success return convention.
+        self.assertEqual(rc, 0)
+        ledger = td.load_ledger(td.ledger_path(self.root))
+        self.assertEqual(ledger["sess"]["status"], "error")
+        self.assertEqual(ledger["sess"]["attempts"], 1)
+        self.assertTrue(ledger["sess"]["error"].startswith("PermissionError:"))
+
     def test_error_retries_then_goes_terminal(self):
         env = {"IMPRINT_CONFIG": self.cfg_path, "MACROSEAT_QUIET_SECONDS": "0"}
         with unittest.mock.patch.dict(os.environ, env), \

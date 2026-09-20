@@ -567,7 +567,14 @@ def process_session(entry, registry, now_iso):
     if not path or not os.path.exists(path):
         return {"status": "transcript_missing", "processed_at": now_iso}
     try:
-        turns = extract_turns(path)
+        try:
+            turns = extract_turns(path)
+        except FileNotFoundError:
+            # The transcript may disappear after the existence check (for example,
+            # when its owning session is cleaned up concurrently). Treat that the
+            # same as an already-missing transcript; it is not a retryable worker
+            # failure.
+            return {"status": "transcript_missing", "processed_at": now_iso}
         user_turns = [t for t in turns if t[1] == "user"]
         total_chars = sum(len(t[2]) for t in turns)
         if len(user_turns) < MIN_USER_TURNS or total_chars < MIN_TOTAL_CHARS:
