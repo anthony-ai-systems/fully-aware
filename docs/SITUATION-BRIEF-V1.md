@@ -26,6 +26,12 @@ The board is current only when the producer proof and ordered ID/status
 binding match exactly and health reports current verified freshness, a recent
 generation, matching `verified_at`, and no `last_error`. Redirects and proxy
 settings are refused; each response is bounded at 2 MiB and has a timeout.
+The reader independently enforces a 300-second board-generation age and the
+existing IRIS source-verification age contract of 108,000 seconds (30 hours).
+These are different clocks: a normal minute-by-minute board refresh does not
+refresh the source capture. The source timestamp remains visible. The source
+limit mirrors `IRIS/client-work-board/scripts/freshness_model.py` at the accepted
+consumer revision; there is no runtime cross-repository import.
 
 Focus rows retain the source key/work identity, group, state, applicability,
 match, bounded question/recommendation, snooze, transport, and response count.

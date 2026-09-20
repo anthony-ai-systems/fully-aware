@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+from http.client import HTTPException
 import json
 import math
 import os
@@ -43,10 +44,12 @@ MAX_FOCUS_REQUESTS = 5
 MAX_TEXT = 280
 MAX_SOURCE_TEXT = 400
 MAX_DEADLINE_ROWS = 3
+# Existing IRIS freshness_model.verification contract; board generation is 300s.
+SOURCE_MAX_AGE_SECONDS = 108000
 SELECTED_LANES = ("fully-aware-convergence", "iris", "autonomous-operators")
 FOCUS_GROUPS = ("decision", "reconciliation", "prepared", "later", "history")
 CLOSED_STATUSES = {
-    "complete", "completed", "delivered", "cancelled", "canceled", "parked", "superseded", "closed",
+    "complete", "completed", "done", "delivered", "cancelled", "canceled", "parked", "superseded", "closed",
 }
 HEX64 = set("0123456789abcdefABCDEF")
 
@@ -228,7 +231,7 @@ def fetch_endpoint(path: str, *, now: Optional[dt.datetime] = None, opener: Any 
                     "bytes": 0, "observed_at": observed, "issue": "redirect_refused"}
         return {"path": path, "status": int(error.code), "data": None, "sha256": None,
                 "bytes": 0, "observed_at": observed, "issue": "http_error"}
-    except (URLError, OSError, TimeoutError, ValueError):
+    except (URLError, OSError, TimeoutError, ValueError, HTTPException):
         return {"path": path, "status": None, "data": None, "sha256": None,
                 "bytes": 0, "observed_at": observed, "issue": "transport_unavailable"}
     digest = hashlib.sha256(raw).hexdigest()
@@ -237,7 +240,7 @@ def fetch_endpoint(path: str, *, now: Optional[dt.datetime] = None, opener: Any 
                 "bytes": len(raw), "observed_at": observed, "issue": "response_oversize"}
     try:
         data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return {"path": path, "status": status, "data": None, "sha256": digest,
                 "bytes": len(raw), "observed_at": observed, "issue": "response_invalid_json"}
     if not isinstance(data, dict):
@@ -249,7 +252,10 @@ def fetch_endpoint(path: str, *, now: Optional[dt.datetime] = None, opener: Any 
 
 def _load_snapshot(path: Optional[str], now: dt.datetime) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     observed = _stamp(now)
-    data, issue, digest = load_input(path)
+    try:
+        data, issue, digest = load_input(path)
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        data, issue, digest = None, "snapshot_invalid", None
     ref = _reference(path, "explicit-input")
     meta = _source_metadata(ref, digest, observed)
     if issue is not None:
@@ -344,6 +350,8 @@ def _summarize_work_view(boot_path: str, plans_path: str, now: dt.datetime) -> D
 
 
 def _board_binding(board: Mapping[str, Any]) -> Optional[List[Tuple[str, str]]]:
+    if not isinstance(board, dict):
+        return None
     items = board.get("items")
     if not isinstance(items, list):
         return None
@@ -363,6 +371,8 @@ def _board_binding(board: Mapping[str, Any]) -> Optional[List[Tuple[str, str]]]:
 
 
 def _board_proof(board: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(board, dict):
+        return None
     proof = board.get("projection")
     if not isinstance(proof, dict):
         return None
@@ -398,6 +408,8 @@ def _valid_board(board: Any, now: dt.datetime) -> Tuple[bool, List[str], Optiona
         issues.append("board_generated_at_" + generated_issue)
     if generated is not None and generated > now:
         issues.append("board_generated_at_future")
+    if generated is not None and (now - generated).total_seconds() > 300:
+        issues.append("board_generation_stale")
     freshness = board.get("freshness")
     if not isinstance(freshness, dict):
         issues.append("board_freshness_invalid")
@@ -409,6 +421,8 @@ def _valid_board(board: Any, now: dt.datetime) -> Tuple[bool, List[str], Optiona
             issues.append("board_verified_at_" + verified_issue)
         if verified is not None and verified > now:
             issues.append("board_verified_at_future")
+        if verified is not None and (now - verified).total_seconds() > SOURCE_MAX_AGE_SECONDS:
+            issues.append("board_verification_stale")
         if proof is not None and freshness.get("verified_at") != proof.get("source_verified_at"):
             issues.append("board_proof_freshness_mismatch")
     if _board_binding(board) is None:
@@ -435,8 +449,17 @@ def _health_current(health: Any, board: Mapping[str, Any], now: dt.datetime) -> 
     if generated is not None and generated > now:
         issues.append("health_generated_at_future")
     verified = freshness.get("verified_at") if isinstance(freshness, dict) else None
+    verified_time, verified_issue = _parse_time(verified)
+    if verified_issue:
+        issues.append("health_verified_at_" + verified_issue)
+    elif verified_time > now:
+        issues.append("health_verified_at_future")
+    elif (now - verified_time).total_seconds() > SOURCE_MAX_AGE_SECONDS:
+        issues.append("health_verification_stale")
     proof = _board_proof(board)
-    if proof is not None and verified != proof.get("source_verified_at"):
+    if proof is None:
+        issues.append("health_board_proof_missing")
+    elif verified != proof.get("source_verified_at"):
         issues.append("health_verified_at_proof_mismatch")
     max_stale = health.get("max_stale_seconds")
     board_age = health.get("board_age_seconds")
@@ -471,7 +494,7 @@ def _project_focus(payload: Any, now: dt.datetime, board_current: bool, meta: Ma
         work_id = _identity(row.get("work_id"))
         if key is None or work_id is None:
             return _unavailable(ref, "focus_identity_invalid", observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
-        if not isinstance(row.get("group"), str) or row.get("group") not in FOCUS_GROUPS or not isinstance(row.get("state"), str):
+        if not isinstance(row.get("group"), str) or row.get("group") not in FOCUS_GROUPS or _identity(row.get("state"), 80) is None:
             return _unavailable(ref, "focus_state_invalid", observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
         if not isinstance(row.get("current_match"), str) or not isinstance(row.get("source_applicability"), str):
             return _unavailable(ref, "focus_match_invalid", observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
@@ -493,7 +516,7 @@ def _project_focus(payload: Any, now: dt.datetime, board_current: bool, meta: Ma
             "work_id": work_id,
             "project": _clean_text(row.get("project"), 160),
             "group": row["group"],
-            "state": _clean_text(row["state"], 80) or "unknown",
+            "state": row["state"],
             "current_match": _clean_text(row["current_match"], 80) or "unknown",
             "source_applicability": _clean_text(row["source_applicability"], 80) or "unknown",
             "snooze_until": snooze,
@@ -503,6 +526,7 @@ def _project_focus(payload: Any, now: dt.datetime, board_current: bool, meta: Ma
             "transport": _clean_text(row.get("transport"), 80) or "unknown",
             "response_count": response_count,
         })
+    projected.sort(key=lambda row: row["group"] != "decision")
     omitted = max(0, len(projected) - MAX_FOCUS_REQUESTS)
     projected = projected[:MAX_FOCUS_REQUESTS]
     source_current = bool(board_current and payload.get("work_verification") == "current"
@@ -563,7 +587,8 @@ def _project_local_agent(payload: Any, now: dt.datetime, meta: Mapping[str, Any]
                 return _unavailable(ref, "local_agent_event_" + issue, observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
         if (not isinstance(activity.get("elapsed_seconds"), (int, float))
                 or isinstance(activity.get("elapsed_seconds"), bool)
-                or not math.isfinite(float(activity["elapsed_seconds"]))
+                or (type(activity["elapsed_seconds"]) is int and activity["elapsed_seconds"].bit_length() > 53)
+                or not math.isfinite(activity["elapsed_seconds"])
                 or activity["elapsed_seconds"] < 0):
             return _unavailable(ref, "local_agent_elapsed_invalid", observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
         if type(activity.get("budget_seconds")) is not int or activity["budget_seconds"] < 1:
@@ -680,8 +705,14 @@ def _observe_iris(now: dt.datetime, opener: Any = None) -> Tuple[Dict[str, Any],
         } if isinstance(coverage, dict) else None
     health_summary["current"] = health_current and health.get("status") == 200
     health_summary["issues"] = health_issues
-    focus_summary = _project_focus(focus.get("data"), collection_now, current, _http_source_summary(focus, "/focus.json"))
-    local_summary = _project_local_agent(local_agent.get("data"), collection_now, _http_source_summary(local_agent, "/local-agent.json"))
+    try:
+        focus_summary = _project_focus(focus.get("data"), collection_now, current, _http_source_summary(focus, "/focus.json"))
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+        focus_summary = _unavailable("/focus.json", "focus_projection_invalid")
+    try:
+        local_summary = _project_local_agent(local_agent.get("data"), collection_now, _http_source_summary(local_agent, "/local-agent.json"))
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+        local_summary = _unavailable("/local-agent.json", "local_agent_projection_invalid")
     iris = {"health": health_summary, "board": board_summary, "focus": focus_summary, "local_agent": local_summary,
             "limits": ["IRIS projections are read-only; task status, model result, accepted action, human answer, and authority remain separate"]}
     return iris, after_data if isinstance(after_data, dict) else None
@@ -724,7 +755,10 @@ def _load_sweep(path: Optional[str], now: dt.datetime) -> Dict[str, Any]:
     ref = _reference(path, "sweep-outcome")
     if path is None:
         return _unavailable(ref, "not_configured")
-    data, issue, outcome_sha = load_input(path)
+    try:
+        data, issue, outcome_sha = load_input(path)
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        data, issue, outcome_sha = None, "sweep_outcome_invalid", None
     if issue is not None or not isinstance(data, dict):
         return _unavailable(ref, issue or "sweep_outcome_invalid", observed_at=_stamp(now), sha256=outcome_sha)
     digest = data.get("daily_digest")
