@@ -420,6 +420,29 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(ledger["sess"]["attempts"], 1)
         self.assertTrue(ledger["sess"]["error"].startswith("PermissionError:"))
 
+    def test_disappearing_transcript_during_marker_read_is_missing(self):
+        env = {"IMPRINT_CONFIG": self.cfg_path, "MACROSEAT_QUIET_SECONDS": "0"}
+        with unittest.mock.patch.dict(os.environ, env), \
+             unittest.mock.patch.object(td, "find_taste_markers",
+                                        side_effect=FileNotFoundError("disappeared")), \
+             unittest.mock.patch.object(td, "call_model") as model:
+            td.main([])
+        record = td.load_ledger(td.ledger_path(self.root))["sess"]
+        self.assertEqual(record["status"], "transcript_missing")
+        self.assertNotIn("attempts", record)
+        model.assert_not_called()
+
+    def test_missing_model_binary_remains_retryable(self):
+        env = {"IMPRINT_CONFIG": self.cfg_path, "MACROSEAT_QUIET_SECONDS": "0"}
+        with unittest.mock.patch.dict(os.environ, env), \
+             unittest.mock.patch.object(td, "call_model",
+                                        side_effect=FileNotFoundError("model missing")):
+            td.main([])
+        record = td.load_ledger(td.ledger_path(self.root))["sess"]
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(record["attempts"], 1)
+        self.assertTrue(record["error"].startswith("FileNotFoundError:"))
+
     def test_error_retries_then_goes_terminal(self):
         env = {"IMPRINT_CONFIG": self.cfg_path, "MACROSEAT_QUIET_SECONDS": "0"}
         with unittest.mock.patch.dict(os.environ, env), \

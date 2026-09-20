@@ -581,7 +581,10 @@ def process_session(entry, registry, now_iso):
             return {"status": "skipped_trivial", "processed_at": now_iso,
                     "user_turns": len(user_turns), "chars": total_chars}
         excerpt, truncated = build_excerpt(turns)
-        markers = find_taste_markers(path)
+        try:
+            markers = find_taste_markers(path)
+        except FileNotFoundError:
+            return {"status": "transcript_missing", "processed_at": now_iso}
         prompt = build_prompt(excerpt, markers, registry)
         try:
             specimens = parse_specimens(call_model(prompt))
