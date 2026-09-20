@@ -328,6 +328,24 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(opener.request.method, "GET")
         self.assertEqual(opener.request.full_url, "http://127.0.0.1:4180/healthz")
 
+    def test_observation_uses_response_end_with_subsecond_precision(self):
+        before = NOW + dt.timedelta(microseconds=100000)
+        after = NOW + dt.timedelta(microseconds=900000)
+        opener = self.Opener(self.Response(b"{}"))
+        with mock.patch.object(brief, "_now", side_effect=[before, after]):
+            result = brief.fetch_endpoint("/healthz", opener=opener)
+        self.assertEqual(brief._parse_time(result["observed_at"])[0], after)
+        self.assertGreater(brief._parse_time(result["observed_at"])[0], before)
+
+    def test_digest_omission_count_accumulates_prior_truncation(self):
+        result = brief._shrink({"schema": brief.SCHEMA, "limits": [],
+                              "padding": "x" * 8200,
+                              "sweep_digest": {"untrusted_advisory_text": "d" * 4000,
+                                               "omitted_chars": 2000}})
+        digest = result["sweep_digest"]
+        self.assertEqual(digest["omitted_chars"], 6000 - len(digest["untrusted_advisory_text"]))
+        self.assertEqual(len(digest["untrusted_advisory_text"]), 1000)
+
     def test_redirect_is_refused_and_unallowlisted_route_is_not_requested(self):
         error = HTTPError("http://127.0.0.1:4180/healthz", 302, "redirect", {}, io.BytesIO())
         opener = self.Opener(error=error)

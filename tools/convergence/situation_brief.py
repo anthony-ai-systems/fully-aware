@@ -52,7 +52,7 @@ HEX64 = set("0123456789abcdefABCDEF")
 
 
 def _stamp(value: dt.datetime) -> str:
-    return value.astimezone(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return value.astimezone(dt.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _now(value: Optional[dt.datetime] = None) -> dt.datetime:
@@ -221,6 +221,7 @@ def fetch_endpoint(path: str, *, now: Optional[dt.datetime] = None, opener: Any 
                     return {"path": path, "status": status, "data": None, "sha256": None,
                             "bytes": 0, "observed_at": observed, "issue": "response_length_invalid"}
             raw = response.read(HTTP_MAX_BYTES + 1)
+            observed = _stamp(_now(now))
     except HTTPError as error:
         if 300 <= int(error.code) < 400:
             return {"path": path, "status": int(error.code), "data": None, "sha256": None,
@@ -885,7 +886,7 @@ def _shrink(brief: Dict[str, Any]) -> Dict[str, Any]:
         text = digest.get("untrusted_advisory_text")
         if isinstance(text, str) and len(text) > 1000:
             digest["untrusted_advisory_text"] = text[:1000]
-            digest["omitted_chars"] = max(digest.get("omitted_chars", 0), len(text) - 1000)
+            digest["omitted_chars"] = digest.get("omitted_chars", 0) + len(text) - 1000
             add_limit("digest excerpt shortened to the minimum retained evidence")
 
     if encoded() > MAX_OUTPUT_CHARS and isinstance(focus, dict):
@@ -912,7 +913,7 @@ def _shrink(brief: Dict[str, Any]) -> Dict[str, Any]:
         text = digest.get("untrusted_advisory_text")
         if isinstance(text, str) and text:
             digest["untrusted_advisory_text"] = ""
-            digest["omitted_chars"] = max(digest.get("omitted_chars", 0), len(text))
+            digest["omitted_chars"] = digest.get("omitted_chars", 0) + len(text)
             add_limit("digest excerpt omitted by output bound")
     if encoded() > MAX_OUTPUT_CHARS:
         return {
