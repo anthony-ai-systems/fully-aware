@@ -216,6 +216,86 @@ class FileTests(unittest.TestCase):
         self.assertEqual(baseline["omitted_count"], 1)
         self.assertEqual(baseline["ranking"], "none")
 
+    def test_bound_keeps_current_decision_digest_and_one_lane_projection(self):
+        values = {"/data/board.json": board(), "/healthz": health(), "/focus.json": focus(),
+                  "/local-agent.json": local_agent()}
+        focus_value = focus()
+        focus_value["requests"] = []
+        for index in range(5):
+            row = focus()["requests"][0].copy()
+            row.update(key="focus-%d" % index, work_id="work-%d" % index,
+                       group="decision" if index == 0 else "reconciliation",
+                       question="Q" * 280, recommendation="R" * 280,
+                       recheck_needed=True, snooze_until="2026-09-21T00:00:00Z")
+            focus_value["requests"].append(row)
+        focus_value["counts"]["decision"] = 1
+        values["/focus.json"] = focus_value
+        large_digest = self.root / "priority.md"
+        large_digest.write_text("D" * 4000, encoding="utf-8")
+        outcome = self.root / "outcome.json"
+        outcome.write_text(json.dumps({"daily_digest": {
+            "path": str(large_digest), "sha256": hashlib.sha256(b"D" * 4000).hexdigest(),
+            "evidence_cutoff": VERIFIED, "timezone": "America/Los_Angeles", "date": "2026-09-20"}}), encoding="utf-8")
+        plan_value = plans()
+        plan_value["lanes"][0]["waiting_on_anthony"] = ["wait-%d" % i for i in range(12)]
+        plan_value["lanes"][0]["blocked"] = ["block-%d" % i for i in range(12)]
+        endpoints = Endpoints(values)
+        boot_path = self.write_json("boot.json", boot_pack())
+        plans_path = self.write_json("plans.json", plan_value)
+        with mock.patch.object(brief, "fetch_endpoint", side_effect=endpoints):
+            output = brief.build_brief(str(boot_path), str(plans_path), str(outcome), now=NOW)
+        self.assertLessEqual(len(json.dumps(output, separators=(",", ":"))), brief.MAX_OUTPUT_CHARS)
+        self.assertGreaterEqual(len(output["sweep_digest"]["untrusted_advisory_text"]), 1000)
+        self.assertEqual(output["iris"]["focus"]["requests"][0]["group"], "decision")
+        row = output["iris"]["focus"]["requests"][0]
+        self.assertEqual(row["key"], "focus-0")
+        self.assertEqual(row["work_id"], "work-0")
+        self.assertTrue(row["recheck_needed"])
+        self.assertEqual(row["response_count"], 0)
+        self.assertLessEqual(output["iris"]["focus"]["omitted_requests"], 4)
+        self.assertNotIn("selected_lanes", output["work"]["sources"]["plans"])
+        lane = next(item for item in output["work"]["selected_lanes"] if item["name"] == "fully-aware-convergence")
+        self.assertEqual(len(lane["waiting_on_anthony"]), 3)
+        self.assertEqual(lane["waiting_on_anthony_omitted"], 7)
+        self.assertEqual(len(lane["blocked"]), 3)
+        self.assertEqual(lane["blocked_omitted"], 7)
+
+    def test_final_collection_time_prevents_request_timing_false_future(self):
+        values = {"/data/board.json": board(), "/healthz": health(), "/focus.json": focus(),
+                  "/local-agent.json": local_agent()}
+        def endpoint(path, **_kwargs):
+            return {"path": path, "status": 200, "data": copy.deepcopy(values[path]), "sha256": "c" * 64,
+                    "bytes": 2, "observed_at": "2026-09-20T18:00:02Z", "issue": None}
+        boot_path, plans_path = self.paths()
+        with mock.patch.object(brief, "fetch_endpoint", side_effect=endpoint):
+            output = brief.build_brief(boot_path, plans_path, now=NOW)
+        self.assertTrue(output["iris"]["board"]["current"])
+        self.assertTrue(output["iris"]["focus"]["current"])
+        self.assertEqual(output["iris"]["health"]["freshness"]["verified_at"], VERIFIED)
+        self.assertEqual(brief._time_state("2026-09-20T18:00:00.100000Z", NOW)[2], "timestamp_future")
+
+    def test_malformed_enum_age_and_numeric_fields_stay_local(self):
+        meta = {"reference": "/focus.json", "sha256": "c" * 64, "observed_at": NOW_TEXT}
+        bad_focus = focus(); bad_focus["requests"][0]["group"] = []
+        self.assertEqual(brief._project_focus(bad_focus, NOW, True, meta)["availability"], "unavailable")
+        bad_health = health(); bad_health["max_stale_seconds"] = []
+        current, issues = brief._health_current(bad_health, board(), NOW)
+        self.assertFalse(current); self.assertIn("health_age_invalid", issues)
+        bad_local = local_agent("fresh"); bad_local["activity"]["elapsed_seconds"] = float("nan")
+        local = brief._project_local_agent(bad_local, NOW, {**meta, "reference": "/local-agent.json"})
+        self.assertEqual(local["availability"], "unavailable")
+        bad_local = local_agent("fresh"); bad_local["freshness"] = []
+        local = brief._project_local_agent(bad_local, NOW, {**meta, "reference": "/local-agent.json"})
+        self.assertEqual(local["availability"], "unavailable")
+
+    def test_fresh_wrapper_with_old_activity_is_downgraded(self):
+        payload = local_agent("fresh")
+        payload["activity"]["updated_at"] = "2026-09-20T17:00:00Z"
+        result = brief._project_local_agent(payload, NOW, {"reference": "/local-agent.json", "sha256": "c" * 64, "observed_at": NOW_TEXT})
+        self.assertFalse(result["current"])
+        self.assertEqual(result["freshness"], "stale")
+        self.assertIn("local_agent_activity_stale", result["issues"])
+
 
 class TransportTests(unittest.TestCase):
     class Response:

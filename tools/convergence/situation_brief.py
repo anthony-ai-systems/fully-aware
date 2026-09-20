@@ -13,6 +13,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -86,8 +87,9 @@ def _time_state(value: Any, now: dt.datetime, *, allow_date: bool = False) -> Tu
     parsed, issue = _parse_time(value, allow_date=allow_date)
     if parsed is None:
         return None, None, issue
-    age = int((now - parsed).total_seconds())
-    if age < 0:
+    delta = (now - parsed).total_seconds()
+    age = int(delta)
+    if delta < 0:
         return None, age, "timestamp_future"
     return (value.strip() if isinstance(value, str) else None), age, None
 
@@ -157,6 +159,25 @@ def _source_metadata(reference: str, sha256: Optional[str], observed_at: str,
 def _first_issue(meta: Mapping[str, Any]) -> Optional[str]:
     issues = meta.get("issues")
     return issues[0] if isinstance(issues, list) and issues else None
+
+
+def _bounded_issues(value: Any, limit: int = 12) -> List[str]:
+    if not isinstance(value, list):
+        return ["issues_invalid"]
+    result = [item for item in value if isinstance(item, str) and item]
+    if len(result) > limit:
+        return result[:limit] + ["additional_issues_omitted"]
+    return result
+
+
+def _unique_limits(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    result: List[str] = []
+    for item in value:
+        if isinstance(item, str) and item and item not in result:
+            result.append(item)
+    return result
 
 
 def _identity(value: Any, limit: int = 160) -> Optional[str]:
@@ -273,7 +294,7 @@ def _summarize_work_view(boot_path: str, plans_path: str, now: dt.datetime) -> D
             "source_timestamp": source.get("source_timestamp"),
             "age_seconds": source.get("age_seconds"),
             "coverage": source.get("coverage", "unknown"),
-            "issues": list(source.get("issues", [])) if isinstance(source.get("issues"), list) else ["issues_invalid"],
+            "issues": _bounded_issues(source.get("issues")),
         }
         projection = source.get("projection") if isinstance(source.get("projection"), dict) else {}
         if name == "boot_pack":
@@ -285,23 +306,29 @@ def _summarize_work_view(boot_path: str, plans_path: str, now: dt.datetime) -> D
             for lane in lanes:
                 if not isinstance(lane, dict) or lane.get("name") not in SELECTED_LANES:
                     continue
+                waiting_raw = lane.get("waiting_on_anthony") if isinstance(lane.get("waiting_on_anthony"), list) else []
+                blocked_raw = lane.get("blocked") if isinstance(lane.get("blocked"), list) else []
+                waiting_values = [_clean_text(x, 180) for x in waiting_raw if _clean_text(x, 180) is not None]
+                blocked_values = [_clean_text(x, 180) for x in blocked_raw if _clean_text(x, 180) is not None]
                 selected.append({
                     "name": lane.get("name"),
                     "step": _clean_text(lane.get("step")),
                     "health": lane.get("health"),
                     "updated": lane.get("updated"),
-                    "waiting_on_anthony": [_clean_text(x, 180) for x in (lane.get("waiting_on_anthony") or [])
-                                             if _clean_text(x, 180) is not None],
-                    "blocked": [_clean_text(x, 180) for x in (lane.get("blocked") or [])
-                                if _clean_text(x, 180) is not None],
+                    "waiting_on_anthony": waiting_values[:3],
+                    "waiting_on_anthony_omitted": max(0, len(waiting_values) - 3),
+                    "blocked": blocked_values[:3],
+                    "blocked_omitted": max(0, len(blocked_values) - 3),
                 })
-            source_out["selected_lanes"] = selected
+            source_out["_selected_lanes"] = selected
             source_out["reported_lane_count"] = projection.get("reported_lane_count")
             source_out["valid_lane_count"] = projection.get("valid_lane_count")
             valid_count = projection.get("valid_lane_count")
             source_out["other_lane_count"] = max(0, valid_count - len(selected)) if isinstance(valid_count, int) else None
         result_sources[name] = source_out
 
+    plans_source = result_sources.get("plans", {})
+    selected_lanes = plans_source.pop("_selected_lanes", []) if isinstance(plans_source, dict) else []
     return {
         "schema": view.get("schema", "work-view/v1"),
         "snapshot_id": view.get("snapshot_id"),
@@ -309,7 +336,7 @@ def _summarize_work_view(boot_path: str, plans_path: str, now: dt.datetime) -> D
         "advisory": True,
         "no_commands": True,
         "sources": result_sources,
-        "selected_lanes": result_sources.get("plans", {}).get("selected_lanes", []),
+        "selected_lanes": selected_lanes,
         "other_lane_count": result_sources.get("plans", {}).get("other_lane_count"),
         "limits": ["selected lanes are a bounded projection; other lanes are represented by count only"],
     }
@@ -394,7 +421,7 @@ def _health_current(health: Any, board: Mapping[str, Any], now: dt.datetime) -> 
         return False, ["health_not_object"]
     if health.get("schema_version") != 3:
         issues.append("health_schema_invalid")
-    if health.get("status") not in {"ok", "partial"}:
+    if not isinstance(health.get("status"), str) or health.get("status") not in {"ok", "partial"}:
         issues.append("health_status_not_current")
     if health.get("last_error") is not None:
         issues.append("health_last_error")
@@ -416,7 +443,7 @@ def _health_current(health: Any, board: Mapping[str, Any], now: dt.datetime) -> 
         issues.append("health_age_invalid")
     elif board_age > min(300, max_stale):
         issues.append("health_board_stale")
-    if generated is not None and max_stale is not None and int((now - generated).total_seconds()) > min(300, max_stale):
+    if generated is not None and type(max_stale) is int and max_stale >= 0 and (now - generated).total_seconds() > min(300, max_stale):
         issues.append("health_generation_stale")
     return not issues, issues
 
@@ -443,7 +470,7 @@ def _project_focus(payload: Any, now: dt.datetime, board_current: bool, meta: Ma
         work_id = _identity(row.get("work_id"))
         if key is None or work_id is None:
             return _unavailable(ref, "focus_identity_invalid", observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
-        if row.get("group") not in FOCUS_GROUPS or not isinstance(row.get("state"), str):
+        if not isinstance(row.get("group"), str) or row.get("group") not in FOCUS_GROUPS or not isinstance(row.get("state"), str):
             return _unavailable(ref, "focus_state_invalid", observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
         if not isinstance(row.get("current_match"), str) or not isinstance(row.get("source_applicability"), str):
             return _unavailable(ref, "focus_match_invalid", observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
@@ -469,6 +496,7 @@ def _project_focus(payload: Any, now: dt.datetime, board_current: bool, meta: Ma
             "current_match": _clean_text(row["current_match"], 80) or "unknown",
             "source_applicability": _clean_text(row["source_applicability"], 80) or "unknown",
             "snooze_until": snooze,
+            "recheck_needed": row.get("recheck_needed") if isinstance(row.get("recheck_needed"), bool) else None,
             "question": _clean_text(row["question"]),
             "recommendation": _clean_text(row["recommendation"]),
             "transport": _clean_text(row.get("transport"), 80) or "unknown",
@@ -476,7 +504,8 @@ def _project_focus(payload: Any, now: dt.datetime, board_current: bool, meta: Ma
         })
     omitted = max(0, len(projected) - MAX_FOCUS_REQUESTS)
     projected = projected[:MAX_FOCUS_REQUESTS]
-    source_current = bool(board_current and payload.get("work_verification") == "current" and time_issue is None)
+    source_current = bool(board_current and payload.get("work_verification") == "current"
+                          and time_issue is None and age is not None and age <= 300)
     return {
         **_source_metadata(ref, meta.get("sha256"), meta.get("observed_at", _stamp(now)), status=meta.get("http_status"), byte_count=meta.get("bytes")),
         "availability": "available",
@@ -484,7 +513,7 @@ def _project_focus(payload: Any, now: dt.datetime, board_current: bool, meta: Ma
         "freshness": "fresh" if source_current else "unknown",
         "source_timestamp": observed_text,
         "age_seconds": age,
-        "work_verification": payload.get("work_verification") if payload.get("work_verification") in {"current", "stale", "unavailable"} else "unknown",
+        "work_verification": payload.get("work_verification") if isinstance(payload.get("work_verification"), str) and payload.get("work_verification") in {"current", "stale", "unavailable"} else "unknown",
         "counts": {group: counts[group] for group in FOCUS_GROUPS},
         "request_count": len(requests),
         "omitted_requests": omitted,
@@ -504,10 +533,11 @@ def _project_local_agent(payload: Any, now: dt.datetime, meta: Mapping[str, Any]
     if time_issue:
         return _unavailable(ref, "local_agent_" + time_issue, observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
     freshness = payload.get("freshness")
-    if freshness not in {"fresh", "stale", "unavailable"}:
+    if not isinstance(freshness, str) or freshness not in {"fresh", "stale", "unavailable"}:
         return _unavailable(ref, "local_agent_freshness_invalid", observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
     activity = payload.get("activity")
     projected_activity = None
+    activity_updated_age: Optional[int] = None
     if activity is not None:
         if not isinstance(activity, dict):
             return _unavailable(ref, "local_agent_activity_invalid", observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
@@ -524,11 +554,16 @@ def _project_local_agent(payload: Any, now: dt.datetime, meta: Mapping[str, Any]
             _text, _age, issue = _time_state(activity.get(key), now)
             if issue:
                 return _unavailable(ref, "local_agent_activity_" + issue, observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
+            if key == "updated_at":
+                activity_updated_age = _age
         if activity.get("last_event_at") is not None:
             _text, _age, issue = _time_state(activity.get("last_event_at"), now)
             if issue:
                 return _unavailable(ref, "local_agent_event_" + issue, observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
-        if not isinstance(activity.get("elapsed_seconds"), (int, float)) or isinstance(activity.get("elapsed_seconds"), bool) or activity["elapsed_seconds"] < 0:
+        if (not isinstance(activity.get("elapsed_seconds"), (int, float))
+                or isinstance(activity.get("elapsed_seconds"), bool)
+                or not math.isfinite(float(activity["elapsed_seconds"]))
+                or activity["elapsed_seconds"] < 0):
             return _unavailable(ref, "local_agent_elapsed_invalid", observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
         if type(activity.get("budget_seconds")) is not int or activity["budget_seconds"] < 1:
             return _unavailable(ref, "local_agent_budget_invalid", observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
@@ -539,7 +574,9 @@ def _project_local_agent(payload: Any, now: dt.datetime, meta: Mapping[str, Any]
             artifact = {"label": _clean_text(artifact["label"], 120) or "", "sha256": artifact["sha256"], "bytes": artifact["bytes"]}
         review = activity.get("review")
         if review is not None:
-            if not isinstance(review, dict) or review.get("verdict") not in {"accepted", "needs_revision", "rejected"} or _clean_text(review.get("summary"), 500) is None:
+            if (not isinstance(review, dict) or not isinstance(review.get("verdict"), str)
+                    or review.get("verdict") not in {"accepted", "needs_revision", "rejected"}
+                    or _clean_text(review.get("summary"), 500) is None):
                 return _unavailable(ref, "local_agent_review_invalid", observed_at=meta.get("observed_at"), sha256=meta.get("sha256"))
             _reviewed, _age, issue = _time_state(review.get("reviewed_at"), now)
             if issue:
@@ -557,37 +594,41 @@ def _project_local_agent(payload: Any, now: dt.datetime, meta: Mapping[str, Any]
     return {
         **_source_metadata(ref, meta.get("sha256"), meta.get("observed_at", _stamp(now)), status=meta.get("http_status"), byte_count=meta.get("bytes")),
         "availability": "available",
-        "current": payload.get("status") == "ok" and freshness == "fresh",
-        "freshness": freshness,
+        "current": payload.get("status") == "ok" and freshness == "fresh" and activity_updated_age is not None and activity_updated_age <= 300,
+        "freshness": ("stale" if freshness == "fresh" and (activity_updated_age is None or activity_updated_age > 300) else freshness),
         "source_timestamp": observed_text,
         "age_seconds": age,
         "status": _clean_text(payload.get("status"), 40) or "unknown",
         "reason": _clean_text(payload.get("reason"), 240) or "unknown",
         "activity": projected_activity,
         "process_inference": "unsupported",
-        "issues": [],
+        "issues": (["local_agent_activity_stale"] if freshness == "fresh" and (activity_updated_age is None or activity_updated_age > 300) else []),
         "limits": ["stale or accepted activity is an observation; no process-running or business-acceptance claim is inferred"],
     }
 
 
 def _observe_iris(now: dt.datetime, opener: Any = None) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     order: List[str] = []
-    board_before = fetch_endpoint("/data/board.json", now=now, opener=opener); order.append("/data/board.json")
-    health = fetch_endpoint("/healthz", now=now, opener=opener); order.append("/healthz")
-    focus = fetch_endpoint("/focus.json", now=now, opener=opener); order.append("/focus.json")
-    local_agent = fetch_endpoint("/local-agent.json", now=now, opener=opener); order.append("/local-agent.json")
-    board_after = fetch_endpoint("/data/board.json", now=now, opener=opener); order.append("/data/board.json")
+    board_before = fetch_endpoint("/data/board.json", opener=opener); order.append("/data/board.json")
+    health = fetch_endpoint("/healthz", opener=opener); order.append("/healthz")
+    focus = fetch_endpoint("/focus.json", opener=opener); order.append("/focus.json")
+    local_agent = fetch_endpoint("/local-agent.json", opener=opener); order.append("/local-agent.json")
+    board_after = fetch_endpoint("/data/board.json", opener=opener); order.append("/data/board.json")
+
+    collection_now, collection_issue = _parse_time(board_after.get("observed_at"))
+    if collection_issue is not None or collection_now is None:
+        collection_now = _now()
 
     before_data, after_data = board_before.get("data"), board_after.get("data")
-    before_valid, before_issues, _before_generated, before_proof = _valid_board(before_data, now)
-    after_valid, after_issues, _after_generated, after_proof = _valid_board(after_data, now)
+    before_valid, before_issues, _before_generated, before_proof = _valid_board(before_data, collection_now)
+    after_valid, after_issues, _after_generated, after_proof = _valid_board(after_data, collection_now)
     issues = list(dict.fromkeys(before_issues + after_issues))
     coherent = before_valid and after_valid and before_proof == after_proof and _board_binding(before_data) == _board_binding(after_data)
     if before_proof != after_proof:
         issues.append("producer_proof_mismatch")
     if _board_binding(before_data) != _board_binding(after_data):
         issues.append("ordered_work_binding_mismatch")
-    health_current, health_issues = _health_current(health.get("data"), after_data if isinstance(after_data, dict) else {}, now)
+    health_current, health_issues = _health_current(health.get("data"), after_data if isinstance(after_data, dict) else {}, collection_now)
     issues.extend(health_issues)
     current = bool(coherent and health_current and board_after.get("status") == 200)
     board_summary: Dict[str, Any] = {
@@ -626,7 +667,8 @@ def _observe_iris(now: dt.datetime, opener: Any = None) -> Tuple[Dict[str, Any],
             "reason": _clean_text(freshness.get("reason"), 80),
             "verified_at": (freshness.get("verified_at").strip()
                             if isinstance(freshness.get("verified_at"), str)
-                            and _parse_time(freshness.get("verified_at"))[1] is not None else None),
+                            and _parse_time(freshness.get("verified_at"))[0] is not None
+                            and _parse_time(freshness.get("verified_at"))[1] is None else None),
         } if isinstance(freshness, dict) else None
         coverage = health_data.get("coverage")
         health_summary["coverage"] = {
@@ -637,8 +679,8 @@ def _observe_iris(now: dt.datetime, opener: Any = None) -> Tuple[Dict[str, Any],
         } if isinstance(coverage, dict) else None
     health_summary["current"] = health_current and health.get("status") == 200
     health_summary["issues"] = health_issues
-    focus_summary = _project_focus(focus.get("data"), now, current, _http_source_summary(focus, "/focus.json"))
-    local_summary = _project_local_agent(local_agent.get("data"), now, _http_source_summary(local_agent, "/local-agent.json"))
+    focus_summary = _project_focus(focus.get("data"), collection_now, current, _http_source_summary(focus, "/focus.json"))
+    local_summary = _project_local_agent(local_agent.get("data"), collection_now, _http_source_summary(local_agent, "/local-agent.json"))
     iris = {"health": health_summary, "board": board_summary, "focus": focus_summary, "local_agent": local_summary,
             "limits": ["IRIS projections are read-only; task status, model result, accepted action, human answer, and authority remain separate"]}
     return iris, after_data if isinstance(after_data, dict) else None
@@ -792,49 +834,86 @@ def _deadline_baseline(board: Optional[Mapping[str, Any]], board_current: bool, 
 
 
 def _shrink(brief: Dict[str, Any]) -> Dict[str, Any]:
-    """Reduce source prose while preserving identity and evidence metadata."""
+    """Reduce optional detail while retaining the current decision evidence."""
     def encoded() -> int:
         return len(json.dumps(brief, ensure_ascii=False, separators=(",", ":")))
-    digest = brief.get("sweep_digest")
-    for limit in (2000, 1000, 400, 0):
-        if encoded() <= MAX_OUTPUT_CHARS:
-            break
-        if isinstance(digest, dict) and isinstance(digest.get("untrusted_advisory_text"), str):
-            text = digest["untrusted_advisory_text"]
-            digest["untrusted_advisory_text"] = text[:limit]
-            digest["omitted_chars"] = max(digest.get("omitted_chars", 0), len(text) - limit)
-            brief.setdefault("limits", []).append("output bound shortened the digest excerpt")
+
+    def add_limit(text: str) -> None:
+        limits = brief.setdefault("limits", [])
+        if text not in limits:
+            limits.append(text)
+
+    brief["limits"] = _unique_limits(brief.get("limits"))
+    work = brief.get("work") if isinstance(brief.get("work"), dict) else None
+    iris = brief.get("iris") if isinstance(brief.get("iris"), dict) else None
+    focus = iris.get("focus") if isinstance(iris, dict) and isinstance(iris.get("focus"), dict) else None
+    digest = brief.get("sweep_digest") if isinstance(brief.get("sweep_digest"), dict) else None
+
     if encoded() > MAX_OUTPUT_CHARS:
-        for request in brief.get("iris", {}).get("focus", {}).get("requests", []):
-            for key in ("question", "recommendation"):
-                if isinstance(request.get(key), str):
-                    request[key] = request[key][:120]
-        brief.setdefault("limits", []).append("output bound shortened focus wording")
-    if encoded() > MAX_OUTPUT_CHARS:
-        # The normal projections are already bounded.  This final fixed
-        # reduction keeps a hostile but structurally valid source from making
-        # stdout unbounded while retaining source status and hashes.
-        work = brief.get("work")
-        if isinstance(work, dict):
-            work["selected_lanes"] = []
-            work["limits"] = ["selected lane details omitted by output bound"]
-            sources = work.get("sources")
-            if isinstance(sources, dict):
-                boot = sources.get("boot_pack")
-                if isinstance(boot, dict) and isinstance(boot.get("summary"), dict):
-                    boot["summary"]["warning_summaries"] = []
-        iris = brief.get("iris")
+        # Before dropping source rows, compact duplicated transport metadata.
         if isinstance(iris, dict):
-            focus = iris.get("focus")
-            if isinstance(focus, dict):
-                focus["requests"] = []
-            local = iris.get("local_agent")
-            if isinstance(local, dict) and isinstance(local.get("activity"), dict):
-                local["activity"]["summary"] = ""
+            board = iris.get("board")
+            if isinstance(board, dict):
+                for side in ("before", "after"):
+                    value = board.get(side)
+                    if isinstance(value, dict):
+                        board[side] = {"reference": value.get("reference"), "sha256": value.get("sha256"),
+                                       "http_status": value.get("http_status")}
             health = iris.get("health")
             if isinstance(health, dict):
                 health["coverage"] = None
-        brief.setdefault("limits", []).append("optional detail omitted by output bound")
+        add_limit("transport metadata compacted to preserve bounded current detail")
+
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(focus, dict):
+        rows = focus.get("requests") if isinstance(focus.get("requests"), list) else []
+        total = focus.get("request_count") if type(focus.get("request_count")) is int else len(rows)
+        decision = [row for row in rows if isinstance(row, dict) and row.get("group") == "decision"]
+        chosen: List[Dict[str, Any]] = []
+        if decision:
+            exact = next((row for row in decision if row.get("current_match") == "exact" and row.get("source_applicability") == "current"), decision[0])
+            chosen.append(exact)
+        for row in rows:
+            if isinstance(row, dict) and row not in chosen:
+                chosen.append(row)
+        if len(chosen) > 2:
+            chosen = chosen[:2]
+        focus["requests"] = chosen
+        focus["omitted_requests"] = max(0, total - len(chosen))
+        add_limit("non-decision focus rows omitted by output bound")
+
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(digest, dict):
+        text = digest.get("untrusted_advisory_text")
+        if isinstance(text, str) and len(text) > 1000:
+            digest["untrusted_advisory_text"] = text[:1000]
+            digest["omitted_chars"] = max(digest.get("omitted_chars", 0), len(text) - 1000)
+            add_limit("digest excerpt shortened to the minimum retained evidence")
+
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(focus, dict):
+        for request in focus.get("requests", []):
+            if isinstance(request, dict):
+                for key in ("question", "recommendation"):
+                    if isinstance(request.get(key), str):
+                        request[key] = request[key][:160]
+        add_limit("focus wording shortened by output bound")
+
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(work, dict):
+        for lane in work.get("selected_lanes", []):
+            if isinstance(lane, dict) and isinstance(lane.get("step"), str):
+                lane["step"] = lane["step"][:180]
+        add_limit("lane wording shortened by output bound")
+
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(iris, dict):
+        local = iris.get("local_agent")
+        if isinstance(local, dict) and isinstance(local.get("activity"), dict):
+            local["activity"]["summary"] = str(local["activity"].get("summary", ""))[:200]
+        add_limit("local activity summary shortened by output bound")
+
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(digest, dict):
+        text = digest.get("untrusted_advisory_text")
+        if isinstance(text, str) and text:
+            digest["untrusted_advisory_text"] = ""
+            digest["omitted_chars"] = max(digest.get("omitted_chars", 0), len(text))
+            add_limit("digest excerpt omitted by output bound")
     if encoded() > MAX_OUTPUT_CHARS:
         return {
             "schema": SCHEMA,
