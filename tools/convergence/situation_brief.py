@@ -26,13 +26,15 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, ProxyHand
 
 try:
     from .work_view import build_view, load_input
+    from .priority_context import project_priority
 except ImportError:  # Direct execution from tools/convergence.
     from work_view import build_view, load_input
+    from priority_context import project_priority
 
 
 SCHEMA = "situation-brief/v1"
 IRIS_BASE = "http://127.0.0.1:4180"
-IRIS_PATHS = ("/healthz", "/data/board.json", "/focus.json", "/local-agent.json")
+IRIS_PATHS = ("/healthz", "/data/board.json", "/focus.json", "/local-agent.json", "/priority.json")
 HTTP_MAX_BYTES = 2 * 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 3.0
 SWEEP_MAX_BYTES = 1024 * 1024
@@ -644,6 +646,7 @@ def _observe_iris(now: dt.datetime, opener: Any = None) -> Tuple[Dict[str, Any],
     health = fetch_endpoint("/healthz", opener=opener); order.append("/healthz")
     focus = fetch_endpoint("/focus.json", opener=opener); order.append("/focus.json")
     local_agent = fetch_endpoint("/local-agent.json", opener=opener); order.append("/local-agent.json")
+    priority = fetch_endpoint("/priority.json", opener=opener); order.append("/priority.json")
     board_after = fetch_endpoint("/data/board.json", opener=opener); order.append("/data/board.json")
 
     collection_now, collection_issue = _parse_time(board_after.get("observed_at"))
@@ -718,7 +721,11 @@ def _observe_iris(now: dt.datetime, opener: Any = None) -> Tuple[Dict[str, Any],
         local_summary = _project_local_agent(local_agent.get("data"), collection_now, _http_source_summary(local_agent, "/local-agent.json"))
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
         local_summary = _unavailable("/local-agent.json", "local_agent_projection_invalid")
+    priority_summary = project_priority(priority.get("data") if priority.get("status") == 200 else None,
+                                        collection_now, _http_source_summary(priority, "/priority.json"),
+                                        work_current=current)
     iris = {"health": health_summary, "board": board_summary, "focus": focus_summary, "local_agent": local_summary,
+            "priorities": priority_summary,
             "limits": ["IRIS projections are read-only; task status, model result, accepted action, human answer, and authority remain separate"]}
     return iris, after_data if isinstance(after_data, dict) else None
 
@@ -977,6 +984,39 @@ def _shrink(brief: Dict[str, Any]) -> Dict[str, Any]:
             baseline["omitted_count"] = baseline.get("omitted_count", 0) + len(baseline["items"])
             baseline["items"] = []
             add_limit("optional deadline-baseline rows omitted before priority evidence")
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(work, dict):
+        for lane in work.get("selected_lanes", []):
+            if isinstance(lane, dict):
+                for key in ("waiting_on_anthony", "blocked"):
+                    values = lane.get(key)
+                    if isinstance(values, list) and len(values) > 1:
+                        lane[key] = values[:1]
+                        lane[key + "_omitted"] = lane.get(key + "_omitted", 0) + len(values) - 1
+        summary = work.get("sources", {}).get("boot_pack", {}).get("summary", {})
+        warnings = summary.get("warning_summaries") if isinstance(summary, dict) else None
+        if isinstance(warnings, list) and len(warnings) > 1:
+            summary["warning_summaries"] = warnings[:1]
+            summary["warning_summaries_omitted"] = len(warnings) - 1
+        add_limit("additional lane and warning prose omitted before current priorities; counts retained")
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(iris, dict):
+        priority = iris.get("priorities")
+        if isinstance(priority, dict) and priority.get("rows"):
+            omitted_links = 0
+            for row in priority["rows"]:
+                omitted_links += int(row.get("url") is not None)
+                row["url"] = None
+                for key in ("label", "title", "owner", "reason", "estimate_basis"):
+                    if isinstance(row.get(key), str) and len(row[key]) > 60:
+                        row[key] = row[key][:50].rstrip() + " [excerpt]"
+            priority["omitted_links"] = omitted_links
+            add_limit("priority prose excerpted and links omitted by output bound; row identities, timestamps and counts retained")
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(work, dict):
+        lanes = work.get("selected_lanes", [])
+        if len(lanes) > 1:
+            add_limit("additional plan-lane detail omitted to retain current priorities and decision evidence")
+            while encoded() > MAX_OUTPUT_CHARS and len(lanes) > 1:
+                lanes.pop()
+                work["selected_lanes_omitted"] = work.get("selected_lanes_omitted", 0) + 1
     if encoded() > MAX_OUTPUT_CHARS:
         return {
             "schema": SCHEMA,
@@ -1022,6 +1062,20 @@ def _md(value: Any) -> str:
 def render_markdown(brief: Mapping[str, Any]) -> str:
     lines = ["# Current situation brief", "", "Read-only advisory projection; source-reported evidence retains its own freshness and authority limits.", ""]
     lines.append("As of: `%s`" % _md(brief.get("generated_at")))
+    priority = brief.get("iris", {}).get("priorities", {})
+    lines.extend(["", "## Current planning priorities", "- status `%s`; current `%s`; reason `%s`" % (
+        _md(priority.get("status")), _md(priority.get("current")), _md(priority.get("reason")))])
+    lines.append("- Reviewed source advice only; no approval or execution authority.")
+    lines.append("- Coverage: %s — %s; evidence cutoff `%s`; daily digest cutoff `%s`." % (
+        _md(priority.get("coverage")), _md(priority.get("coverage_note")),
+        _md(priority.get("evidence_cutoff")), _md(priority.get("digest_cutoff"))))
+    if priority.get("binding_note"):
+        lines.append("- %s." % _md(priority["binding_note"]))
+    for row in priority.get("rows", []):
+        lines.append("  - %s: %s — %s; owner %s; mode `%s`; binding `%s`" % (
+            _md(row.get("label")), _md(row.get("title")), _md(row.get("reason")),
+            _md(row.get("owner")), _md(row.get("mode")), _md(row.get("binding_status"))))
+    lines.append("- omitted priority rows: %s" % _md(priority.get("omitted_rows")))
     work = brief.get("work", {}) if isinstance(brief.get("work"), dict) else {}
     lines.extend(["", "## Fully Aware", "- snapshot: `%s`" % _md(work.get("snapshot_id"))])
     for name in ("boot_pack", "plans"):
