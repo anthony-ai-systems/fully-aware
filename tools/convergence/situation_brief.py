@@ -526,7 +526,12 @@ def _project_focus(payload: Any, now: dt.datetime, board_current: bool, meta: Ma
             "transport": _clean_text(row.get("transport"), 80) or "unknown",
             "response_count": response_count,
         })
-    projected.sort(key=lambda row: row["group"] != "decision")
+    # Current questions first, followed by answered/current work; withdrawn
+    # history must not crowd an actual recorded answer out of the brief.
+    projected.sort(key=lambda row: (
+        {"decision": 0, "reconciliation": 1, "prepared": 2, "later": 3, "history": 4}[row["group"]],
+        row["group"] == "history" and row["source_applicability"] == "withdrawn",
+        row["group"] == "history" and row["response_count"] == 0))
     omitted = max(0, len(projected) - MAX_FOCUS_REQUESTS)
     projected = projected[:MAX_FOCUS_REQUESTS]
     source_current = bool(board_current and payload.get("work_verification") == "current"
@@ -943,12 +948,35 @@ def _shrink(brief: Dict[str, Any]) -> Dict[str, Any]:
             local["activity"]["summary"] = str(local["activity"].get("summary", ""))[:200]
         add_limit("local activity summary shortened by output bound")
 
-    if encoded() > MAX_OUTPUT_CHARS and isinstance(digest, dict):
-        text = digest.get("untrusted_advisory_text")
-        if isinstance(text, str) and text:
-            digest["untrusted_advisory_text"] = ""
-            digest["omitted_chars"] = digest.get("omitted_chars", 0) + len(text)
-            add_limit("digest excerpt omitted by output bound")
+    if encoded() > MAX_OUTPUT_CHARS:
+        # Keep the useful content before duplicated explanation. An available
+        # priority digest must not silently become an empty successful source.
+        sections = [work, iris, digest, brief.get("deadline_baseline")]
+        if isinstance(iris, dict):
+            sections.extend(iris.values())
+            local = iris.get("local_agent")
+            activity = local.get("activity") if isinstance(local, dict) else None
+            review = activity.get("review") if isinstance(activity, dict) else None
+            if isinstance(review, dict) and isinstance(review.get("summary"), str):
+                review["summary"] = review["summary"][:200]
+        for section in sections:
+            if isinstance(section, dict):
+                section.pop("limits", None)
+        add_limit("detail shortened; transport is not human reading or an answer; digest is advisory text, not a priority ranking")
+
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(focus, dict):
+        rows = focus.get("requests", [])
+        if len(rows) > 1:
+            focus["requests"] = rows[:1]
+            focus["omitted_requests"] = focus.get("omitted_requests", 0) + len(rows) - 1
+            add_limit("additional focus detail omitted; counts retain the full request inventory")
+
+    if encoded() > MAX_OUTPUT_CHARS:
+        baseline = brief.get("deadline_baseline")
+        if isinstance(baseline, dict) and isinstance(baseline.get("items"), list):
+            baseline["omitted_count"] = baseline.get("omitted_count", 0) + len(baseline["items"])
+            baseline["items"] = []
+            add_limit("optional deadline-baseline rows omitted before priority evidence")
     if encoded() > MAX_OUTPUT_CHARS:
         return {
             "schema": SCHEMA,
@@ -1012,9 +1040,14 @@ def render_markdown(brief: Mapping[str, Any]) -> str:
                   "- board: %s items, %s activity; current `%s`" % (_md((board.get("shape") or {}).get("items") if isinstance(board.get("shape"), dict) else None), _md((board.get("shape") or {}).get("activity") if isinstance(board.get("shape"), dict) else None), _md(board.get("current")))])
     focus = iris.get("focus", {}) if isinstance(iris.get("focus"), dict) else {}
     lines.append("- focus: %s requests; authority `%s`; delivery `%s`" % (_md(focus.get("request_count")), _md(focus.get("authority")), _md(focus.get("delivery"))))
+    lines.append("- focus counts: %s; omitted requests: %s" % (_md(focus.get("counts")), _md(focus.get("omitted_requests"))))
     for row in focus.get("requests", []) if isinstance(focus.get("requests"), list) else []:
         if isinstance(row, dict):
-            lines.append("  - `%s` / `%s`: %s — %s" % (_md(row.get("work_id")), _md(row.get("group")), _md(row.get("question")), _md(row.get("recommendation"))))
+            lines.append("  - `%s` / `%s` / state `%s` / applicability `%s` / recorded responses %s%s: %s — %s" % (
+                _md(row.get("work_id")), _md(row.get("group")), _md(row.get("state")),
+                _md(row.get("source_applicability")), _md(row.get("response_count")),
+                " / historical record; no new action implied" if row.get("group") == "history" else "",
+                _md(row.get("question")), _md(row.get("recommendation"))))
     local = iris.get("local_agent", {}) if isinstance(iris.get("local_agent"), dict) else {}
     activity = local.get("activity") if isinstance(local.get("activity"), dict) else None
     lines.append("- local agent: status `%s`, freshness `%s`, process inference `%s`" % (_md(local.get("status")), _md(local.get("freshness")), _md(local.get("process_inference"))))

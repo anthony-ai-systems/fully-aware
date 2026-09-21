@@ -294,6 +294,65 @@ class FileTests(unittest.TestCase):
         self.assertEqual(len(lane["blocked"]), 3)
         self.assertEqual(lane["blocked_omitted"], 7)
 
+    def test_realistic_large_history_preserves_digest_and_answered_request(self):
+        packet = focus()
+        row = packet["requests"][0]
+        packet["counts"].update(reconciliation=0, history=3)
+        packet["requests"] = [dict(row, key="withdrawn-%d" % i, group="history",
+                                   source_applicability="withdrawn", question="Q" * 280,
+                                   recommendation="R" * 280) for i in range(2)]
+        packet["requests"].append(dict(row, key="answered-current", group="history",
+                                       state="answered", response_count=1,
+                                       question="Q" * 280, recommendation="R" * 280))
+        agent = local_agent()
+        agent["activity"]["review"]["summary"] = "reviewed " * 60
+        plan_value = plans()
+        for lane in plan_value["lanes"][:3]:
+            lane.update(step="next " * 100,
+                        waiting_on_anthony=["wait " * 40] * 3,
+                        blocked=["block " * 40] * 3)
+        boot_path = self.write_json("boot.json", boot_pack())
+        plans_path = self.write_json("plans.json", plan_value)
+        text = "Verified daily priorities. " * 250
+        digest = self.root / "priority.md"
+        digest.write_text(text, encoding="utf-8")
+        outcome = self.write_json("outcome.json", {"daily_digest": {
+            "path": str(digest), "sha256": hashlib.sha256(text.encode()).hexdigest(),
+            "evidence_cutoff": VERIFIED, "timezone": "America/Los_Angeles", "date": "2026-09-20"}})
+        endpoints = self.endpoints(**{"/focus.json": packet, "/local-agent.json": agent})
+        with mock.patch.object(brief, "fetch_endpoint", side_effect=endpoints):
+            output = brief.build_brief(str(boot_path), str(plans_path), str(outcome), now=NOW)
+        self.assertLessEqual(len(json.dumps(output, ensure_ascii=False, separators=(",", ":"))), brief.MAX_OUTPUT_CHARS)
+        self.assertNotEqual(output.get("status"), "bounded_unavailable")
+        excerpt = output["sweep_digest"]["untrusted_advisory_text"]
+        self.assertGreaterEqual(len(excerpt), 1000)
+        self.assertEqual(output["sweep_digest"]["omitted_chars"], len(text) - len(excerpt))
+        projected = output["iris"]["focus"]
+        self.assertEqual(projected["requests"][0]["key"], "answered-current")
+        self.assertEqual(projected["requests"][0]["response_count"], 1)
+        self.assertEqual(projected["counts"]["history"], 3)
+        self.assertEqual(projected["omitted_requests"] + len(projected["requests"]), 3)
+        self.assertEqual(projected["authority"], "none")
+        self.assertTrue(output["no_commands"])
+        self.assertIn("Verified daily priorities", brief.render_markdown(output))
+        markdown = brief.render_markdown(output)
+        self.assertIn("historical record; no new action implied", markdown)
+        self.assertIn("recorded responses 1", markdown)
+        self.assertIn("omitted requests:", markdown)
+        self.assertIn("transport is not human reading or an answer", " ".join(output["limits"]))
+
+    def test_history_tie_breakers_do_not_reorder_current_decisions(self):
+        packet = focus()
+        row = packet["requests"][0]
+        packet["counts"].update(decision=6, reconciliation=0)
+        packet["requests"] = [dict(row, group="decision", key="decision-%d" % i,
+                                   response_count=1 if i == 5 else 0) for i in range(6)]
+        output = self.make_brief(self.endpoints(**{"/focus.json": packet}))
+        projected = output["iris"]["focus"]
+        self.assertEqual(projected["requests"][0]["key"], "decision-0")
+        self.assertNotIn("decision-5", [r["key"] for r in projected["requests"]])
+        self.assertEqual(projected["omitted_requests"] + len(projected["requests"]), 6)
+
     def test_final_collection_time_prevents_request_timing_false_future(self):
         values = {"/data/board.json": board(), "/healthz": health(), "/focus.json": focus(),
                   "/local-agent.json": local_agent()}
