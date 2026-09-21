@@ -20,8 +20,8 @@ malformed inputs remain unavailable sections; an empty projection is not
 treated as proof that no work exists.
 
 IRIS is read only through fixed GET requests to
-`http://127.0.0.1:4180/healthz`, `/data/board.json`, `/focus.json`, and
-`/local-agent.json`. The board is read before and after the other requests.
+`http://127.0.0.1:4180/healthz`, `/data/board.json`, `/focus.json`,
+`/local-agent.json`, and `/priority.json`. The board is read before and after the other requests.
 The board is current only when the producer proof and ordered ID/status
 binding match exactly and health reports current verified freshness, a recent
 generation, matching `verified_at`, and no `last_error`. Redirects and proxy
@@ -38,6 +38,23 @@ match, bounded question/recommendation, snooze, transport, and response count.
 They do not turn transport into human delivery, an answer, or authority. Local
 activity retains exact bounded run/owner/artifact/review identities and stale
 labels; it never infers a running process or business acceptance.
+
+The existing IRIS sweep owns structured daily priorities. The optional priority
+endpoint has an independently checked Pacific planning date, original evidence
+cutoff, recent observation and explicit coverage. The brief retains the first
+four ranked rows and reports the omitted count. Missing, stale or malformed
+planning data clears those rows, without invalidating other evidence. Work
+bindings cannot remain current if the surrounding board read is incoherent.
+Roles and estimates are source advice, never execution permission or actual
+human effort. The Markdown rendering leads with these planning priorities.
+Additional lane and warning prose can be omitted before this evidence; full
+counts and one current decision remain available within the output bound.
+Maximum-size receipts additionally excerpt priority prose and omit links with
+an explicit count, retaining all four row identities and original timestamps.
+If necessary, additional plan-lane detail is omitted with a separate count;
+the first lane, current request and at least 1,000 digest characters remain.
+JSON prose stays plain text; the Markdown renderer escapes it for display and
+shows coverage, cutoffs and any work-binding downgrade.
 
 An optional sweep outcome may name one existing `daily_digest.path`. The file
 must be a bounded regular file and its raw SHA-256 must equal the declared

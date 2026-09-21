@@ -81,8 +81,32 @@ def local_agent(freshness="stale"):
                          "review": {"verdict": "accepted", "summary": "reviewed", "reviewed_at": VERIFIED}}}
 
 
+def priority_payload():
+    return {"schema": "iris-priority-context/v1", "status": "current", "reason": "verified_evidence",
+            "checked_at": VERIFIED, "plan": {
+                "local_date": "2026-09-20", "timezone": "America/Los_Angeles",
+                "prepared_at": "2026-09-20T17:58:00Z", "evidence_cutoff": "2026-09-20T17:57:00Z",
+                "digest_cutoff": "2026-09-20T17:56:00Z", "digest_presentation": "recorded_unverified",
+                "coverage": "partial", "coverage_note": "Known sources only", "capacity": "One ratifiable block",
+                "rows": [{"id": "priority-%d" % i, "label": "Now" if i == 0 else "Next",
+                          "title": "Priority %d" % i, "owner": "Existing owner", "reason": "Explicit user direction",
+                          "mode": "anthony_judgment", "estimated_minutes": 45, "estimate_basis": "Uncalibrated",
+                          "url": None, "binding_status": "current"} for i in range(4)]}}
+
+
+def maximal_priority_payload():
+    value = priority_payload()
+    value["plan"].update(coverage_note="C" * 600, capacity="K" * 1000)
+    for index, row in enumerate(value["plan"]["rows"]):
+        row.update(id=str(index) + "x" * 99, label="L" * 160, title="T" * 160,
+                   owner="O" * 160, reason="R" * 600, estimate_basis="B" * 300,
+                   url="https://docs.google.com/document/d/abcdefghijkl/edit")
+    return value
+
+
 class Endpoints:
     def __init__(self, values, after=None):
+        values.setdefault("/priority.json", None)
         self.values = values
         self.after = after
         self.calls = []
@@ -138,6 +162,46 @@ class FileTests(unittest.TestCase):
         self.assertIn("producer_proof_mismatch", source["issues"])
         self.assertIn("ordered_work_binding_mismatch", source["issues"])
         self.assertFalse(output["iris"]["focus"]["current"])
+
+    def test_priorities_use_existing_route_and_do_not_infer_work_authority(self):
+        endpoints = self.endpoints(**{"/priority.json": priority_payload()})
+        output = self.make_brief(endpoints)
+        planning = output["iris"]["priorities"]
+        self.assertTrue(planning["current"])
+        self.assertEqual(planning["rows"][0]["title"], "Priority 0")
+        self.assertEqual(planning["rows"][0]["mode"], "anthony_judgment")
+        self.assertIn("/priority.json", endpoints.calls)
+        self.assertTrue(output["no_commands"])
+        markdown = brief.render_markdown(output)
+        self.assertLess(markdown.index("Priority 0"), markdown.index("## Fully Aware"))
+        self.assertIn("Coverage: partial", markdown)
+        self.assertIn("2026-09-20T17:57:00Z", markdown)
+
+    def test_incoherent_board_downgrades_priority_work_binding_only(self):
+        endpoints = self.endpoints(**{"/priority.json": priority_payload()})
+        endpoints.after = board(proof_hash="d" * 64)
+        output = self.make_brief(endpoints)
+        self.assertFalse(output["iris"]["board"]["current"])
+        planning = output["iris"]["priorities"]
+        self.assertTrue(planning["current"])
+        self.assertEqual({row["binding_status"] for row in planning["rows"]}, {"unavailable"})
+        self.assertIn(planning["binding_note"], brief.render_markdown(output))
+
+    def test_missing_optional_priority_route_does_not_erase_current_work(self):
+        output = self.make_brief(self.endpoints())
+        self.assertFalse(output["iris"]["priorities"]["current"])
+        self.assertEqual(output["iris"]["priorities"]["rows"], [])
+        self.assertTrue(output["iris"]["board"]["current"])
+        self.assertNotIn("binding_note", output["iris"]["priorities"])
+
+    def test_priority_markdown_escapes_markup_without_mangling_plain_ampersands(self):
+        payload = priority_payload()
+        payload["plan"]["rows"][0]["title"] = "Q&A <script>"
+        output = self.make_brief(self.endpoints(**{"/priority.json": payload}))
+        self.assertEqual(output["iris"]["priorities"]["rows"][0]["title"], "Q&A <script>")
+        rendered = brief.render_markdown(output)
+        self.assertIn("Q&A &lt;script&gt;", rendered)
+        self.assertNotIn("Q&amp;A", rendered)
 
     def test_focus_snooze_and_reconciliation_are_preserved_as_unanswered_transport(self):
         output = self.make_brief(self.endpoints())
@@ -295,6 +359,15 @@ class FileTests(unittest.TestCase):
         self.assertEqual(lane["blocked_omitted"], 7)
 
     def test_realistic_large_history_preserves_digest_and_answered_request(self):
+        self.assert_large_history(priority_payload())
+
+    def test_maximal_priorities_preserve_digest_and_answered_request(self):
+        self.assert_large_history(maximal_priority_payload())
+
+    def test_maximal_priorities_with_incoherent_board_remain_bounded(self):
+        self.assert_large_history(maximal_priority_payload(), incoherent=True)
+
+    def assert_large_history(self, priority, incoherent=False):
         packet = focus()
         row = packet["requests"][0]
         packet["counts"].update(reconciliation=0, history=3)
@@ -319,7 +392,10 @@ class FileTests(unittest.TestCase):
         outcome = self.write_json("outcome.json", {"daily_digest": {
             "path": str(digest), "sha256": hashlib.sha256(text.encode()).hexdigest(),
             "evidence_cutoff": VERIFIED, "timezone": "America/Los_Angeles", "date": "2026-09-20"}})
-        endpoints = self.endpoints(**{"/focus.json": packet, "/local-agent.json": agent})
+        endpoints = self.endpoints(**{"/focus.json": packet, "/local-agent.json": agent,
+                                     "/priority.json": priority})
+        if incoherent:
+            endpoints.after = board(proof_hash="d" * 64)
         with mock.patch.object(brief, "fetch_endpoint", side_effect=endpoints):
             output = brief.build_brief(str(boot_path), str(plans_path), str(outcome), now=NOW)
         self.assertLessEqual(len(json.dumps(output, ensure_ascii=False, separators=(",", ":"))), brief.MAX_OUTPUT_CHARS)
@@ -334,6 +410,13 @@ class FileTests(unittest.TestCase):
         self.assertEqual(projected["omitted_requests"] + len(projected["requests"]), 3)
         self.assertEqual(projected["authority"], "none")
         self.assertTrue(output["no_commands"])
+        self.assertEqual(len(output["iris"]["priorities"]["rows"]), 4)
+        planning = output["iris"]["priorities"]
+        self.assertLessEqual(len(json.dumps(planning)), 4000)
+        self.assertEqual([row["id"] for row in planning["rows"]], [row["id"] for row in priority["plan"]["rows"]])
+        self.assertEqual(planning["evidence_cutoff"], priority["plan"]["evidence_cutoff"])
+        self.assertEqual({row["binding_status"] for row in planning["rows"]}, {"unavailable" if incoherent else "current"})
+        self.assertEqual(len(output["work"]["selected_lanes"]) + output["work"].get("selected_lanes_omitted", 0), 3)
         self.assertIn("Verified daily priorities", brief.render_markdown(output))
         markdown = brief.render_markdown(output)
         self.assertIn("historical record; no new action implied", markdown)
@@ -357,7 +440,7 @@ class FileTests(unittest.TestCase):
         values = {"/data/board.json": board(), "/healthz": health(), "/focus.json": focus(),
                   "/local-agent.json": local_agent()}
         def endpoint(path, **_kwargs):
-            return {"path": path, "status": 200, "data": copy.deepcopy(values[path]), "sha256": "c" * 64,
+            return {"path": path, "status": 200, "data": copy.deepcopy(values.get(path)), "sha256": "c" * 64,
                     "bytes": 2, "observed_at": "2026-09-20T18:00:02Z", "issue": None}
         boot_path, plans_path = self.paths()
         with mock.patch.object(brief, "fetch_endpoint", side_effect=endpoint):
