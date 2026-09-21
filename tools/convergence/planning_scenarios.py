@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime as dt
+from decimal import Decimal
 import hashlib
 import json
 import math
@@ -107,6 +108,8 @@ def validate(payload):
         require(item['identity_kind'] in ('canonical_work', 'planning_item'), 'invalid_identity_kind')
         if item['identity_kind'] == 'canonical_work':
             require(re.fullmatch(r'work-[a-f0-9]{24}', identity), 'invalid_work_identity')
+        else:
+            require(not re.fullmatch(r'work-[a-f0-9]{24}', identity), 'planning_identity_looks_canonical')
         text(item['title'], 500); text(item['reason']); text(item['task_type'], 128)
         require(item['kind'] in ('task', 'decision', 'external'), 'invalid_kind')
         require(item['state'] in ('open', 'done', 'cancelled', 'unknown'), 'invalid_state')
@@ -146,6 +149,8 @@ def validate(payload):
         require(not set(scenario['assume_done']) & set(scenario['unavailable']), 'conflicting_assumptions')
         require(all(items[key]['state'] not in ('cancelled', 'done') for key in scenario['assume_done']),
                 'terminal_assumption')
+        require(all(items[key]['kind'] in ('decision', 'external') for key in scenario['assume_done']),
+                'only_decisions_or_external_resolutions_may_be_assumed')
     return items
 
 
@@ -181,10 +186,16 @@ def simulate(items, parents, problems, ancestors, scenario, bound):
     fulfilled = {key for key, item in items.items() if item['state'] == 'done'} | set(scenario['assume_done'])
     unavailable = set(scenario['unavailable'])
     pending = set(scenario['order']) - fulfilled
-    protected = {key for key, item in items.items() if item['required']}
-    protected |= {ancestor for key in protected.copy() for ancestor in ancestors[key]}
+    protected, needed = set(), [key for key, item in items.items() if item['required']]
+    while needed:
+        key = needed.pop()
+        if key in protected or key not in items or items[key]['state'] in ('done', 'cancelled'):
+            continue
+        protected.add(key)
+        needed.extend(parents[key])
     order = {key: i for i, key in enumerate(scenario['order'])}
-    selected, deferred, used = [], {}, 0
+    selected, deferred, used = [], {}, Decimal(0)
+    decimal_capacity = None if capacity is None else Decimal(str(capacity))
     while pending:
         # Work on a prerequisite before its dependent even if the displayed
         # priority order puts the dependent first. Required work and its
@@ -205,19 +216,22 @@ def simulate(items, parents, problems, ancestors, scenario, bound):
         if item['estimate'] is None:
             reasons.add('duration_unknown')
         cost = item['estimate'][bound] if item['estimate'] else None
-        if not reasons and used + cost > capacity:
+        decimal_cost = None if cost is None else Decimal(str(cost))
+        if not reasons and used + decimal_cost > decimal_capacity:
             reasons.add('capacity_exceeded')
         if reasons:
             deferred[key] = sorted(reasons)
         else:
-            used += cost
+            used += decimal_cost
             selected.append({'id': key, 'minutes': cost})
             fulfilled.add(key)
     for key, item in items.items():
         if item['state'] == 'unknown' and key not in fulfilled:
             deferred[key] = ['state_unknown']
     return {'selected': selected, 'deferred': [{'id': k, 'reasons': v} for k, v in sorted(deferred.items())],
-            'used_minutes': used, 'remaining_minutes': None if capacity is None else capacity - used,
+            'used_minutes': float(used),
+            'remaining_minutes': None if capacity is None else float(decimal_capacity - used),
+            'required_assumed_done': sorted(k for k in scenario['assume_done'] if items[k]['required']),
             'required_unfulfilled': sorted(k for k, item in items.items()
                                           if item['required'] and item['state'] != 'cancelled' and k not in fulfilled)}
 
@@ -275,6 +289,9 @@ def changes(before, after):
         if old_edges.get(edge) != new_edges.get(edge):
             changed.add(edge[1])
     source_changed = before['source']['snapshot_sha256'] != after['source']['snapshot_sha256']
+    source_metadata_changed = before['source'] != after['source']
+    horizon_changed = before['horizon'] != after['horizon']
+    assumptions_changed = before['scenarios'] != after['scenarios']
     affected = set(changed)
     for payload, nodes in ((before, old), (after, new)):
         _, _, ancestors = graph(payload, nodes)
@@ -282,7 +299,9 @@ def changes(before, after):
     return {'schema': 'planning-invalidation/v1', 'before_sha256': digest(before), 'after_sha256': digest(after),
             'changed_ids': sorted(changed), 'affected_ids': sorted(affected),
             'source_snapshot_changed': source_changed,
-            'source_recheck_required': source_changed or bool(changed),
+            'source_metadata_changed': source_metadata_changed,
+            'horizon_changed': horizon_changed, 'scenario_assumptions_changed': assumptions_changed,
+            'source_recheck_required': source_metadata_changed or horizon_changed or assumptions_changed or bool(changed),
             'previous_scenarios_reusable': before == after,
             'effects_applied': False,
             'limits': ['Recheck affected plans and existing preparation before reuse; this report changes no source, job or task.']}

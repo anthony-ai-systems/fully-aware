@@ -93,6 +93,16 @@ class PlanningCalibrationTests(unittest.TestCase):
         self.assertEqual([g['completed_units_with_minutes'] for g in result['groups']], [3, 2])
         self.assertEqual(result['estimate_proposals'], [])
 
+    def test_private_directory_and_stable_receipts_are_required(self):
+        episode = self.episode(1)
+        case = Path(episode['case_dir']); case.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, 'private_case_directory_required'):
+            c.propose(self.request([episode]), now=NOW)
+        case.chmod(0o700)
+        with mock.patch.object(c, 'fingerprint', side_effect=[(('before', 'a'),), (('after', 'b'),)]):
+            with self.assertRaisesRegex(ValueError, 'case_changed_during_read'):
+                c.propose(self.request([episode]), now=NOW)
+
     def test_duplicate_units_and_inconsistent_classification_refuse(self):
         episode = self.episode(1)
         with self.assertRaises(ValueError): c.propose(self.request([episode, episode]), now=NOW)

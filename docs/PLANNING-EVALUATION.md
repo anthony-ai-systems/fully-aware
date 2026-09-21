@@ -19,7 +19,7 @@ The input schema is:
 There must be exactly three slots. A `null` slot means that no case was
 encountered or recorded. An existing empty private folder also remains
 `unknown`; the evaluator never creates its lock file. A `missed` receipt stays
-`missed`. The evaluator refuses duplicate resolved case paths, duplicate
+`missed`; a missed-only chain explicitly has unverified design binding and cannot qualify. The design schema and freeze time are checked. The evaluator refuses duplicate resolved case paths, duplicate
 encounter IDs, duplicate frozen source snapshot hashes, a changed receipt or
 artifact, a source chain bound to another design, a wrong chain kind, malformed
 JSON, non-finite values, and oversized input.

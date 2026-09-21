@@ -15,7 +15,7 @@ these bounded calculations and Clayton supplies separately authorized execution.
 2. State the horizon, original estimate ranges and reasons, reviewed dependencies,
    and alternative explicit priority orders/capacity assumptions. Unknown duration
    or available time is `null`, not zero. An assumed decision resolution is only a
-   hypothetical scenario. Preserve every open task in each order.
+   hypothetical scenario. Only decision/external resolutions can be assumed; work cannot be marked done by a scenario. Preserve every open task in each order.
 3. Run `planning_scenarios.py analyze --input INPUT`. Present required work that
    cannot fit, prerequisites, estimate-sensitive choices and source limits before
    proposing a block. A total minute budget does not establish a free calendar
@@ -23,7 +23,7 @@ these bounded calculations and Clayton supplies separately authorized execution.
 4. If a commitment, dependency or source changes, run
    `planning_scenarios.py changes --previous OLD --input NEW`. Recheck affected
    downstream preparation through existing owners. This report does not cancel,
-   restart or rewrite a job. Any unequal input invalidates reuse of the prior plan.
+   restart or rewrite a job. Any unequal input invalidates reuse of the prior plan. The report separately flags changed source metadata, horizon and scenario assumptions even if item records are unchanged.
 5. Once genuine focus outcomes exist, run `planning_calibration.py --input INPUT`
    with the same original context and explicitly classified receipt directories.
    Compare its proposed `candidate_context` using the scenario reader. Keep the
@@ -75,10 +75,10 @@ A stale or future observation produces no allocation. Re-read source before use.
   Confirmed dependencies must reflect actual source evidence, not an invented order.
 - Each scenario: `id`, `label`, `capacity_minutes`, `capacity_basis`, `order`,
   `assume_done`, `unavailable`. Order contains every open task exactly once.
-  Required tasks and their ancestors precede discretionary tasks; prerequisites
+  Unfinished required tasks and their still-needed ancestors precede discretionary tasks; prerequisites
   precede dependents. If required work cannot fit, that failure stays explicit.
   Other tasks can still be shown as feasible; this is not permission to skip the
-  requirement. An unavailable item is excluded from that scenario, not cancelled.
+  requirement. An unavailable item is excluded from that scenario, not cancelled. Required decisions satisfied only by assumption remain explicit in `required_assumed_done`. Fractional minute totals use decimal arithmetic.
 
 Low/high runs expose the consequences of estimate ranges. They are deterministic
 illustrations, not a globally optimal plan, probabilistic forecast or daily clock
@@ -100,14 +100,14 @@ paths to validated `outcome-source` chains from the existing recorder.
 The reader verifies every original proposal/event and later response. Duplicate
 case paths, proposal IDs or calendar event IDs are refused. Receipt records later
 than the planning source observation are rejected to prevent future-data leakage.
-Only completed units with known positive focus minutes contribute a ratio of
+A correction recorded after the cutoff refuses the whole calibration; use a new, honestly dated context rather than truncating away a later correction. Case directories must remain owner-private and receipt fingerprints must stay stable during the read. Only completed units with known positive focus minutes contribute a ratio of
 actual duration to the original estimate. Partial, unknown, moved and skipped
 units do not become zero-duration training samples.
 
 At least five comparable completed units are required to propose a change. The
 original low/high bounds are scaled by empirical minimum/maximum ratios; the
 median supplies a descriptive typical value. These are not confidence intervals.
-All episode tails and the declared unit definition bind the calibration version.
+All episode tails, the declared unit definition, algorithm version and minimum sample threshold bind the calibration version.
 Already calibrated input is refused, preventing repeated compounding. Canonical
 identity and source revision remain unchanged because only a derived planning
 assumption changed. Excessive ranges are flagged for review rather than clamped.

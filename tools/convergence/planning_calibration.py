@@ -11,6 +11,7 @@ import copy
 import datetime as dt
 import json
 import math
+import os
 from pathlib import Path
 import statistics
 
@@ -22,6 +23,15 @@ except ImportError:
     import planning_scenarios as planner
 
 MINIMUM_COMPLETED_UNITS = 5
+ALGORITHM = 'focus-ratio-range/v1'
+
+
+def fingerprint(case):
+    paths = []
+    for path in case.glob('[0-9]*-*.json'):
+        paths.append(path)
+        planner.require(len(paths) <= 16, 'too_many_receipts')
+    return tuple((path.name, receipts.sha(receipts.read(path, 256 * 1024))) for path in sorted(paths))
 
 
 def propose(payload, *, now=None):
@@ -42,8 +52,12 @@ def propose(payload, *, now=None):
         planner.text(episode['case_dir'], 4096)
         case = Path(episode['case_dir'])
         planner.require(case.is_absolute() and case.resolve() == case and case.is_dir(), 'invalid_case_directory')
+        planner.require(case.stat().st_uid == os.getuid() and not case.stat().st_mode & 0o077,
+                        'private_case_directory_required')
         planner.require(case not in paths, 'duplicate_case'); paths.add(case)
+        before = fingerprint(case)
         chain, tail = receipts.load(case)
+        planner.require(before == fingerprint(case), 'case_changed_during_read')
         planner.require(chain and chain[0]['kind'] == 'outcome-source', 'outcome_chain_required')
         planner.require(all(planner.instant(row['recorded_at']) <= cutoff for row in chain), 'future_training_evidence')
         original = chain[0]['derived']
@@ -64,7 +78,8 @@ def propose(payload, *, now=None):
     for task_type, group in sorted(groups.items()):
         ratios = group['ratios']; observed = len(group['outcomes']) - group['outcomes'].count('unknown')
         group_version = planner.digest({'task_type': task_type, 'unit_definition': group['unit_definition'],
-                                        'tails': sorted(group['tails'])})
+                                        'tails': sorted(group['tails']), 'algorithm': ALGORITHM,
+                                        'minimum_completed_units': MINIMUM_COMPLETED_UNITS})
         summary = {'task_type': task_type, 'unit_definition': group['unit_definition'],
                    'version': group_version, 'units': len(group['outcomes']),
                    'observed_units': observed, 'unknown_units': group['outcomes'].count('unknown'),
@@ -101,6 +116,7 @@ def propose(payload, *, now=None):
     planner.validate(candidate)
     return {'schema': 'planning-calibration/v1', 'input_sha256': planner.digest(payload),
             'training_cutoff': cutoff.isoformat(), 'episodes': summaries, 'groups': versions,
+            'algorithm': ALGORITHM,
             'estimate_proposals': proposals, 'workflow_improvement_proposals': improvements,
             'candidate_context': candidate, 'live_estimates_changed': False, 'rollout_authorized': False,
             'limits': ['Unit classifications are explicit owner-reviewed inputs, not inferred preferences.',

@@ -44,6 +44,52 @@ def ids(rows):
 
 
 class PlanningScenariosTests(unittest.TestCase):
+    def test_fractional_minutes_do_not_create_false_capacity_overflow(self):
+        value = sample()
+        value['scenarios'][0]['capacity_minutes'] = 0.3
+        for node, cost in zip(value['items'], (0.1, 0.2)):
+            node['estimate'].update(low=cost, high=cost)
+        result = p.analyze(value, now=NOW)['scenarios'][0]['high_duration']
+        self.assertEqual(ids(result['selected']), ['first', 'second'])
+        self.assertEqual(result['used_minutes'], 0.3)
+        self.assertEqual(result['remaining_minutes'], 0)
+
+    def test_changed_global_assumptions_require_recheck(self):
+        before = sample()
+        cases = [('source_metadata_changed', lambda v: v['source']['limitations'].append('New gap')),
+                 ('horizon_changed', lambda v: v['horizon'].update(end='2026-09-23T00:00:00Z')),
+                 ('scenario_assumptions_changed', lambda v: v['scenarios'][0].update(capacity_minutes=30))]
+        for flag, edit in cases:
+            after = copy.deepcopy(before); edit(after)
+            result = p.changes(before, after)
+            self.assertTrue(result[flag])
+            self.assertTrue(result['source_recheck_required'])
+            self.assertFalse(result['previous_scenarios_reusable'])
+
+    def test_assumptions_cannot_skip_work_and_required_assumed_decision_is_visible(self):
+        value = sample()
+        value['scenarios'][0]['assume_done'] = ['first']
+        with self.assertRaisesRegex(ValueError, 'only_decisions'):
+            p.analyze(value, now=NOW)
+        value = sample([item('choice', kind='decision', required=True), item('work')], [edge('choice', 'work')])
+        value['scenarios'][0]['assume_done'] = ['choice']
+        result = p.analyze(value, now=NOW)['scenarios'][0]['high_duration']
+        self.assertEqual(result['required_assumed_done'], ['choice'])
+        self.assertEqual(result['required_unfulfilled'], [])
+
+    def test_finished_required_work_does_not_promote_its_old_prerequisites(self):
+        for state in ('done', 'cancelled'):
+            value = sample([item('first'), item('old-prep'), item('old-required', state=state, required=True)],
+                           [edge('old-prep', 'old-required')])
+            value['scenarios'][0]['capacity_minutes'] = 20
+            result = p.analyze(value, now=NOW)['scenarios'][0]['low_duration']
+            self.assertEqual(ids(result['selected']), ['first'])
+
+    def test_unbound_planning_identity_cannot_masquerade_as_canonical(self):
+        value = sample([item('work-' + 'a' * 24)])
+        with self.assertRaisesRegex(ValueError, 'planning_identity_looks_canonical'):
+            p.analyze(value, now=NOW)
+
     def test_range_exposes_displacement_without_schedule_authority(self):
         original = sample(); frozen = copy.deepcopy(original)
         result = p.analyze(original, now=NOW)

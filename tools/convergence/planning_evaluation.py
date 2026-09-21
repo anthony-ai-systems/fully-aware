@@ -155,6 +155,12 @@ def _design_snapshot(reference: Mapping[str, Any]) -> tuple[Path, str, Mapping[s
         _fail("INVALID_DESIGN")
     if not isinstance(design, Mapping):
         _fail("INVALID_DESIGN")
+    try:
+        if (design.get("schema") != "convergence-evaluation-design/v1"
+                or receipts.instant(design.get("frozen_at")) > receipts.clock_now()):
+            _fail("INVALID_DESIGN")
+    except (ValueError, TypeError, KeyError):
+        _fail("INVALID_DESIGN")
     return path, actual_hash, design
 
 
@@ -235,7 +241,7 @@ def _load_case(case: Path) -> tuple[list[dict[str, Any]], str | None, dict[str, 
         if before != after:
             _fail("CHANGED_EVIDENCE")
         hashes = {
-            row["kind"] if row["kind"] != "label" else "label": digest
+            row["kind"]: digest
             for (name, digest), row in zip(after, chain)
             if name == f'{row["sequence"]:04d}-{row["kind"]}.json'
         }
@@ -293,11 +299,8 @@ def _source_metadata(
         _fail("INVALID_CASE_EVIDENCE")
     frozen_design = data.get("frozen_design")
     source_ref = data.get("source_ref")
-    try:
-        frozen_path, frozen_hash = _reference_value(frozen_design)
-        _source_path, source_hash = _reference_value(source_ref)
-    except EvaluationError:
-        raise
+    frozen_path, frozen_hash = _reference_value(frozen_design)
+    _source_path, source_hash = _reference_value(source_ref)
     if not _same_path(frozen_path, design_path) or frozen_hash != design_hash:
         _fail("DESIGN_MISMATCH")
     # p.load has already checked the pinned artifact.  Reading it here gives
