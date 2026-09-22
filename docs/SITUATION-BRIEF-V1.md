@@ -8,7 +8,8 @@ with `--format markdown`:
 python3 tools/convergence/situation_brief.py \
   --boot-pack /absolute/path/boot-pack.json \
   --plans /absolute/path/plans-snapshot.json \
-  [--sweep-outcome /absolute/path/outcome.json] \
+  [--sweep-outcome /absolute/path/morning/outcome.json] \
+  [--latest-sweep-outcome /absolute/path/latest/outcome.json] \
   [--format markdown]
 ```
 
@@ -80,3 +81,26 @@ python3 -m unittest discover -s tools/convergence -p 'test_work_view.py'
 python3 -m py_compile tools/convergence/situation_brief.py
 git diff --check
 ```
+
+## Later material changes
+
+`--latest-sweep-outcome` is independent of the frozen daily digest. It accepts
+one bounded regular `iris-sweep-outcome/v1` JSON file, preserves its exact hash
+and bounded run identity, and requires aware `started_at <= ended_at <= now`
+within 24 hours. Missing, malformed, stale, future, duplicate-key, nonfinite,
+symlinked or oversized inputs produce an explicit unavailable subsection.
+No linked files are followed. Only up to three `material_change` string entries,
+a bounded `next_action`, and coverage source `state` strings are projected as
+untrusted advisory text. Raw communications, linked paths and other nested
+fields are not copied. Outcome observation time never refreshes the underlying
+source facts or the separately retained morning digest/board timestamps.
+
+JSON keeps the existing 12,000-character bound. When necessary, optional
+priority explanation, coverage detail, additional lanes and local-job prose
+are reduced with omission metadata. The current request, four priority
+identities, latest change keys/excerpts and original evidence clocks remain.
+Verbose reduction explanations are compacted before refusing the entire brief.
+Markdown shows the latest update before the daily digest and labels unavailable
+updates explicitly; an unavailable source never means there were no changes.
+This read-only adapter grants no dispatch, notification or human-acceptance
+authority. Keep older planning-receipt module pins in their retained checkouts.
