@@ -27,9 +27,11 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, ProxyHand
 try:
     from .work_view import build_view, load_input
     from .priority_context import project_priority
+    from .sweep_attempt import read_attempt
 except ImportError:  # Direct execution from tools/convergence.
     from work_view import build_view, load_input
     from priority_context import project_priority
+    from sweep_attempt import read_attempt
 
 
 SCHEMA = "situation-brief/v1"
@@ -40,11 +42,17 @@ HTTP_TIMEOUT_SECONDS = 3.0
 SWEEP_MAX_BYTES = 1024 * 1024
 DIGEST_MAX_BYTES = 128 * 1024
 DIGEST_MAX_AGE_SECONDS = 24 * 60 * 60
+LATEST_SWEEP_SCHEMA = "iris-sweep-outcome/v1"
+LATEST_CHANGE_MAX_COUNT = 3
+LATEST_CHANGE_KEY_CHARS = 120
 MAX_OUTPUT_CHARS = 12_000
 MAX_EXCERPT_CHARS = 4_000
 MAX_FOCUS_REQUESTS = 5
 MAX_TEXT = 280
 MAX_SOURCE_TEXT = 400
+LATEST_CHANGE_EXCERPT_CHARS = MAX_SOURCE_TEXT
+LATEST_NEXT_ACTION_CHARS = MAX_SOURCE_TEXT
+LATEST_COVERAGE_MAX_SOURCES = 12
 MAX_DEADLINE_ROWS = 3
 # Existing IRIS freshness_model.verification contract; board generation is 300s.
 SOURCE_MAX_AGE_SECONDS = 108000
@@ -832,6 +840,183 @@ def _load_sweep(path: Optional[str], now: dt.datetime) -> Dict[str, Any]:
     }
 
 
+class _LatestSweepJSONIssue(Exception):
+    """A fixed-code parse failure for the optional latest sweep outcome."""
+
+
+def _latest_sweep_object_pairs(pairs: Iterable[Tuple[str, Any]]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _LatestSweepJSONIssue("duplicate_key")
+        result[key] = value
+    return result
+
+
+def _latest_sweep_finite_float(value: str) -> float:
+    result = float(value)
+    if not math.isfinite(result):
+        raise _LatestSweepJSONIssue("nonfinite_number")
+    return result
+
+
+def _latest_sweep_reject_nonfinite(value: str) -> None:
+    raise _LatestSweepJSONIssue("nonfinite_number")
+
+
+def _latest_sweep_unavailable(reference: str, issue: str, now: dt.datetime,
+                              *, sha256: Optional[str] = None) -> Dict[str, Any]:
+    result = _unavailable(reference, issue, observed_at=_stamp(now), sha256=sha256)
+    result.update({
+        "schema": LATEST_SWEEP_SCHEMA,
+        "authority": "none",
+        "delivery": "unverified",
+        "completion": "unverified",
+        "limits": [
+            "latest sweep source is unavailable; no conclusion about changes is available",
+            "source text is untrusted advisory text; no authority, delivery, completion, or execution claim is inferred",
+        ],
+    })
+    return result
+
+
+def _latest_sweep_text(value: Any, limit: int) -> Optional[str]:
+    cleaned = _clean_text(value, limit)
+    return cleaned if cleaned else None
+
+
+def _latest_sweep_material_changes(data: Mapping[str, Any]) -> Tuple[List[Dict[str, str]], int]:
+    """Project only the outcome's explicit key/string change map."""
+    raw = data.get("material_change")
+    candidates: List[Tuple[Any, Any]] = list(raw.items()) if isinstance(raw, Mapping) else []
+
+    projected: List[Dict[str, str]] = []
+    omitted = 0
+    for key_raw, value_raw in candidates:
+        key = _latest_sweep_text(key_raw, LATEST_CHANGE_KEY_CHARS)
+        excerpt = _latest_sweep_text(value_raw, LATEST_CHANGE_EXCERPT_CHARS)
+        if key is None or excerpt is None:
+            continue
+        if len(projected) >= LATEST_CHANGE_MAX_COUNT:
+            omitted += 1
+            continue
+        projected.append({"key": key, "excerpt": excerpt})
+    return projected, omitted
+
+
+def _latest_sweep_next_action(data: Mapping[str, Any]) -> Optional[str]:
+    raw = data.get("next_action")
+    if isinstance(raw, str):
+        return _latest_sweep_text(raw, LATEST_NEXT_ACTION_CHARS)
+    if isinstance(raw, Mapping):
+        for field in ("text", "advisory_text", "what"):
+            value = _latest_sweep_text(raw.get(field), LATEST_NEXT_ACTION_CHARS)
+            if value is not None:
+                return value
+    return None
+
+
+def _latest_sweep_coverage(value: Any) -> Tuple[Any, str]:
+    if isinstance(value, str):
+        return _latest_sweep_text(value, MAX_SOURCE_TEXT), "unknown"
+    if not isinstance(value, Mapping):
+        return None, "unknown"
+    projected: Dict[str, str] = {}
+    for key_raw, state_raw in value.items():
+        if len(projected) >= LATEST_COVERAGE_MAX_SOURCES:
+            break
+        if not isinstance(key_raw, str) or not key_raw or len(key_raw) > 80:
+            continue
+        key = key_raw.strip()
+        if not key or not all(char.isalnum() or char in "._:/-" for char in key):
+            continue
+        if not isinstance(state_raw, Mapping):
+            continue
+        state = _latest_sweep_text(state_raw.get("state"), MAX_SOURCE_TEXT)
+        if state is not None:
+            projected[key] = state
+    return (projected or None), ("partial" if projected else "unknown")
+
+
+def _load_latest_sweep(path: Optional[str], now: dt.datetime) -> Dict[str, Any]:
+    """Load one explicit IRIS sweep outcome without following linked paths."""
+    reference = _reference(path, "latest-sweep-outcome")
+    if path is None:
+        return _latest_sweep_unavailable(reference, "not_configured", now)
+    try:
+        candidate = Path(path).expanduser()
+    except (TypeError, ValueError, RuntimeError):
+        return _latest_sweep_unavailable(reference, "declared_path_invalid", now)
+    raw, read_issue = _read_secure_regular(candidate, SWEEP_MAX_BYTES)
+    if read_issue is not None or raw is None:
+        return _latest_sweep_unavailable(reference, read_issue or "declared_file_unavailable", now)
+    outcome_sha = hashlib.sha256(raw).hexdigest()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return _latest_sweep_unavailable(reference, "latest_sweep_utf8", now, sha256=outcome_sha)
+    try:
+        data = json.loads(
+            text,
+            object_pairs_hook=_latest_sweep_object_pairs,
+            parse_constant=_latest_sweep_reject_nonfinite,
+            parse_float=_latest_sweep_finite_float,
+        )
+    except _LatestSweepJSONIssue as exc:
+        return _latest_sweep_unavailable(reference, "latest_sweep_" + str(exc), now, sha256=outcome_sha)
+    except (ValueError, RecursionError):
+        return _latest_sweep_unavailable(reference, "latest_sweep_malformed_json", now, sha256=outcome_sha)
+    if not isinstance(data, dict):
+        return _latest_sweep_unavailable(reference, "latest_sweep_not_object", now, sha256=outcome_sha)
+    if data.get("schema") != LATEST_SWEEP_SCHEMA:
+        return _latest_sweep_unavailable(reference, "latest_sweep_schema_invalid", now, sha256=outcome_sha)
+
+    run_id = _identity(data.get("run_id"), 160)
+    if run_id is None:
+        return _latest_sweep_unavailable(reference, "latest_sweep_run_id_invalid", now, sha256=outcome_sha)
+    started, started_issue = _parse_time(data.get("started_at"))
+    ended, ended_issue = _parse_time(data.get("ended_at"))
+    if started_issue is not None:
+        return _latest_sweep_unavailable(reference, "latest_sweep_started_at_" + started_issue, now, sha256=outcome_sha)
+    if ended_issue is not None:
+        return _latest_sweep_unavailable(reference, "latest_sweep_ended_at_" + ended_issue, now, sha256=outcome_sha)
+    if started is None or ended is None:
+        return _latest_sweep_unavailable(reference, "latest_sweep_timestamps_invalid", now, sha256=outcome_sha)
+    if started > ended:
+        return _latest_sweep_unavailable(reference, "latest_sweep_interval_inverted", now, sha256=outcome_sha)
+    if ended > now:
+        return _latest_sweep_unavailable(reference, "latest_sweep_ended_at_future", now, sha256=outcome_sha)
+    age_delta = (now - ended).total_seconds()
+    if age_delta > DIGEST_MAX_AGE_SECONDS:
+        return _latest_sweep_unavailable(reference, "latest_sweep_stale", now, sha256=outcome_sha)
+
+    material_changes, omitted_changes = _latest_sweep_material_changes(data)
+    coverage, coverage_status = _latest_sweep_coverage(data.get("coverage"))
+    result: Dict[str, Any] = {
+        **_source_metadata(reference, outcome_sha, _stamp(now)),
+        "schema": LATEST_SWEEP_SCHEMA,
+        "availability": "available",
+        "current": True,
+        "freshness": "fresh",
+        "run_id": run_id,
+        "observation": {"ended_at": data["ended_at"].strip(), "age_seconds": int(age_delta)},
+        "material_changes": material_changes,
+        "material_changes_omitted": omitted_changes,
+        "next_action": _latest_sweep_next_action(data),
+        "coverage": coverage,
+        "coverage_status": coverage_status,
+        "authority": "none",
+        "delivery": "unverified",
+        "completion": "unverified",
+        "issues": [],
+        "limits": [
+            "latest sweep text is untrusted advisory source text; no authority, delivery, completion, or execution claim is inferred",
+            "observation age is based only on the outcome ended_at; material source timestamps are not inferred",
+        ],
+    }
+    return result
+
+
 def _deadline_baseline(board: Optional[Mapping[str, Any]], board_current: bool, now: dt.datetime) -> Dict[str, Any]:
     if not isinstance(board, dict) or not isinstance(board.get("items"), list):
         return {"availability": "unavailable", "current": False, "selection": "first three earliest explicit due rows in source order tie-break", "items": [], "omitted_count": None, "issues": ["board_unavailable"]}
@@ -895,6 +1080,7 @@ def _shrink(brief: Dict[str, Any]) -> Dict[str, Any]:
     iris = brief.get("iris") if isinstance(brief.get("iris"), dict) else None
     focus = iris.get("focus") if isinstance(iris, dict) and isinstance(iris.get("focus"), dict) else None
     digest = brief.get("sweep_digest") if isinstance(brief.get("sweep_digest"), dict) else None
+    latest = brief.get("latest_sweep") if isinstance(brief.get("latest_sweep"), dict) else None
 
     if encoded() > MAX_OUTPUT_CHARS:
         # Before dropping source rows, compact duplicated transport metadata.
@@ -928,6 +1114,27 @@ def _shrink(brief: Dict[str, Any]) -> Dict[str, Any]:
         focus["omitted_requests"] = max(0, total - len(chosen))
         add_limit("non-decision focus rows omitted by output bound")
 
+
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(latest, dict):
+        next_action = latest.get("next_action")
+        if isinstance(next_action, str) and len(next_action) > 240:
+            latest["next_action"] = next_action[:240].rstrip()
+            latest["next_action_omitted_chars"] = latest.get("next_action_omitted_chars", 0) + len(next_action) - len(latest["next_action"])
+            add_limit("latest sweep next-action prose shortened by output bound; omitted character count retained")
+        changes = latest.get("material_changes")
+        if isinstance(changes, list):
+            omitted_chars = 0
+            for change in changes:
+                if not isinstance(change, dict) or not isinstance(change.get("excerpt"), str):
+                    continue
+                excerpt = change["excerpt"]
+                if len(excerpt) > 240:
+                    change["excerpt"] = excerpt[:240].rstrip()
+                    omitted_chars += len(excerpt) - len(change["excerpt"])
+            if omitted_chars:
+                latest["material_changes_omitted_chars"] = latest.get("material_changes_omitted_chars", 0) + omitted_chars
+                add_limit("latest sweep material-change excerpts shortened by output bound; omitted character count retained")
+
     if encoded() > MAX_OUTPUT_CHARS and isinstance(digest, dict):
         text = digest.get("untrusted_advisory_text")
         if isinstance(text, str) and len(text) > 1000:
@@ -958,7 +1165,7 @@ def _shrink(brief: Dict[str, Any]) -> Dict[str, Any]:
     if encoded() > MAX_OUTPUT_CHARS:
         # Keep the useful content before duplicated explanation. An available
         # priority digest must not silently become an empty successful source.
-        sections = [work, iris, digest, brief.get("deadline_baseline")]
+        sections = [work, iris, latest, digest, brief.get("deadline_baseline")]
         if isinstance(iris, dict):
             sections.extend(iris.values())
             local = iris.get("local_agent")
@@ -1010,6 +1217,42 @@ def _shrink(brief: Dict[str, Any]) -> Dict[str, Any]:
                         row[key] = row[key][:50].rstrip() + " [excerpt]"
             priority["omitted_links"] = omitted_links
             add_limit("priority prose excerpted and links omitted by output bound; row identities, timestamps and counts retained")
+            for row in priority["rows"]:
+                if isinstance(row, dict):
+                    row.pop("estimate_basis", None)
+                    for key, limit in (("label", 32), ("title", 32), ("owner", 24), ("reason", 32)):
+                        if isinstance(row.get(key), str) and len(row[key]) > limit:
+                            row[key] = row[key][:limit].rstrip() + " [excerpt]"
+            for key in ("coverage_note", "capacity"):
+                if isinstance(priority.get(key), str) and len(priority[key]) > 80:
+                    priority[key] = priority[key][:80].rstrip() + " [excerpt]"
+            add_limit("optional priority explanation fields shortened while preserving all current row identities")
+
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(latest, dict):
+        next_action = latest.get("next_action")
+        if isinstance(next_action, str) and len(next_action) > 100:
+            latest["next_action"] = next_action[:100].rstrip()
+            latest["next_action_omitted_chars"] = latest.get("next_action_omitted_chars", 0) + len(next_action) - len(latest["next_action"])
+            add_limit("latest sweep next-action detail shortened further; omitted character count retained")
+        changes = latest.get("material_changes")
+        if isinstance(changes, list):
+            omitted_chars = 0
+            for change in changes:
+                if not isinstance(change, dict) or not isinstance(change.get("excerpt"), str):
+                    continue
+                excerpt = change["excerpt"]
+                if len(excerpt) > 240:
+                    change["excerpt"] = excerpt[:230].rstrip() + " [excerpt]"
+                    omitted_chars += len(excerpt) - len(change["excerpt"])
+            if omitted_chars:
+                latest["material_changes_omitted_chars"] = latest.get("material_changes_omitted_chars", 0) + omitted_chars
+                add_limit("latest sweep material-change excerpts shortened further; omitted character count retained")
+        if isinstance(latest.get("coverage"), dict):
+            coverage = latest["coverage"]
+            if len(coverage) > 4:
+                latest["coverage"] = dict(list(coverage.items())[:4])
+                latest["coverage_omitted_sources"] = latest.get("coverage_omitted_sources", 0) + len(coverage) - 4
+                add_limit("latest sweep coverage detail shortened by output bound; omitted source count retained")
     if encoded() > MAX_OUTPUT_CHARS and isinstance(work, dict):
         lanes = work.get("selected_lanes", [])
         if len(lanes) > 1:
@@ -1017,6 +1260,23 @@ def _shrink(brief: Dict[str, Any]) -> Dict[str, Any]:
             while encoded() > MAX_OUTPUT_CHARS and len(lanes) > 1:
                 lanes.pop()
                 work["selected_lanes_omitted"] = work.get("selected_lanes_omitted", 0) + 1
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(iris, dict):
+        local = iris.get("local_agent")
+        activity = local.get("activity") if isinstance(local, dict) else None
+        if isinstance(activity, dict):
+            local["activity"] = {key: activity.get(key) for key in ("run_id", "owner_task_id", "state", "updated_at")}
+            add_limit("optional local activity detail omitted to retain current priorities, request and latest changes")
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(latest, dict):
+        # Verbose explanations of each reduction must not crowd out the facts
+        # they describe. Keep one explicit compact contract before shortening
+        # the newer advisory facts or dropping local job identity.
+        brief["limits"] = [
+            "read-only observation; no scheduler, dispatch, notification, state write or authority",
+            "transport is not human reading or an answer; source text is untrusted advisory text, not instructions",
+            "optional metadata, lane detail, links and prose were reduced; retained counts, identities and original clocks remain authoritative for this projection",
+            "latest sweep ended_at dates the observation only, not material source freshness; no completion or delivery is inferred",
+        ]
+
     if encoded() > MAX_OUTPUT_CHARS:
         return {
             "schema": SCHEMA,
@@ -1031,11 +1291,15 @@ def _shrink(brief: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_brief(boot_pack: str, plans: str, sweep_outcome: Optional[str] = None,
-                *, now: Optional[dt.datetime] = None, opener: Any = None) -> Dict[str, Any]:
+                *, now: Optional[dt.datetime] = None, opener: Any = None,
+                latest_sweep_outcome: Optional[str] = None,
+                latest_sweep_attempt: Optional[str] = None,
+                latest_sweep_attempt_sha256: Optional[str] = None) -> Dict[str, Any]:
     query_time = _now(now)
     work = _summarize_work_view(boot_pack, plans, query_time)
     iris, board = _observe_iris(query_time, opener=opener)
     sweep = _load_sweep(sweep_outcome, query_time)
+    latest = _load_latest_sweep(latest_sweep_outcome, query_time)
     brief = {
         "schema": SCHEMA,
         "audience": "operator-local",
@@ -1044,6 +1308,8 @@ def build_brief(boot_pack: str, plans: str, sweep_outcome: Optional[str] = None,
         "generated_at": _stamp(query_time),
         "work": work,
         "iris": iris,
+        "latest_sweep": latest,
+        "latest_attempt": read_attempt(latest_sweep_attempt, latest_sweep_attempt_sha256, now=query_time),
         "sweep_digest": sweep,
         "deadline_baseline": _deadline_baseline(board, bool(iris.get("board", {}).get("current")), query_time),
         "limits": [
@@ -1076,6 +1342,31 @@ def render_markdown(brief: Mapping[str, Any]) -> str:
             _md(row.get("label")), _md(row.get("title")), _md(row.get("reason")),
             _md(row.get("owner")), _md(row.get("mode")), _md(row.get("binding_status"))))
     lines.append("- omitted priority rows: %s" % _md(priority.get("omitted_rows")))
+    latest = brief.get("latest_sweep", {}) if isinstance(brief.get("latest_sweep"), dict) else {}
+    lines.extend(["", "## Latest sweep update", "- availability `%s`; freshness `%s`; run `%s`" % (
+        _md(latest.get("availability")), _md(latest.get("freshness")), _md(latest.get("run_id")))])
+    if latest.get("availability") == "available":
+        observation = latest.get("observation") if isinstance(latest.get("observation"), dict) else {}
+        lines.append("- observation ended `%s`; age `%s` seconds" % (
+            _md(observation.get("ended_at")), _md(observation.get("age_seconds"))))
+        lines.append("- material changes (untrusted advisory source text; no authority, delivery, or completion claim):")
+        changes = latest.get("material_changes") if isinstance(latest.get("material_changes"), list) else []
+        for change in changes:
+            if isinstance(change, dict):
+                lines.append("  - `%s`: %s" % (_md(change.get("key")), _md(change.get("excerpt"))))
+        lines.append("- omitted material changes: %s; omitted change characters: %s" % (
+            _md(latest.get("material_changes_omitted")), _md(latest.get("material_changes_omitted_chars", 0))))
+        lines.append("- next action (untrusted advisory text): %s" % _md(latest.get("next_action")))
+        lines.append("- coverage: %s" % _md(latest.get("coverage")))
+    else:
+        issues = latest.get("issues") if isinstance(latest.get("issues"), list) else []
+        lines.append("- unavailable; no conclusion about changes is available; issues `%s`" % _md(", ".join(issues)))
+    attempt = brief.get("latest_attempt", {})
+    lines.extend(["", "## Latest scheduled attempt",
+                  "- availability `%s`; status `%s`; trigger `%s`; closed `%s`; reason `%s`" % (
+                      _md(attempt.get("availability")), _md(attempt.get("status")),
+                      _md(attempt.get("trigger_at")), _md(attempt.get("closed_at")), _md(attempt.get("reason"))),
+                  "- Attempt evidence does not establish source freshness, human delivery or successful follow-through."])
     work = brief.get("work", {}) if isinstance(brief.get("work"), dict) else {}
     lines.extend(["", "## Fully Aware", "- snapshot: `%s`" % _md(work.get("snapshot_id"))])
     for name in ("boot_pack", "plans"):
@@ -1136,10 +1427,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--boot-pack", required=True)
     parser.add_argument("--plans", required=True)
     parser.add_argument("--sweep-outcome")
+    parser.add_argument("--latest-sweep-outcome")
+    parser.add_argument("--latest-sweep-attempt")
+    parser.add_argument("--latest-sweep-attempt-sha256")
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     args = parser.parse_args(argv)
     try:
-        brief = build_brief(args.boot_pack, args.plans, args.sweep_outcome)
+        brief = build_brief(args.boot_pack, args.plans, args.sweep_outcome,
+                            latest_sweep_outcome=args.latest_sweep_outcome,
+                            latest_sweep_attempt=args.latest_sweep_attempt,
+                            latest_sweep_attempt_sha256=args.latest_sweep_attempt_sha256)
     except (Exception,):  # Source/type failures become an honest bounded result.
         brief = _fallback()
     if args.format == "markdown":

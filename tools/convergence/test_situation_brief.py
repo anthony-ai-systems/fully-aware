@@ -88,10 +88,28 @@ def priority_payload():
                 "prepared_at": "2026-09-20T17:58:00Z", "evidence_cutoff": "2026-09-20T17:57:00Z",
                 "digest_cutoff": "2026-09-20T17:56:00Z", "digest_presentation": "recorded_unverified",
                 "coverage": "partial", "coverage_note": "Known sources only", "capacity": "One ratifiable block",
-                "rows": [{"id": "priority-%d" % i, "label": "Now" if i == 0 else "Next",
+            "rows": [{"id": "priority-%d" % i, "label": "Now" if i == 0 else "Next",
                           "title": "Priority %d" % i, "owner": "Existing owner", "reason": "Explicit user direction",
                           "mode": "anthony_judgment", "estimated_minutes": 45, "estimate_basis": "Uncalibrated",
-                          "url": None, "binding_status": "current"} for i in range(4)]}}
+                      "url": None, "binding_status": "current"} for i in range(4)]}}
+
+
+def latest_outcome(ended="2026-09-20T17:30:00Z"):
+    return {
+        "schema": "iris-sweep-outcome/v1",
+        "run_id": "iris-midday-synthetic-1",
+        "started_at": "2026-09-20T16:00:00Z",
+        "ended_at": ended,
+        "material_change": {
+            "board": "A synthetic board item changed.",
+            "calendar": "A synthetic calendar fact changed.",
+            "focus": "A synthetic focus request changed.",
+        },
+        "next_action": "Review the synthetic update with the existing owner.",
+        "coverage": {"board": {"state": "all synthetic board partitions complete", "source_cutoff": "private"},
+                     "calendar": {"state": "synthetic calendar partial", "path": "private"},
+                     "private": {"source_cutoff": "do not expose"}},
+    }
 
 
 def maximal_priority_payload():
@@ -300,6 +318,100 @@ class FileTests(unittest.TestCase):
         outcome.write_text(json.dumps(record), encoding="utf-8")
         self.assertEqual(brief._load_sweep(str(outcome), NOW)["issues"], ["daily_digest_timestamp_future"])
 
+    def test_latest_midday_outcome_is_separate_from_frozen_digest(self):
+        morning_text = "Frozen morning priorities."
+        morning_digest = self.root / "morning.md"
+        morning_digest.write_text(morning_text, encoding="utf-8")
+        morning = self.write_json("morning-outcome.json", {"daily_digest": {
+            "path": str(morning_digest), "sha256": hashlib.sha256(morning_text.encode()).hexdigest(),
+            "evidence_cutoff": "2026-09-20T09:00:00Z", "timezone": "America/Los_Angeles", "date": "2026-09-20"}})
+        latest = self.write_json("latest-outcome.json", latest_outcome())
+        output = self.make_brief(self.endpoints(), sweep_outcome=str(morning), latest_sweep_outcome=str(latest))
+        projected = output["latest_sweep"]
+        self.assertEqual(projected["availability"], "available")
+        self.assertEqual(projected["run_id"], "iris-midday-synthetic-1")
+        self.assertEqual(projected["observation"], {"ended_at": "2026-09-20T17:30:00Z", "age_seconds": 1800})
+        self.assertEqual([item["key"] for item in projected["material_changes"]], ["board", "calendar", "focus"])
+        self.assertEqual(projected["coverage"], {"board": "all synthetic board partitions complete", "calendar": "synthetic calendar partial"})
+        self.assertEqual(projected["coverage_status"], "partial")
+        self.assertNotIn("started_at", projected)
+        self.assertEqual(output["sweep_digest"]["untrusted_advisory_text"], morning_text)
+        self.assertTrue(output["iris"]["board"]["current"])
+        raw = latest.read_bytes()
+        self.assertEqual(projected["sha256"], hashlib.sha256(raw).hexdigest())
+
+    def test_latest_sweep_dates_are_strict_and_staleness_is_local(self):
+        cases = {
+            "future": latest_outcome("2026-09-20T18:00:01Z"),
+            "inverted": dict(latest_outcome(), started_at="2026-09-20T17:31:00Z"),
+            "naive": dict(latest_outcome(), ended_at="2026-09-20T17:30:00"),
+            "stale": dict(latest_outcome("2026-09-19T17:59:59Z"), started_at="2026-09-19T16:00:00Z"),
+        }
+        expected = {
+            "future": "latest_sweep_ended_at_future",
+            "inverted": "latest_sweep_interval_inverted",
+            "naive": "latest_sweep_ended_at_timestamp_naive",
+            "stale": "latest_sweep_stale",
+        }
+        for name, record in cases.items():
+            with self.subTest(name=name):
+                path = self.write_json("latest-%s.json" % name, record)
+                projected = brief._load_latest_sweep(str(path), NOW)
+                self.assertEqual(projected["availability"], "unavailable")
+                self.assertEqual(projected["issues"], [expected[name]])
+                self.assertFalse(projected["current"])
+                self.assertNotIn("no changes", json.dumps(projected).lower())
+
+    def test_latest_sweep_run_id_is_exact_and_bounded(self):
+        for value in (" " + "x" * 159, "x" * 161, "run\u202er-1"):
+            with self.subTest(value=value):
+                path = self.write_json("bad-run-id-%d.json" % len(value), dict(latest_outcome(), run_id=value))
+                result = brief._load_latest_sweep(str(path), NOW)
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertEqual(result["issues"], ["latest_sweep_run_id_invalid"])
+
+    def test_latest_sweep_malformed_schema_symlink_and_oversize_are_unavailable(self):
+        malformed = self.root / "malformed.json"
+        malformed.write_text("{", encoding="utf-8")
+        result = brief._load_latest_sweep(str(malformed), NOW)
+        self.assertEqual(result["issues"], ["latest_sweep_malformed_json"])
+        self.assertEqual(result["sha256"], hashlib.sha256(b"{").hexdigest())
+
+        wrong_schema = self.write_json("wrong-schema.json", {"schema": "other/v1"})
+        self.assertEqual(brief._load_latest_sweep(str(wrong_schema), NOW)["issues"], ["latest_sweep_schema_invalid"])
+
+        target = self.write_json("target.json", latest_outcome())
+        link = self.root / "latest-link.json"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        self.assertEqual(brief._load_latest_sweep(str(link), NOW)["availability"], "unavailable")
+
+        oversized = self.root / "oversized.json"
+        oversized.write_bytes(b"x" * (brief.SWEEP_MAX_BYTES + 1))
+        oversize_result = brief._load_latest_sweep(str(oversized), NOW)
+        self.assertEqual(oversize_result["availability"], "unavailable")
+        self.assertIn(oversize_result["issues"][0], {"declared_file_invalid", "declared_file_oversize"})
+
+    def test_latest_sweep_does_not_read_linked_digest_or_private_nested_values(self):
+        linked = self.root / "private-linked.md"
+        linked.write_text("secret linked text", encoding="utf-8")
+        record = latest_outcome()
+        record.update({"daily_digest": {"path": str(linked), "sha256": "a" * 64},
+                       "private": {"secret": "do not expose"},
+                       "next_action": {"text": "Safe advisory text", "private": "do not expose"},
+                       "material_change": {"safe": "Safe change", "private": {"secret": "do not expose"}}})
+        latest = self.write_json("latest-private.json", record)
+        with mock.patch.object(brief, "_read_secure_regular", wraps=brief._read_secure_regular) as reader:
+            projected = brief._load_latest_sweep(str(latest), NOW)
+        self.assertEqual([call.args[0] for call in reader.call_args_list], [Path(latest)])
+        encoded = json.dumps(projected)
+        self.assertNotIn("secret linked text", encoded)
+        self.assertNotIn("do not expose", encoded)
+        self.assertEqual(projected["next_action"], "Safe advisory text")
+        self.assertEqual(projected["material_changes"], [{"key": "safe", "excerpt": "Safe change"}])
+
     def test_deadline_baseline_is_explicit_due_only_and_bounded(self):
         raw = board()
         raw["items"] = [
@@ -367,7 +479,44 @@ class FileTests(unittest.TestCase):
     def test_maximal_priorities_with_incoherent_board_remain_bounded(self):
         self.assert_large_history(maximal_priority_payload(), incoherent=True)
 
-    def assert_large_history(self, priority, incoherent=False):
+    def test_latest_changes_survive_maximal_existing_payload_and_markdown_bound(self):
+        latest = latest_outcome()
+        latest["material_change"] = {
+            "board": "B" * 400,
+            "calendar": "C" * 400,
+            "focus": "F" * 400,
+        }
+        latest["next_action"] = "N" * 400
+        latest["coverage"] = {"source-%d" % i: {"state": "synthetic source state %d" % i} for i in range(8)}
+        latest_path = self.write_json("maximal-latest.json", latest)
+        output = self.assert_large_history(maximal_priority_payload(), latest_path=str(latest_path))
+        projected = output["latest_sweep"]
+        self.assertEqual(projected["availability"], "available")
+        self.assertEqual([item["key"] for item in projected["material_changes"]], ["board", "calendar", "focus"])
+        self.assertGreater(projected.get("coverage_omitted_sources", 0), 0)
+        self.assertLessEqual(len(json.dumps(output, ensure_ascii=False, separators=(",", ":"))), brief.MAX_OUTPUT_CHARS)
+        rendered = brief.render_markdown(output)
+        self.assertLessEqual(len(rendered), brief.MAX_OUTPUT_CHARS)
+        self.assertLess(rendered.index("## Latest sweep update"), rendered.index("## Existing sweep digest"))
+        self.assertIn("`board`", rendered)
+
+    def test_missed_attempt_survives_maximal_brief_without_freshening_sources(self):
+        attempt = {"availability": "available", "sha256": "a" * 64,
+                   "run_id": "20260922T170000Z-late-" + "x" * 80,
+                   "status": "missed_before_start", "trigger_at": "2026-09-20T16:01:00Z",
+                   "closed_at": VERIFIED, "recorded_at": VERIFIED,
+                   "intended_slot": {"local_date": "2026-09-20", "hour": 9, "timezone": "America/Los_Angeles"},
+                   "trigger_to_close_seconds": 7080, "age_seconds": 60,
+                   "authority": "none", "source_freshness": "not_established", "human_delivery": "unverified"}
+        latest_path = self.write_json("latest-with-attempt.json", latest_outcome())
+        with mock.patch.object(brief, "read_attempt", return_value=attempt):
+            output = self.assert_large_history(maximal_priority_payload(), latest_path=str(latest_path))
+        self.assertEqual(output["latest_attempt"], attempt)
+        self.assertEqual(output["sweep_digest"]["source_cutoff"], VERIFIED)
+        self.assertIn("missed_before_start", brief.render_markdown(output))
+        self.assertLessEqual(len(brief.render_markdown(output)), brief.MAX_OUTPUT_CHARS)
+
+    def assert_large_history(self, priority, incoherent=False, latest_path=None):
         packet = focus()
         row = packet["requests"][0]
         packet["counts"].update(reconciliation=0, history=3)
@@ -397,7 +546,8 @@ class FileTests(unittest.TestCase):
         if incoherent:
             endpoints.after = board(proof_hash="d" * 64)
         with mock.patch.object(brief, "fetch_endpoint", side_effect=endpoints):
-            output = brief.build_brief(str(boot_path), str(plans_path), str(outcome), now=NOW)
+            output = brief.build_brief(str(boot_path), str(plans_path), str(outcome), now=NOW,
+                                       latest_sweep_outcome=latest_path)
         self.assertLessEqual(len(json.dumps(output, ensure_ascii=False, separators=(",", ":"))), brief.MAX_OUTPUT_CHARS)
         self.assertNotEqual(output.get("status"), "bounded_unavailable")
         excerpt = output["sweep_digest"]["untrusted_advisory_text"]
@@ -423,6 +573,7 @@ class FileTests(unittest.TestCase):
         self.assertIn("recorded responses 1", markdown)
         self.assertIn("omitted requests:", markdown)
         self.assertIn("transport is not human reading or an answer", " ".join(output["limits"]))
+        return output
 
     def test_history_tie_breakers_do_not_reorder_current_decisions(self):
         packet = focus()
