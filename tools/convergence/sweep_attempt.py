@@ -28,7 +28,7 @@ def receipt_facts(receipt, run_id):
             raise ValueError('receipt_time_order')
     elif receipt.get('schema') == 'iris-sweep-late-closure/v1':
         if receipt.get('automation_id') != AUTOMATION: raise ValueError('receipt_automation_mismatch')
-        if receipt.get('owner') is not None and receipt['owner'] != 'IRIS existing task ' + OWNER:
+        if receipt.get('owner') != 'IRIS existing task ' + OWNER:
             raise ValueError('receipt_owner_mismatch')
         closed = receipt.get('late_closure_at'); status = 'unknown'
         if (receipt.get('original_start_monotonic') == 'not_recorded'
@@ -47,7 +47,7 @@ def validate(value, envelope_path, *, root=ROOT, now=None):
     if not isinstance(value, dict) or set(value) != KEYS or value.get('schema') != SCHEMA:
         raise ValueError('invalid_attempt_envelope')
     path = Path(envelope_path); root = Path(root)
-    if not path.is_absolute() or path.resolve() != path or path.parent.parent != root.resolve():
+    if path.name != 'attempt.json' or not path.is_absolute() or path.resolve() != path or path.parent.parent != root.resolve():
         raise ValueError('attempt_outside_run_root')
     clock.directory(path.parent)
     if value['run_id'] != path.parent.name or value['automation_id'] != AUTOMATION or value['owner_thread_id'] != OWNER:
@@ -72,6 +72,8 @@ def validate(value, envelope_path, *, root=ROOT, now=None):
         raise ValueError('receipt_outside_same_run')
     raw, receipt = clock.read(target)
     if clock.sha(raw) != ref['sha256']: raise ValueError('receipt_hash_mismatch')
+    expected_schema = 'iris-sweep-outcome/v1' if target.name == 'outcome.json' else 'iris-sweep-late-closure/v1'
+    if receipt.get('schema') != expected_schema: raise ValueError('receipt_filename_schema_mismatch')
     r_trigger, r_closed, status = receipt_facts(receipt, value['run_id'])
     if value['trigger_at'] != r_trigger or value['closed_at'] != r_closed or value['status'] != status:
         raise ValueError('receipt_facts_mismatch')

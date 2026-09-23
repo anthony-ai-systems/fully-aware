@@ -1363,9 +1363,9 @@ def render_markdown(brief: Mapping[str, Any]) -> str:
         lines.append("- unavailable; no conclusion about changes is available; issues `%s`" % _md(", ".join(issues)))
     attempt = brief.get("latest_attempt", {})
     lines.extend(["", "## Latest scheduled attempt",
-                  "- availability `%s`; status `%s`; trigger `%s`; closed `%s`" % (
+                  "- availability `%s`; status `%s`; trigger `%s`; closed `%s`; reason `%s`" % (
                       _md(attempt.get("availability")), _md(attempt.get("status")),
-                      _md(attempt.get("trigger_at")), _md(attempt.get("closed_at"))),
+                      _md(attempt.get("trigger_at")), _md(attempt.get("closed_at")), _md(attempt.get("reason"))),
                   "- Attempt evidence does not establish source freshness, human delivery or successful follow-through."])
     work = brief.get("work", {}) if isinstance(brief.get("work"), dict) else {}
     lines.extend(["", "## Fully Aware", "- snapshot: `%s`" % _md(work.get("snapshot_id"))])

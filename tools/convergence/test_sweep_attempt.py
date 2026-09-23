@@ -18,7 +18,7 @@ class AttemptTests(unittest.TestCase):
         self.root=Path(self.tmp.name).resolve(); self.run=self.root/'run-a'; self.run.mkdir(mode=0o700)
         self.receipt={'schema':'iris-sweep-late-closure/v1','automation_id':a.AUTOMATION,
                       'trigger_at':TRIGGER,'late_closure_at':CLOSED,'original_start_monotonic':'not_recorded',
-                      'work_admission':'refused; no fresh work'}
+                      'work_admission':'refused; no fresh work','owner':'IRIS existing task ' + a.OWNER}
         self.source=self.run/'late-closure.json'; self.save(self.source,self.receipt)
     def save(self,path,value):
         path.write_bytes(c.encode(value)); path.chmod(0o600)
@@ -30,6 +30,15 @@ class AttemptTests(unittest.TestCase):
         self.assertEqual(result['source_freshness'],'not_established'); self.assertEqual(result['authority'],'none')
     def test_conflicting_original_owner_refused(self):
         self.receipt["owner"] = "another owner"; self.save(self.source, self.receipt)
+        with self.assertRaises(ValueError): self.create()
+    def test_missing_original_owner_refused(self):
+        del self.receipt['owner']; self.save(self.source, self.receipt)
+        with self.assertRaises(ValueError): self.create()
+    def test_wrong_envelope_filename_refused(self):
+        p=self.create(); alias=self.run/'renamed.json'; alias.write_bytes(Path(p['path']).read_bytes()); alias.chmod(0o600)
+        self.assertEqual(a.read_attempt(str(alias),p['sha256'],root=self.root,now=NOW)['availability'],'unavailable')
+    def test_receipt_filename_schema_mismatch_refused(self):
+        self.source=self.run/'outcome.json'; self.save(self.source,self.receipt)
         with self.assertRaises(ValueError): self.create()
     def test_envelope_never_overwrites(self):
         self.create()
