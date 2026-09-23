@@ -149,7 +149,7 @@ class PriorityContextTests(unittest.TestCase):
 
     def test_maximal_valid_projection_stays_bounded_without_losing_ids_or_times(self):
         rows = []
-        for index in range(4):
+        for index in range(7):
             item = row(index, long=True, url="https://docs.google.com/document/d/abcdefghijkl/edit")
             item["id"] = ("r%d-" % index) + "x" * 96
             item["label"] = "L" * 160
