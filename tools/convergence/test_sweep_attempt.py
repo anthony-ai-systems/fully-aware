@@ -63,12 +63,24 @@ class AttemptTests(unittest.TestCase):
         p=self.create(); source=Path(p['path']); alias=self.run/'alias.json'; alias.symlink_to(source)
         self.assertEqual(a.read_attempt(str(alias),p['sha256'],root=self.root,now=NOW)['availability'],'unavailable')
         self.assertEqual(a.read_attempt(p['path'],None,root=self.root,now=NOW)['availability'],'unavailable')
+    def test_deep_json_attempt_is_unavailable(self):
+        path=self.run/'attempt.json'; raw=('[' * 8000 + '0' + ']' * 8000).encode()
+        self.assertEqual(len(raw),16001)
+        path.write_bytes(raw); path.chmod(0o600)
+        self.assertEqual(a.read_attempt(str(path),c.sha(raw),root=self.root,now=NOW),
+                         {'availability':'unavailable','reason':'attempt_validation_failed','authority':'none'})
     def test_normal_outcome_is_recorded_not_success(self):
         self.source=self.run/'outcome.json'
         self.receipt={'schema':'iris-sweep-outcome/v1','run_id':'run-a','trigger_at':TRIGGER,
                       'started_at':'2026-09-23T00:01:25Z','ended_at':'2026-09-23T00:10:00Z','status':'partial'}
         self.save(self.source,self.receipt); p=self.create(); result=a.read_attempt(p['path'],p['sha256'],root=self.root,now=NOW)
         self.assertEqual(result['status'],'outcome_recorded'); self.assertNotIn('success',result)
+    def test_normal_outcome_under_late_closure_is_refused(self):
+        self.source=self.run/'late-closure.json'
+        self.receipt={'schema':'iris-sweep-outcome/v1','run_id':'run-a','trigger_at':TRIGGER,
+                      'started_at':'2026-09-23T00:01:25Z','ended_at':'2026-09-23T00:10:00Z','status':'partial'}
+        self.save(self.source,self.receipt)
+        with self.assertRaises(ValueError): self.create()
     def test_uncertain_late_attempt_stays_unknown(self):
         self.receipt['original_start_monotonic']='unknown'; self.save(self.source,self.receipt)
         p=self.create(); self.assertEqual(a.read_attempt(p['path'],p['sha256'],root=self.root,now=NOW)['status'],'unknown')

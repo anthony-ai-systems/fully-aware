@@ -109,7 +109,7 @@ def read_attempt(path, expected, *, root=ROOT, now=None):
                 'trigger_to_close_seconds': (clock.instant(value['closed_at']) - clock.instant(value['trigger_at'])).total_seconds(),
                 'age_seconds': int((now - clock.instant(value['closed_at'])).total_seconds()),
                 'authority': 'none', 'source_freshness': 'not_established', 'human_delivery': 'unverified'}
-    except (ValueError, OSError, TypeError, KeyError, AttributeError, OverflowError):
+    except (ValueError, OSError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
         return {'availability': 'unavailable', 'reason': 'attempt_validation_failed', 'authority': 'none'}
 
 
