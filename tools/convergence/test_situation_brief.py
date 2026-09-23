@@ -500,6 +500,22 @@ class FileTests(unittest.TestCase):
         self.assertLess(rendered.index("## Latest sweep update"), rendered.index("## Existing sweep digest"))
         self.assertIn("`board`", rendered)
 
+    def test_missed_attempt_survives_maximal_brief_without_freshening_sources(self):
+        attempt = {"availability": "available", "sha256": "a" * 64,
+                   "run_id": "20260922T170000Z-late-" + "x" * 80,
+                   "status": "missed_before_start", "trigger_at": "2026-09-20T16:01:00Z",
+                   "closed_at": VERIFIED, "recorded_at": VERIFIED,
+                   "intended_slot": {"local_date": "2026-09-20", "hour": 9, "timezone": "America/Los_Angeles"},
+                   "trigger_to_close_seconds": 7080, "age_seconds": 60,
+                   "authority": "none", "source_freshness": "not_established", "human_delivery": "unverified"}
+        latest_path = self.write_json("latest-with-attempt.json", latest_outcome())
+        with mock.patch.object(brief, "read_attempt", return_value=attempt):
+            output = self.assert_large_history(maximal_priority_payload(), latest_path=str(latest_path))
+        self.assertEqual(output["latest_attempt"], attempt)
+        self.assertEqual(output["sweep_digest"]["source_cutoff"], VERIFIED)
+        self.assertIn("missed_before_start", brief.render_markdown(output))
+        self.assertLessEqual(len(brief.render_markdown(output)), brief.MAX_OUTPUT_CHARS)
+
     def assert_large_history(self, priority, incoherent=False, latest_path=None):
         packet = focus()
         row = packet["requests"][0]
