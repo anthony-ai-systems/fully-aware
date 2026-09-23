@@ -25,6 +25,7 @@ LOCAL_ZONE = ZoneInfo(ZONE)
 MAX_CHECK_AGE_SECONDS = 300
 MAX_EVIDENCE_AGE_SECONDS = 24 * 60 * 60
 MAX_OUTPUT_CHARS = 4_000
+MAX_PRIORITY_ROWS = 7
 EXCERPT = " [excerpt]"
 
 MODES = {
@@ -355,7 +356,7 @@ def _validate_plan(plan: Any, now: dt.datetime) -> Tuple[Dict[str, Any], dt.date
             "url": url,
             "binding_status": source["binding_status"],
         })
-    projected = rows[:4]
+    projected = rows[:MAX_PRIORITY_ROWS]
     return ({
         "local_date": local_date.isoformat(),
         "prepared_at": prepared_text,
