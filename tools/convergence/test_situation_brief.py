@@ -171,6 +171,24 @@ class FileTests(unittest.TestCase):
                          ["autonomous-operators", "fully-aware-convergence", "iris"])
         self.assertEqual(output["work"]["other_lane_count"], 1)
 
+    def test_route_configuration_is_separate_from_prior_outcomes(self):
+        from test_sweep_route import config
+        path = self.root / "automation.toml"
+        path.write_text(config("PAUSED"))
+        original = self.make_brief(self.endpoints())
+        value = self.make_brief(self.endpoints(), sweep_automation=str(path))
+        self.assertEqual(value["scheduled_route"]["configured_status"], "paused")
+        for key in ("latest_sweep", "latest_attempt", "sweep_digest", "deadline_baseline"):
+            self.assertEqual(value[key], original[key])
+        markdown = brief.render_markdown(value)
+        self.assertIn("status `paused`", markdown)
+        self.assertNotIn("SECRET", markdown)
+        self.assertLessEqual(len(json.dumps(value, ensure_ascii=False, separators=(",", ":"))), brief.MAX_OUTPUT_CHARS)
+        path.unlink()
+        missing = self.make_brief(self.endpoints(), sweep_automation=str(path))
+        self.assertEqual(missing["scheduled_route"]["reason"], "local_configuration_missing")
+        self.assertNotEqual(missing.get("status"), "unavailable")
+
     def test_board_proof_and_ordered_binding_mismatch_refuse_current(self):
         endpoints = self.endpoints()
         endpoints.after = board(proof_hash="d" * 64, ids=("b", "a"), statuses=("waiting", "open"))
