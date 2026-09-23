@@ -271,6 +271,17 @@ class FileTests(unittest.TestCase):
         self.assertEqual(output["iris"]["priorities"]["rows"], [])
         self.assertTrue(output["iris"]["board"]["current"])
 
+    def test_board_selection_change_during_collection_refuses_current_work(self):
+        endpoints = self.selected_endpoints()
+        changed = copy.deepcopy(endpoints.values['/data/board.json'])
+        changed['selection'] = selection_reference(revision=2, operation_id='b' * 32)
+        endpoints.after = changed
+        output = self.make_brief(endpoints)
+        self.assertEqual(output['iris']['selection']['reason'], 'selection_mismatch')
+        self.assertFalse(output['iris']['board']['current'])
+        self.assertFalse(output['iris']['selection']['current_work_authority'])
+        self.assertEqual(output['iris']['focus']['requests'][0]['key'], 'focus-key')
+
     def test_selection_revision_or_operation_mismatch_fails_current_work_only(self):
         for field, value in (("revision", 2), ("operation_id", "b" * 32)):
             with self.subTest(field=field):
