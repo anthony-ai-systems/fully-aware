@@ -76,8 +76,8 @@ class PriorityContextTests(unittest.TestCase):
 
     def test_partial_rows_are_bounded_and_omission_count_is_exact(self):
         result = self.project(rows=[row(i) for i in range(8)])
-        self.assertEqual([item["id"] for item in result["rows"]], ["row-%d" % i for i in range(4)])
-        self.assertEqual(result["omitted_rows"], 4)
+        self.assertEqual([item["id"] for item in result["rows"]], ["row-%d" % i for i in range(7)])
+        self.assertEqual(result["omitted_rows"], 1)
 
     def test_midnight_and_old_receipts_are_stale_without_rows(self):
         midnight = self.project(now=dt.datetime(2026, 9, 21, 7, 0, tzinfo=dt.timezone.utc))

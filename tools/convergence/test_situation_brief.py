@@ -91,7 +91,7 @@ def priority_payload():
             "rows": [{"id": "priority-%d" % i, "label": "Now" if i == 0 else "Next",
                           "title": "Priority %d" % i, "owner": "Existing owner", "reason": "Explicit user direction",
                           "mode": "anthony_judgment", "estimated_minutes": 45, "estimate_basis": "Uncalibrated",
-                      "url": None, "binding_status": "current"} for i in range(4)]}}
+                      "url": None, "binding_status": "current"} for i in range(8)]}}
 
 
 def latest_outcome(ended="2026-09-20T17:30:00Z"):
@@ -206,10 +206,17 @@ class FileTests(unittest.TestCase):
         self.assertTrue(planning["current"])
         self.assertEqual(planning["rows"][0]["title"], "Priority 0")
         self.assertEqual(planning["rows"][0]["mode"], "anthony_judgment")
+        self.assertEqual([row["id"] for row in planning["rows"]], ["priority-%d" % i for i in range(7)])
+        self.assertEqual(planning["omitted_rows"], 1)
         self.assertIn("/priority.json", endpoints.calls)
         self.assertTrue(output["no_commands"])
         markdown = brief.render_markdown(output)
         self.assertLess(markdown.index("Priority 0"), markdown.index("## Fully Aware"))
+        self.assertIn("Priority 6", markdown)
+        self.assertNotIn("Priority 7", markdown)
+        self.assertEqual([markdown.index("Priority %d" % i) for i in range(7)],
+                         sorted(markdown.index("Priority %d" % i) for i in range(7)))
+        self.assertIn("omitted priority rows: 1", markdown)
         self.assertIn("Coverage: partial", markdown)
         self.assertIn("2026-09-20T17:57:00Z", markdown)
 
@@ -578,10 +585,12 @@ class FileTests(unittest.TestCase):
         self.assertEqual(projected["omitted_requests"] + len(projected["requests"]), 3)
         self.assertEqual(projected["authority"], "none")
         self.assertTrue(output["no_commands"])
-        self.assertEqual(len(output["iris"]["priorities"]["rows"]), 4)
+        self.assertEqual(len(output["iris"]["priorities"]["rows"]), 7)
         planning = output["iris"]["priorities"]
         self.assertLessEqual(len(json.dumps(planning)), 4000)
-        self.assertEqual([row["id"] for row in planning["rows"]], [row["id"] for row in priority["plan"]["rows"]])
+        self.assertEqual([row["id"] for row in planning["rows"]],
+                         [row["id"] for row in priority["plan"]["rows"][:7]])
+        self.assertEqual(planning["omitted_rows"], 1)
         self.assertEqual(planning["evidence_cutoff"], priority["plan"]["evidence_cutoff"])
         self.assertEqual({row["binding_status"] for row in planning["rows"]}, {"unavailable" if incoherent else "current"})
         self.assertEqual(len(output["work"]["selected_lanes"]) + output["work"].get("selected_lanes_omitted", 0), 3)
