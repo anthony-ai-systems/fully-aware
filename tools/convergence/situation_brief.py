@@ -28,10 +28,12 @@ try:
     from .work_view import build_view, load_input
     from .priority_context import project_priority
     from .sweep_attempt import read_attempt
+    from .sweep_route import read_route
 except ImportError:  # Direct execution from tools/convergence.
     from work_view import build_view, load_input
     from priority_context import project_priority
     from sweep_attempt import read_attempt
+    from sweep_route import read_route
 
 
 SCHEMA = "situation-brief/v1"
@@ -1294,7 +1296,8 @@ def build_brief(boot_pack: str, plans: str, sweep_outcome: Optional[str] = None,
                 *, now: Optional[dt.datetime] = None, opener: Any = None,
                 latest_sweep_outcome: Optional[str] = None,
                 latest_sweep_attempt: Optional[str] = None,
-                latest_sweep_attempt_sha256: Optional[str] = None) -> Dict[str, Any]:
+                latest_sweep_attempt_sha256: Optional[str] = None,
+                sweep_automation: Optional[str] = None) -> Dict[str, Any]:
     query_time = _now(now)
     work = _summarize_work_view(boot_pack, plans, query_time)
     iris, board = _observe_iris(query_time, opener=opener)
@@ -1317,6 +1320,8 @@ def build_brief(boot_pack: str, plans: str, sweep_outcome: Optional[str] = None,
             "task status, model result, and accepted action are separate source contracts",
         ],
     }
+    if sweep_automation is not None:
+        brief["scheduled_route"] = read_route(sweep_automation, now=query_time)
     return _shrink(brief)
 
 
@@ -1328,6 +1333,15 @@ def _md(value: Any) -> str:
 def render_markdown(brief: Mapping[str, Any]) -> str:
     lines = ["# Current situation brief", "", "Read-only advisory projection; source-reported evidence retains its own freshness and authority limits.", ""]
     lines.append("As of: `%s`" % _md(brief.get("generated_at")))
+    route = brief.get("scheduled_route")
+    if isinstance(route, dict):
+        lines.extend(["", "## Scheduled collection availability",
+                      "- configuration `%s`; status `%s`; reason `%s`" % (
+                          _md(route.get("availability")), _md(route.get("configured_status")),
+                          _md(route.get("reason"))),
+                      "- expected owner `%s`; expected schedule `%s`" % (
+                          _md(route.get("expected_owner")), _md(route.get("expected_schedule"))),
+                      "- Local configuration only; scheduler execution, source freshness and platform recovery are not established."])
     priority = brief.get("iris", {}).get("priorities", {})
     lines.extend(["", "## Current planning priorities", "- status `%s`; current `%s`; reason `%s`" % (
         _md(priority.get("status")), _md(priority.get("current")), _md(priority.get("reason")))])
@@ -1430,13 +1444,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--latest-sweep-outcome")
     parser.add_argument("--latest-sweep-attempt")
     parser.add_argument("--latest-sweep-attempt-sha256")
+    parser.add_argument("--sweep-automation", help="Explicit local IRIS automation TOML; read-only status, never execution")
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     args = parser.parse_args(argv)
     try:
         brief = build_brief(args.boot_pack, args.plans, args.sweep_outcome,
                             latest_sweep_outcome=args.latest_sweep_outcome,
                             latest_sweep_attempt=args.latest_sweep_attempt,
-                            latest_sweep_attempt_sha256=args.latest_sweep_attempt_sha256)
+                            latest_sweep_attempt_sha256=args.latest_sweep_attempt_sha256,
+                            sweep_automation=args.sweep_automation)
     except (Exception,):  # Source/type failures become an honest bounded result.
         brief = _fallback()
     if args.format == "markdown":
