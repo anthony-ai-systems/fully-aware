@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Daily intelligence pass mechanics: identity, allocation, suppression, handoff.
 
-Code owns the pass identity, allocation accounting, missed-day and recovery rules,
-perspective rotation, the closed candidate shape, a novelty floor, suppression
-against earlier docket events, receipts and the docket handoff file. The model owns
-the questions, the research and the judgment.
+Code owns the pass identity, allocation accounting, missed-day rules, perspective
+rotation, the closed candidate shape, the novelty corpus and a novelty floor,
+suppression against earlier docket events, receipts, saved proofs and the docket
+handoff file. The model owns the questions, the research and the judgment.
 
-Nothing here calls a model or the network. Nothing here writes the IRIS docket: an
+Nothing here calls a model. The only network read is ``build_corpus``'s optional GET
+of the local board on the loopback interface. Nothing here writes the IRIS docket: an
 accepted candidate becomes an outbox file holding the docket's ``opportunity_proposal``
 propose input, and the docket owner decides whether to consume it. The docket is read
 as raw JSON without importing IRIS code.
@@ -22,6 +23,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import urllib.request
 from zoneinfo import ZoneInfo
 
 SCHEMA = "fa-intelligence-pass/v1"
@@ -51,19 +53,28 @@ PERSPECTIVES = ("client_results", "creative_quality", "delivery_economics", "wor
 FORBIDDEN = ("ratified", "preference", "imprint", "atlas_write", "fact_about_anthony")
 REQUIRED = ("dedupe_key", "question", "perspective", "goal_link", "novelty", "internal_evidence",
             "counterevidence", "challenge", "generated_by", "proof", "recommendation", "effort",
-            "confidence", "recheck_after")
-OPTIONAL = ("external_evidence", "external_gap", "experiment")
+            "confidence", "recheck_after", "decision_question", "why_now")
+OPTIONAL = ("external_evidence", "external_gap", "experiment", "proof_body", "discovered_at")
+EXTERNAL_KEYS = frozenset({"source", "published_or_accessed", "claim", "status"})
+MAX_PROOF_BYTES = 20 * 1024
 PROOF_KINDS = {"analysis", "example", "draft", "benchmark", "prototype"}
 EXPERIMENT_KEYS = ("baseline", "mechanism", "success_measure", "ceiling", "stop_rule", "rollback")
 VERDICTS = {"survives", "weakened", "refuted"}
 COVERAGE = {"complete", "partial", "unavailable"}
-MODES = {"scheduled", "recovery", "skip"}
+MODES = {"scheduled", "scheduled_after_gap", "skip"}
 OUTCOMES = {"opportunities_prepared", "no_qualifying_opportunity", "coverage_gap", "preempted", "failed"}
 STATUSES = {"presented_to_outbox", "held", "suppressed", "rejected"}
 CORPUS_KINDS = {"backlog", "prompt", "bookmark", "radar", "docket"}
-RECOVERABLE = {"preempted", "failed"}
-RECEIPT_KEYS = {"schema", "date", "mode", "covers_date", "started_at", "finished_at", "allocation", "used",
-                "perspective", "questions", "coverage", "candidates", "outcome", "preempted_by", "recover_by"}
+NOT_COMPLETED = {"preempted", "failed"}
+RECEIPT_KEYS = {"schema", "date", "mode", "covers_date", "gap_dates", "started_at", "finished_at", "allocation",
+                "used", "allocation_exceeded", "allocation_exceeded_reason", "perspective", "questions", "coverage",
+                "candidates", "outcome", "preempted_by", "recover_by"}
+# used key -> (allocation key, multiplier to the used unit)
+ALLOCATION_LIMITS = (("model_launches", "model_launches", 1), ("wall_seconds", "wall_minutes", 60),
+                     ("source_opens", "source_opens", 1))
+BOARD_URL = "http://127.0.0.1:4180/data/board.json"
+LOOPBACK = re.compile(r"http://(?:127\.0\.0\.1|localhost)(?::\d{1,5})?/")
+MAX_BOARD_BYTES = 8 * 1024 * 1024
 OPTIONS = (
     ("proceed", "Proceed as prepared",
      "Uses the prepared proof as the starting point; costs the effort estimate and nothing else is authorised."),
@@ -222,30 +233,35 @@ def budget(policy):
     return {key: policy[key] for key in BUDGET_KEYS}
 
 
-def unrecovered_days(receipts, today, policy):
-    """Missed/preempted/failed days since the last recovery pass, oldest first."""
+def gap_days(receipts, today, policy):
+    """The run of days just before ``today`` with no completed pass, oldest first.
+
+    A day counts when it has no receipt, or only a preempted or failed one. The run
+    stops at the latest completed pass and never reaches back past the first receipt
+    or the lookback, so each missed day is listed by the next pass until one
+    completes. Missed days are listed, never re-run and never backdated.
+    """
     if not receipts:
         return []
-    start = max(today - dt.timedelta(days=policy["recovery_lookback_days"]), min(receipts))
-    recoveries = [day for day, r in receipts.items() if r.get("mode") == "recovery" and day < today]
-    if recoveries:
-        start = max(start, max(recoveries) + dt.timedelta(days=1))
-    days, day = [], start
-    while day < today:
+    floor = max(today - dt.timedelta(days=policy["recovery_lookback_days"]), min(receipts))
+    days, day = [], today - dt.timedelta(days=1)
+    while day >= floor:
         receipt = receipts.get(day)
-        if receipt is None or receipt.get("outcome") in RECOVERABLE:
-            days.append(day)
-        day += dt.timedelta(days=1)
-    return days
+        if receipt is not None and receipt.get("outcome") not in NOT_COMPLETED:
+            break
+        days.append(day)
+        day -= dt.timedelta(days=1)
+    return sorted(days)
 
 
 def plan_pass(history, now, *, backlog_count, urgent=None, policy=None, ignore_window=False):
     """Decide whether today's single pass runs, and in which mode.
 
     A pass is due once per local day whatever the backlog size. An urgent incident
-    preempts it (recorded, never silent). A gap of missed, preempted or failed days
-    gets at most ONE recovery pass, which is that later day's only pass and names the
-    date it covers. ``ignore_window`` exists for stub rehearsals only.
+    preempts it (recorded, never silent). The first pass after a run of missed,
+    preempted or failed days still covers TODAY (mode ``scheduled_after_gap``) and
+    lists those days in ``gap_dates``; they are never re-run or backdated. At most
+    one pass per local day. ``ignore_window`` exists for stub rehearsals only.
     """
     policy = merged(policy)
     now = instant(now)
@@ -257,7 +273,7 @@ def plan_pass(history, now, *, backlog_count, urgent=None, policy=None, ignore_w
     tomorrow_start = window(today + dt.timedelta(days=1), policy)[0]
     plan = {"schema": PLAN_SCHEMA, "run": False, "mode": "skip", "reason": None, "reserved": {},
             "preempted_by": None, "recover_by": None, "date": today.isoformat(), "covers_date": None,
-            "perspective": None, "backlog_count": backlog_count, "planned_at": stamp(now)}
+            "gap_dates": [], "perspective": None, "backlog_count": backlog_count, "planned_at": stamp(now)}
     prior = receipts.get(today)
     if prior is not None:
         if prior.get("outcome") == "preempted":
@@ -267,21 +283,19 @@ def plan_pass(history, now, *, backlog_count, urgent=None, policy=None, ignore_w
     if not ignore_window and now < start:
         return dict(plan, reason="before_window")
     if not ignore_window and now >= end:
-        # Today becomes a missed day; the next day's pass recovers it.
+        # Today becomes a missed day; the next day's pass lists it in gap_dates.
         return dict(plan, reason="window_closed", recover_by=stamp(tomorrow_start))
     if urgent is not None:
         identifier(urgent, "invalid_incident_id")
         return dict(plan, reason="preempted_by_incident", preempted_by=urgent,
                     recover_by=stamp(tomorrow_start), covers_date=today.isoformat())
-    gap = unrecovered_days(receipts, today, policy)
-    plan.update(run=True, reserved=budget(policy), perspective=choose_perspective(today, history))
+    gap = gap_days(receipts, today, policy)
+    plan.update(run=True, reserved=budget(policy), perspective=choose_perspective(today, history),
+                covers_date=today.isoformat())
     if gap:
-        covered = receipts.get(gap[-1])
-        why = "recovering_preempted_day" if covered and covered.get("outcome") == "preempted" else (
-            "recovering_failed_day" if covered else "recovering_missed_day")
-        return dict(plan, mode="recovery", reason=why, covers_date=gap[-1].isoformat(),
+        return dict(plan, mode="scheduled_after_gap", reason="due_today_after_gap",
                     gap_dates=[d.isoformat() for d in gap])
-    return dict(plan, mode="scheduled", reason="due_today", covers_date=today.isoformat())
+    return dict(plan, mode="scheduled", reason="due_today")
 
 
 def missed_days(history, now, since, policy=None):
@@ -343,6 +357,11 @@ def _date_or_timestamp_ok(value):
         return _timestamp_ok(value)
 
 
+def _url_ok(value):
+    return (isinstance(value, str) and 0 < len(value) <= 2000 and value == value.strip()
+            and re.match(r"https?://\S+\Z", value) is not None)
+
+
 def validate_candidate(c):
     """Reasons the candidate is refused; an empty list means valid."""
     if not isinstance(c, dict):
@@ -353,7 +372,7 @@ def validate_candidate(c):
     if "dedupe_key" in c and not (isinstance(c["dedupe_key"], str) and len(c["dedupe_key"]) <= 80
                                   and SLUG.fullmatch(c["dedupe_key"])):
         reasons.append("invalid_dedupe_key")
-    for name in ("question", "goal_link", "novelty", "recommendation"):
+    for name in ("question", "goal_link", "novelty", "recommendation", "decision_question", "why_now"):
         if name in c:
             reasons.append(text_reason(name, c[name]))
     if "effort" in c:
@@ -387,7 +406,8 @@ def validate_candidate(c):
         else:
             for item in ext:
                 if (not isinstance(item, dict)
-                        or set(item) != {"source", "published_or_accessed", "claim", "status"}
+                        or set(item) - {"url"} != EXTERNAL_KEYS
+                        or ("url" in item and not _url_ok(item["url"]))
                         or not isinstance(item["source"], str) or not item["source"].strip()
                         or not _date_or_timestamp_ok(item["published_or_accessed"])
                         or not isinstance(item["claim"], str) or not prose(item["claim"])
@@ -421,12 +441,22 @@ def validate_candidate(c):
                 reasons.append("invalid_challenge")
     proof_kind = None
     if "proof" in c:
+        # ``ref`` is optional from the model: the host sets it to the opportunity id
+        # once it has saved ``proof_body`` under state/intelligence/proofs/.
         proof = c["proof"]
-        if (not isinstance(proof, dict) or set(proof) != {"kind", "ref"} or proof["kind"] not in PROOF_KINDS
-                or not isinstance(proof["ref"], str) or not proof["ref"].strip() or len(proof["ref"]) > 300):
+        if (not isinstance(proof, dict) or set(proof) - {"ref"} != {"kind"} or proof["kind"] not in PROOF_KINDS
+                or ("ref" in proof and (not isinstance(proof["ref"], str) or not proof["ref"].strip()
+                                        or len(proof["ref"]) > 300))):
             reasons.append("invalid_proof")
         else:
             proof_kind = proof["kind"]
+    if "proof_body" in c:
+        # A local markdown file, never sent to the docket, so the private-text rules
+        # do not apply to it; only its size and type are checked.
+        body = c["proof_body"]
+        if (not isinstance(body, str) or not body.strip() or "\x00" in body
+                or len(body.encode("utf-8")) > MAX_PROOF_BYTES):
+            reasons.append("invalid_proof_body")
     if "experiment" in c:
         exp = c["experiment"]
         if (not isinstance(exp, dict) or set(exp) != set(EXPERIMENT_KEYS)
@@ -481,18 +511,45 @@ def opportunity_id(dedupe_key):
     return "opportunity-" + hashlib.sha256(dedupe_key.encode("utf-8")).hexdigest()[:24]
 
 
-def evidence_revision(c):
-    """sha256 over the evidence set (refs, sources, counterevidence), order-insensitive.
+def internal_identity(ref):
+    """The first whitespace-delimited token of an internal ref, lowercased."""
+    parts = ref.split() if isinstance(ref, str) else []
+    return parts[0].lower() if parts else None
 
-    Observation timestamps are excluded, so re-reading the same evidence tomorrow is
-    not a change of evidence.
+
+def external_identity(item):
+    """An external item's ``url`` when present, else its source (lowercased,
+    whitespace collapsed, at most 80 characters)."""
+    if not isinstance(item, dict):
+        return None
+    url = item.get("url")
+    if isinstance(url, str) and url.strip():
+        return url.strip()
+    source = item.get("source")
+    if isinstance(source, str) and source.strip():
+        return " ".join(source.lower().split())[:80]
+    return None
+
+
+def evidence_identities(c):
+    """(internal, external) evidence identities in first-seen order, deduplicated."""
+    internal = [internal_identity(i.get("ref")) for i in c.get("internal_evidence") or [] if isinstance(i, dict)]
+    external = [external_identity(e) for e in c.get("external_evidence") or []]
+    return ([x for x in dict.fromkeys(internal) if x], [x for x in dict.fromkeys(external) if x])
+
+
+def evidence_revision(c):
+    """sha256 over the SET of evidence identities, never over model-written prose.
+
+    Internal evidence counts by the first token of each ref (``board:8c7450d0``),
+    external evidence by its ``url`` or normalised source. Counterevidence, claims,
+    ref descriptions, observation times and wording are excluded, so rewording the
+    same idea keeps its revision and a declined idea stays suppressed. Code enforces
+    only "the set of evidence identities changed"; whether that change is material
+    stays with the pass, the challenger and Anthony.
     """
-    internal = sorted({i["ref"] for i in c.get("internal_evidence") or [] if isinstance(i, dict)
-                       and isinstance(i.get("ref"), str)})
-    external = sorted({e["source"] for e in c.get("external_evidence") or [] if isinstance(e, dict)
-                       and isinstance(e.get("source"), str)})
-    counter = sorted({prose(t) for t in c.get("counterevidence") or [] if isinstance(t, str)})
-    return sha({"internal_evidence": internal, "external_evidence": external, "counterevidence": counter})
+    internal, external = evidence_identities(c)
+    return sha({"internal": sorted(internal), "external": sorted(external)})
 
 
 def docket_events(value):
@@ -643,15 +700,25 @@ def to_docket_propose(c, *, now, event_id, verified_at, policy=None):
     reasons = validate_candidate(c)
     if reasons:
         raise ValueError("invalid_candidate:" + reasons[0])
+    if not c["proof"].get("ref"):
+        raise ValueError("proof_missing")
     now = instant(now)
     oid, revision = opportunity_id(c["dedupe_key"]), evidence_revision(c)
     proof_ref = {"kind": "artifact", "id": short_token(c["proof"]["ref"])}
     refs = []
-    for ref in [i["ref"] for i in c["internal_evidence"]] + [e["source"] for e in c.get("external_evidence", [])]:
+    internal, external = evidence_identities(c)
+    for ref in internal + external:
         token = short_token(ref)
         if token not in refs:
             refs.append(token)
     check_at = next_check(c, now, policy)
+    discovered = now
+    try:
+        claimed = instant(c.get("discovered_at"))
+        if dt.timedelta(0) <= now - claimed <= dt.timedelta(days=30):
+            discovered = claimed  # the candidate's own time, when it is valid
+    except ValueError:
+        pass
     counter = clip("; ".join(prose(t) for t in c["counterevidence"]), 1000)
     verdict = c["challenge"]["verdict"]
     proposal = {
@@ -660,10 +727,9 @@ def to_docket_propose(c, *, now, event_id, verified_at, policy=None):
         "source": {"work_item_id": oid, "work_revision": revision, "verified_at": stamp(verified_at),
                    "reference": proof_ref, "terminal": False},
         "packet": {
-            "why_now": clip("Independent discovery: " + prose(c["novelty"]), 1000),
+            "why_now": clip("Independent discovery: " + prose(c["why_now"]), 1000),
             "recommendation": prose(c["recommendation"]),
-            "question": "Should this independently discovered opportunity proceed as prepared, "
-                        "proceed with changes, wait, or be declined?",
+            "question": prose(c["decision_question"]),
             "options": [{"id": i, "label": label, "tradeoff": tradeoff} for i, label, tradeoff in OPTIONS],
             "authority_needed": "Your choice only. This proposal grants no authority and commits no work.",
             "scope": clip("Perspective %s; prepared proof: %s; effort: %s; confidence %.2f; independent "
@@ -677,7 +743,7 @@ def to_docket_propose(c, *, now, event_id, verified_at, policy=None):
         "next_check_at": stamp(check_at),
         "origin": {"kind": "independent_discovery", "question": prose(c["question"]),
                    "goal_link": prose(c["goal_link"]), "novelty": prose(c["novelty"]),
-                   "counterevidence": counter, "proof_ref": proof_ref, "discovered_at": stamp(now)},
+                   "counterevidence": counter, "proof_ref": proof_ref, "discovered_at": stamp(discovered)},
     }
     return check_propose(proposal, now)
 
@@ -692,15 +758,24 @@ def finalize_receipt(receipt, policy=None):
         raise ValueError("receipt_not_object")
     r = dict(receipt)
     r.setdefault("schema", SCHEMA)
+    r.setdefault("gap_dates", [])
+    r.setdefault("allocation_exceeded_reason", None)
+    r["allocation_exceeded"] = None  # always computed here, never taken from the input
     if set(r) != RECEIPT_KEYS or r["schema"] != SCHEMA:
         raise ValueError("invalid_receipt_fields")
     day, covers = as_date(r["date"]), as_date(r["covers_date"])
     if r["mode"] not in MODES or r["outcome"] not in OUTCOMES:
         raise ValueError("invalid_mode_or_outcome")
-    if r["mode"] == "scheduled" and covers != day:
-        raise ValueError("scheduled_pass_covers_other_day")
-    if r["mode"] == "recovery" and covers >= day:
-        raise ValueError("recovery_must_cover_earlier_day")
+    if covers != day:
+        # Every pass covers its own day; a missed day is listed, never backdated.
+        raise ValueError("pass_must_cover_its_own_day")
+    gaps = r["gap_dates"]
+    if not isinstance(gaps, list) or any(not isinstance(g, str) for g in gaps):
+        raise ValueError("invalid_gap_dates")
+    if any(as_date(g) >= day for g in gaps) or len(set(gaps)) != len(gaps):
+        raise ValueError("invalid_gap_dates")
+    if (r["mode"] == "scheduled_after_gap") != bool(gaps):
+        raise ValueError("gap_dates_do_not_match_mode")
     if (r["mode"] == "skip") != (r["outcome"] == "preempted"):
         raise ValueError("skip_mode_is_preemption_only")
     if r["outcome"] == "preempted":
@@ -716,6 +791,18 @@ def finalize_receipt(receipt, policy=None):
     if (not isinstance(used, dict) or set(used) != {"wall_seconds", "model_launches", "source_opens"}
             or any(type(used[k]) not in (int, float) or used[k] < 0 for k in used)):
         raise ValueError("invalid_used")
+    exceeded = []
+    for used_key, alloc_key, unit in ALLOCATION_LIMITS:
+        limit = r["allocation"].get(alloc_key)
+        if type(limit) in (int, float) and used[used_key] > limit * unit:
+            exceeded.append(used_key)
+    reason = r["allocation_exceeded_reason"]
+    if reason is not None and (not isinstance(reason, str) or not prose(reason) or len(reason) > 500):
+        raise ValueError("invalid_allocation_exceeded_reason")
+    if exceeded and reason is None:
+        # Going over budget is allowed only with a stated reason, never silently.
+        raise ValueError("allocation_exceeded_without_reason:" + ",".join(exceeded))
+    r["allocation_exceeded"] = bool(exceeded)
     if r["perspective"] not in PERSPECTIVES and not (r["perspective"] is None and r["outcome"] == "preempted"):
         raise ValueError("invalid_perspective")
     if (not isinstance(r["questions"], list) or len(r["questions"]) > 5
@@ -759,6 +846,10 @@ def private_dir(path):
 
 def _write_json(path, value, *, replace):
     data = (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+    return _write_bytes(path, data, replace=replace)
+
+
+def _write_bytes(path, data, *, replace):
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.name + ".", suffix=".tmp")
     try:
         os.fchmod(fd, 0o600)
@@ -800,6 +891,20 @@ def write_outbox(directory, proposal):
     return _write_json(box / (oid + ".json"), proposal, replace=True)
 
 
+def write_proof(directory, oid, body):
+    """Atomically write ``<dir>/proofs/<opportunity_id>.md`` (0600, dir 0700).
+
+    The proof is a local file for Anthony; it never enters the docket, so only its
+    type and size are checked. A later pass with changed evidence replaces it.
+    """
+    if not isinstance(oid, str) or not OPPORTUNITY.fullmatch(oid):
+        raise ValueError("opportunity_identity_mismatch")
+    if not isinstance(body, str) or not body.strip() or len(body.encode("utf-8")) > MAX_PROOF_BYTES:
+        raise ValueError("invalid_proof_body")
+    proofs = private_dir(Path(private_dir(directory)) / "proofs")
+    return _write_bytes(proofs / (oid + ".md"), body.encode("utf-8"), replace=True)
+
+
 def load_history(directory):
     """Receipts under ``directory`` plus the names of files that were ignored."""
     base, history, ignored = Path(directory), [], []
@@ -836,6 +941,150 @@ def outbox_corpus(directory):
     return out
 
 
+def _entry(entry_id, kind, text):
+    text = prose(text) if isinstance(text, str) else ""
+    return {"id": entry_id, "kind": kind, "text": clip(text, 1000)} if text else None
+
+
+def _read_text(path, limit=1024 * 1024):
+    data = Path(path).read_bytes()
+    if len(data) > limit:
+        raise ValueError("file_too_large")
+    return data.decode("utf-8", "replace")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        raise ValueError("board_redirect_refused")
+
+
+def _board_entries(url):
+    if not LOOPBACK.match(url or ""):
+        raise ValueError("board_url_not_loopback")
+    opener = urllib.request.build_opener(_NoRedirect)  # a redirect could leave loopback
+    with opener.open(url, timeout=5) as response:
+        data = response.read(MAX_BOARD_BYTES + 1)
+    if len(data) > MAX_BOARD_BYTES:
+        raise ValueError("board_too_large")
+    value = json.loads(data.decode("utf-8"))
+    items = value.get("items") if isinstance(value, dict) else None
+    if not isinstance(items, list):
+        raise ValueError("board_items_missing")
+    out = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title") or item.get("project") or item.get("summary")
+        text = " ".join(t for t in (title, item.get("next_action")) if isinstance(t, str))
+        out.append(_entry("board:%s" % (item.get("id") if isinstance(item.get("id"), str) else index), "backlog", text))
+    return out
+
+
+def _plans_entries(path):
+    value = read_json_file(path)
+    lanes = value.get("lanes") if isinstance(value, dict) else None
+    if not isinstance(lanes, list):
+        raise ValueError("plans_lanes_missing")
+    out = []
+    for lane in lanes:
+        if not isinstance(lane, dict) or not isinstance(lane.get("waiting_on_anthony"), list):
+            continue
+        name = lane.get("name") if isinstance(lane.get("name"), str) else "lane"
+        for index, text in enumerate(lane["waiting_on_anthony"]):
+            out.append(_entry("plans:%s:waiting-%d" % (name, index), "backlog", text))
+    return out
+
+
+TABLE_ROW = re.compile(r"^\|(.+)\|\s*$")
+BOLD_LEAD = re.compile(r"^\*\*([A-Z][A-Z0-9-]*\d)\b(.*)$")
+
+
+def _table_rows(text):
+    for line in text.splitlines():
+        match = TABLE_ROW.match(line.strip())
+        if not match:
+            continue
+        cells = [c.strip() for c in match.group(1).split("|")]
+        if not cells or not cells[0] or set(cells[0]) <= set("-: ") or cells[0].lower() in {"id", "id / dedup key"}:
+            continue
+        yield cells
+
+
+def _radar_entries(radar_dir):
+    out = []
+    topics = _read_text(Path(radar_dir) / "TOPICS.md")
+    for cells in _table_rows(topics):
+        out.append(_entry("radar-topic:" + cells[0].split()[0], "radar", " ".join(cells[1:3])))
+    decisions = _read_text(Path(radar_dir) / "DECISIONS.md")
+    for cells in _table_rows(decisions):
+        out.append(_entry("radar-decision:" + cells[0].split()[0], "radar", " ".join(cells[:3])))
+    for line in decisions.splitlines():
+        match = BOLD_LEAD.match(line.strip())
+        if match:
+            out.append(_entry("radar-decision:" + match.group(1), "radar", line.replace("*", "")))
+    return out
+
+
+def _docket_entries(path):
+    out = []
+    for event in docket_events(read_json_file(path)):
+        data = event.get("input") if isinstance(event, dict) else None
+        if not isinstance(data, dict) or event.get("command") != "propose":
+            continue
+        source = data.get("source") if isinstance(data.get("source"), dict) else {}
+        packet = data.get("packet") if isinstance(data.get("packet"), dict) else {}
+        work = source.get("work_item_id")
+        if not isinstance(work, str):
+            continue
+        # The id is the work item itself, so a candidate's own earlier proposal is
+        # excluded from its novelty check (suppression judges it instead).
+        text = " ".join(t for t in (packet.get("question"), packet.get("recommendation")) if isinstance(t, str))
+        out.append(_entry(work, "docket", text))
+    return out
+
+
+def default_corpus_config(home=None):
+    home = Path(home or Path.home())
+    return {"board_url": BOARD_URL,
+            "plans_snapshot": str(home / "code" / "state" / "plans-snapshot.json"),
+            "radar_dir": str(home / "Documents" / "ChatGPT" / "ai-radar-research"),
+            "docket": None, "intelligence_dir": None}
+
+
+def build_corpus(config=None):
+    """The novelty corpus: {entries: [{id, kind, text}], gaps: [...]}.
+
+    Reads, read-only and tolerating absence: board titles and next actions (a
+    loopback GET of the local board, 5 s timeout), items waiting on Anthony in the
+    plans snapshot, Radar topics and decisions, earlier docket packet questions and
+    recommendations, and earlier outbox proposals. Every source that is not
+    configured or cannot be read becomes a gap; nothing is silently skipped.
+    """
+    cfg = dict(default_corpus_config(), **(config or {}))
+    entries, gaps, counts = [], [], {}
+    sources = (("board", cfg.get("board_url"), _board_entries),
+               ("plans_snapshot", cfg.get("plans_snapshot"), _plans_entries),
+               ("radar", cfg.get("radar_dir"), _radar_entries),
+               ("docket", cfg.get("docket"), _docket_entries),
+               ("outbox", cfg.get("intelligence_dir"), outbox_corpus))
+    for name, where, reader in sources:
+        if not where:
+            gaps.append("%s: not configured" % name)
+            continue
+        try:
+            found = [e for e in reader(where) if e]
+        except FileNotFoundError:
+            gaps.append("%s: missing" % name)
+            continue
+        except Exception as exc:  # noqa: BLE001 -- any read failure is a recorded gap
+            gaps.append(clip("%s: unavailable (%s)" % (name, type(exc).__name__), 300))
+            continue
+        counts[name] = len(found)
+        entries.extend(found)
+    unique = list({(e["id"], e["kind"], e["text"]): e for e in entries}.values())
+    return {"schema": "fa-intelligence-corpus/v1", "entries": unique, "gaps": gaps, "counts": counts}
+
+
 # --------------------------------------------------------------------------- #
 # host helpers: parse model output, assemble a draft, settle it into a receipt
 # --------------------------------------------------------------------------- #
@@ -862,18 +1111,23 @@ def parse_model_json(text):
 
 
 def assemble_draft(plan, output, challenges, *, generator, challenger, started_at, now,
-                   model_launches, failed=None):
+                   model_launches, failed=None, exceeded_reason=None):
     """Join the plan, the generator's output and the fresh challenges into a draft.
 
     The host, not the model, sets ``generated_by`` and ``challenge.by``; any challenge
-    the generator wrote about its own candidate is discarded.
+    the generator wrote about its own candidate is discarded. ``exceeded_reason`` is
+    the host's explanation for running over the allocation (for example a watchdog);
+    otherwise the model's own ``allocation_exceeded_reason`` is used, if it gave one.
     """
     now, started = instant(now), instant(started_at)
     draft = {"schema": DRAFT_SCHEMA, "date": plan["date"], "mode": plan["mode"],
-             "covers_date": plan["covers_date"], "started_at": stamp(started), "finished_at": stamp(now),
+             "covers_date": plan["covers_date"], "gap_dates": list(plan.get("gap_dates") or []),
+             "started_at": stamp(started), "finished_at": stamp(now),
              "allocation": plan["reserved"],
              "used": {"wall_seconds": max(0, int((now - started).total_seconds())),
                       "model_launches": model_launches, "source_opens": 0},
+             "allocation_exceeded_reason": clip(exceeded_reason, 500) if isinstance(exceeded_reason, str)
+             and prose(exceeded_reason) else None,
              "perspective": plan["perspective"], "questions": [],
              "coverage": {"internal": "unavailable", "external": "unavailable", "gaps": []},
              "candidates": [], "outcome": None, "preempted_by": None, "recover_by": None}
@@ -895,6 +1149,9 @@ def assemble_draft(plan, output, challenges, *, generator, challenger, started_a
     draft["coverage"] = {"internal": cov.get("internal") if cov.get("internal") in COVERAGE else "unavailable",
                          "external": cov.get("external") if cov.get("external") in COVERAGE else "unavailable",
                          "gaps": [clip(g, 300) for g in gaps if isinstance(g, str) and prose(g)][:10]}
+    stated = value.get("allocation_exceeded_reason")
+    if draft["allocation_exceeded_reason"] is None and isinstance(stated, str) and prose(stated):
+        draft["allocation_exceeded_reason"] = clip("model: " + stated, 500)
     opens = (value.get("used") or {}).get("source_opens") if isinstance(value.get("used"), dict) else None
     if type(opens) is int and opens >= 0:
         draft["used"]["source_opens"] = opens  # self-reported by the model
@@ -920,12 +1177,16 @@ def _row(c, status, reasons):
             "opportunity_id": opportunity_id(key) if ok else None, "status": status, "reasons": reasons}
 
 
-def settle(draft, *, now, corpus=None, docket=None, docket_problem=None, policy=None):
+def settle(draft, *, now, corpus=None, corpus_gaps=None, docket=None, docket_problem=None, policy=None):
     """Turn a draft into (receipt, proposals) deterministically.
 
-    Order: shape/challenge validation -> suppression -> novelty -> allocation caps.
-    ``docket_problem`` (the docket was named but unreadable) holds every otherwise
-    eligible candidate, because a declined idea must not be re-presented unseen.
+    Order: shape/challenge validation -> suppression -> novelty -> saved proof ->
+    allocation caps. ``docket_problem`` (the docket was named but unreadable) holds
+    every otherwise eligible candidate, because a declined idea must not be
+    re-presented unseen. A candidate without ``proof_body`` is held, never presented.
+    ``corpus=None`` (no corpus built) and any ``corpus_gaps`` lower internal coverage.
+    A presented proposal's proof ref is the opportunity id: the host saves the proof
+    at ``proofs/<opportunity_id>.md``.
     """
     policy = merged(policy)
     now = instant(now)
@@ -938,6 +1199,10 @@ def settle(draft, *, now, corpus=None, docket=None, docket_problem=None, policy=
         gaps.append("docket_not_consulted")
     elif docket_problem:
         gaps.append("docket_unreadable: " + docket_problem)
+    corpus_short = corpus is None or bool(corpus_gaps)
+    if corpus is None:
+        gaps.append("novelty_corpus_not_built")
+    gaps.extend(clip("novelty_corpus_gap: " + str(g), 300) for g in corpus_gaps or [])
     for index, c in enumerate(draft.get("candidates") or []):
         if index >= deep:
             rows.append(_row(c, "rejected", ["over_deep_candidate_allocation"]))
@@ -962,21 +1227,30 @@ def settle(draft, *, now, corpus=None, docket=None, docket_problem=None, policy=
         if not novelty["novel"]:
             rows.append(_row(c, "rejected", ["not_novel:%s:%.2f" % novelty["nearest"][0]]))
             continue
+        if "proof_body" not in c:
+            rows.append(_row(c, "held", ["proof_missing"]))
+            continue
+        if any(p["source"]["work_item_id"] == oid for p in proposals):
+            rows.append(_row(c, "held", ["duplicate_opportunity_in_pass"]))
+            continue
         if len(proposals) >= cap:
             rows.append(_row(c, "held", ["present_max_reached"]))
             continue
         event_id = "fa-intelligence-%s-%s" % (draft["date"], oid[-12:])
+        saved = dict(c, proof=dict(c["proof"], ref=oid))
         try:
-            proposals.append(to_docket_propose(c, now=now, event_id=event_id, verified_at=now, policy=policy))
+            proposals.append(to_docket_propose(saved, now=now, event_id=event_id, verified_at=now, policy=policy))
         except ValueError as exc:
             rows.append(_row(c, "rejected", ["docket_shape:" + str(exc)]))
             continue
         extra = [verdict["status"]] if verdict["status"] != "eligible" else []
         rows.append(_row(c, "presented_to_outbox", extra))
-    receipt = {k: draft[k] for k in RECEIPT_KEYS - {"schema", "candidates", "coverage", "outcome"}}
+    receipt = {k: draft.get(k) for k in RECEIPT_KEYS - {"schema", "candidates", "coverage", "outcome",
+                                                         "allocation_exceeded"}}
+    receipt["gap_dates"] = receipt["gap_dates"] or []
     coverage = dict(draft["coverage"], gaps=gaps)
-    if (docket is None or docket_problem) and coverage["internal"] == "complete":
-        coverage["internal"] = "partial"  # suppression could not be checked against the docket
+    if (docket is None or docket_problem or corpus_short) and coverage["internal"] == "complete":
+        coverage["internal"] = "partial"  # suppression or novelty was not checked against everything
     receipt.update(schema=SCHEMA, candidates=rows, coverage=coverage)
     cov = receipt["coverage"]
     if draft.get("outcome") in {"failed", "preempted"}:
@@ -993,8 +1267,9 @@ def settle(draft, *, now, corpus=None, docket=None, docket_problem=None, policy=
 def preemption_receipt(plan, now):
     now = stamp(now)
     return {"schema": SCHEMA, "date": plan["date"], "mode": "skip", "covers_date": plan["covers_date"] or plan["date"],
-            "started_at": now, "finished_at": now, "allocation": {},
-            "used": {"wall_seconds": 0, "model_launches": 0, "source_opens": 0}, "perspective": None,
+            "gap_dates": [], "started_at": now, "finished_at": now, "allocation": {},
+            "used": {"wall_seconds": 0, "model_launches": 0, "source_opens": 0},
+            "allocation_exceeded_reason": None, "perspective": None,
             "questions": [], "coverage": {"internal": "unavailable", "external": "unavailable",
                                           "gaps": ["preempted_by_incident"]},
             "candidates": [], "outcome": "preempted", "preempted_by": plan["preempted_by"],
@@ -1012,13 +1287,28 @@ def read_json_file(path, limit=MAX_JSON):
 
 
 def load_corpus(path):
+    return load_corpus_file(path)[0]
+
+
+def load_corpus_file(path):
+    """(entries, gaps) from a corpus file: a bare list or ``build_corpus`` output."""
     if not path:
-        return []
+        return [], []
     value = read_json_file(path)
+    gaps = value.get("gaps", []) if isinstance(value, dict) else []
     value = value.get("entries") if isinstance(value, dict) else value
-    if not isinstance(value, list):
+    if not isinstance(value, list) or not isinstance(gaps, list):
         raise ValueError("invalid_corpus")
-    return value
+    return value, [g for g in gaps if isinstance(g, str)]
+
+
+def proof_bodies(draft, receipt):
+    """{opportunity_id: proof_body} for the presented candidates (rows follow candidate order)."""
+    out = {}
+    for c, row in zip(draft.get("candidates") or [], receipt["candidates"]):
+        if row["status"] == "presented_to_outbox":
+            out[row["opportunity_id"]] = c["proof_body"]
+    return out
 
 
 def emit(value):
@@ -1056,12 +1346,20 @@ def main(argv=None):
     draft.add_argument("--started-at", required=True)
     draft.add_argument("--model-launches", type=int, required=True)
     draft.add_argument("--failed", help="record the pass as failed with this reason")
+    draft.add_argument("--allocation-exceeded-reason", help="host's reason for running over the allocation")
     fin = sub.add_parser("finalize", help="settle a draft (or check a receipt) and write it")
     fin.add_argument("--receipt", required=True)
     fin.add_argument("--dir", help="receipt directory; omit to validate only")
-    fin.add_argument("--corpus")
+    fin.add_argument("--corpus", help="corpus JSON (build_corpus output); omitted = recorded as a gap")
     fin.add_argument("--docket", help="raw IRIS docket JSON, read-only")
-    for parser in (plan, todo, draft, fin):
+    corp = sub.add_parser("corpus", help="build the novelty corpus (read-only sources; gaps recorded)")
+    corp.add_argument("--dir", required=True, help="receipt directory (earlier outbox files)")
+    corp.add_argument("--out", help="write the corpus here (0600) instead of printing it")
+    corp.add_argument("--docket", help="raw IRIS docket JSON, read-only")
+    corp.add_argument("--board-url", default=BOARD_URL, help="loopback board URL; empty = not read")
+    corp.add_argument("--plans", help="plans snapshot JSON (default ~/code/state/plans-snapshot.json)")
+    corp.add_argument("--radar-dir", help="Radar research dir (default ~/Documents/ChatGPT/ai-radar-research)")
+    for parser in (plan, todo, draft, fin, corp):
         parser.add_argument("--now", help=argparse.SUPPRESS)
     a = p.parse_args(argv)
     try:
@@ -1099,6 +1397,23 @@ def main(argv=None):
                 item.pop("challenge", None)  # the challenger never sees a self-assessment
             emit(item)
             return 0
+        if a.command == "corpus":
+            config = {"board_url": a.board_url or None, "docket": a.docket, "intelligence_dir": a.dir}
+            if a.plans:
+                config["plans_snapshot"] = a.plans
+            if a.radar_dir:
+                config["radar_dir"] = a.radar_dir
+            corpus = dict(build_corpus(config), built_at=stamp(now))
+            if a.out:
+                out = Path(a.out)
+                private_dir(a.dir)
+                private_dir(out.parent)
+                _write_json(out, corpus, replace=True)
+                emit({"path": str(out), "entries": len(corpus["entries"]), "gaps": corpus["gaps"],
+                      "counts": corpus["counts"]})
+            else:
+                emit(corpus)
+            return 0
         if a.command == "draft":
             plan_value = read_json_file(a.plan)
             challenges = {}
@@ -1118,11 +1433,12 @@ def main(argv=None):
                 if not output:
                     failed = "generator_output_missing"
             emit(assemble_draft(plan_value, output, challenges, generator=a.generator, challenger=a.challenger,
-                                started_at=a.started_at, now=now, model_launches=a.model_launches, failed=failed))
+                                started_at=a.started_at, now=now, model_launches=a.model_launches, failed=failed,
+                                exceeded_reason=a.allocation_exceeded_reason))
             return 0
         if a.command == "finalize":
             value = read_json_file(a.receipt)
-            proposals = []
+            proposals, proofs = [], {}
             if isinstance(value, dict) and value.get("schema") == DRAFT_SCHEMA:
                 docket, problem = None, None
                 if a.docket:
@@ -1132,15 +1448,33 @@ def main(argv=None):
                         problem = "missing"
                     except (OSError, ValueError):
                         problem = "unreadable"
-                corpus = load_corpus(a.corpus) + (outbox_corpus(a.dir) if a.dir else [])
-                receipt, proposals = settle(value, now=now, corpus=corpus, docket=docket, docket_problem=problem)
+                corpus, corpus_gaps = None, []
+                if a.corpus:
+                    try:
+                        corpus, corpus_gaps = load_corpus_file(a.corpus)
+                    except FileNotFoundError:
+                        corpus, corpus_gaps = [], ["corpus_file_missing"]
+                    except (OSError, ValueError):
+                        corpus, corpus_gaps = [], ["corpus_file_unreadable"]
+                elif a.dir:
+                    corpus, corpus_gaps = [], ["corpus_not_built: only earlier outbox files checked"]
+                if corpus is not None and a.dir:
+                    pool = [e for e in corpus if isinstance(e, dict)] + outbox_corpus(a.dir)
+                    corpus = list({(e.get("id"), e.get("text")): e for e in pool}.values())
+                receipt, proposals = settle(value, now=now, corpus=corpus, corpus_gaps=corpus_gaps,
+                                            docket=docket, docket_problem=problem)
+                proofs = proof_bodies(value, receipt)
             else:
                 receipt = finalize_receipt(value)
-            result = {"outcome": receipt["outcome"], "candidates": receipt["candidates"], "outbox": []}
+            result = {"outcome": receipt["outcome"], "candidates": receipt["candidates"], "outbox": [],
+                      "proofs": []}
             if a.dir:
                 if (Path(a.dir) / (receipt["date"] + ".json")).exists():
                     raise ValueError("receipt_exists")  # before any outbox write
                 for proposal in proposals:
+                    oid = proposal["source"]["work_item_id"]
+                    # The proof lands first, so an outbox file never names a missing proof.
+                    result["proofs"].append(str(write_proof(a.dir, oid, proofs[oid])))
                     result["outbox"].append(str(write_outbox(a.dir, proposal)))
                 result["receipt_path"] = str(write_receipt(a.dir, receipt))
             emit(result)

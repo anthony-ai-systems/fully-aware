@@ -58,6 +58,10 @@ def candidate(**changes):
         "effort": "2 hours",
         "confidence": 0.6,
         "recheck_after": "2026-10-09",
+        "decision_question": "Should one active project batch its review exports for two weeks, with round "
+                             "trips counted before and after?",
+        "why_now": "Two review rounds slipped this week; one project is starting a new cut on Monday.",
+        "proof_body": "# Batching analysis\n\nRound trips last month: 14. Expected with batching: 6.\n",
     }
     c.update(changes)
     return c
@@ -193,22 +197,37 @@ class AllocationTest(unittest.TestCase):
         again = ip.plan_pass(history, NOW + dt.timedelta(hours=1), backlog_count=0)
         self.assertEqual((again["run"], again["reason"]), (False, "preempted_today"))
         tomorrow = ip.plan_pass(history, NOW + dt.timedelta(days=1), backlog_count=0)
-        self.assertEqual((tomorrow["run"], tomorrow["mode"], tomorrow["covers_date"]),
-                         (True, "recovery", "2026-09-25"))
-        self.assertEqual(tomorrow["reason"], "recovering_preempted_day")
+        # The preempted day is listed as missed; the next pass still covers its own day.
+        self.assertEqual((tomorrow["run"], tomorrow["mode"], tomorrow["covers_date"], tomorrow["gap_dates"]),
+                         (True, "scheduled_after_gap", "2026-09-26", ["2026-09-25"]))
+        self.assertEqual(tomorrow["reason"], "due_today_after_gap")
 
-    def test_one_recovery_pass_per_gap_and_one_pass_per_day(self):
+    def test_pass_after_gap_covers_today_lists_missed_days_and_one_pass_per_day(self):
         history = [receipt("2026-09-21")]  # 22, 23 and 24 missed
         plan = ip.plan_pass(history, NOW, backlog_count=0)
         self.assertEqual((plan["mode"], plan["covers_date"], plan["gap_dates"]),
-                         ("recovery", "2026-09-24", ["2026-09-22", "2026-09-23", "2026-09-24"]))
-        history.append(receipt("2026-09-25", mode="recovery", covers="2026-09-24"))
+                         ("scheduled_after_gap", "2026-09-25", ["2026-09-22", "2026-09-23", "2026-09-24"]))
+        history.append(receipt("2026-09-25", mode="scheduled_after_gap", gap_dates=plan["gap_dates"]))
         same_day = ip.plan_pass(history, NOW + dt.timedelta(hours=2), backlog_count=0)
         self.assertEqual((same_day["run"], same_day["reason"]), (False, "already_ran_today"))
         next_day = ip.plan_pass(history, NOW + dt.timedelta(days=1), backlog_count=0)
-        self.assertEqual((next_day["run"], next_day["mode"]), (True, "scheduled"))
-        with self.assertRaisesRegex(ValueError, "recovery_must_cover_earlier_day"):
-            ip.finalize_receipt(receipt("2026-09-25", mode="recovery", covers="2026-09-25"))
+        self.assertEqual((next_day["run"], next_day["mode"], next_day["gap_dates"]), (True, "scheduled", []))
+        # Never backdated: every pass covers its own day, and gap_dates must match the mode.
+        with self.assertRaisesRegex(ValueError, "pass_must_cover_its_own_day"):
+            ip.finalize_receipt(receipt("2026-09-25", mode="scheduled_after_gap", covers="2026-09-24",
+                                        gap_dates=["2026-09-24"]))
+        with self.assertRaisesRegex(ValueError, "gap_dates_do_not_match_mode"):
+            ip.finalize_receipt(receipt("2026-09-25", mode="scheduled_after_gap"))
+        with self.assertRaisesRegex(ValueError, "gap_dates_do_not_match_mode"):
+            ip.finalize_receipt(receipt("2026-09-25", gap_dates=["2026-09-24"]))
+        with self.assertRaisesRegex(ValueError, "invalid_gap_dates"):
+            ip.finalize_receipt(receipt("2026-09-25", mode="scheduled_after_gap", gap_dates=["2026-09-25"]))
+
+    def test_failed_day_stays_in_the_gap_until_a_pass_completes(self):
+        history = [receipt("2026-09-22"), receipt("2026-09-24", outcome="failed")]  # 23 missed, 24 failed
+        plan = ip.plan_pass(history, NOW, backlog_count=0)
+        self.assertEqual(plan["gap_dates"], ["2026-09-23", "2026-09-24"])
+        self.assertEqual(ip.plan_pass([], NOW, backlog_count=0)["mode"], "scheduled")  # first pass ever
 
     def test_window_bounds(self):
         early = dt.datetime(2026, 9, 25, 12, tzinfo=UTC)  # 05:00 PDT
@@ -291,7 +310,29 @@ class CandidateTest(unittest.TestCase):
                                                   for i in candidate()["internal_evidence"]])
         self.assertEqual(ip.evidence_revision(reordered), ip.evidence_revision(candidate()))
         self.assertEqual(ip.evidence_revision(reobserved), ip.evidence_revision(candidate()))
-        self.assertNotEqual(ip.evidence_revision(candidate(counterevidence=["new"])), ip.evidence_revision(candidate()))
+        # Model-written prose is not evidence identity.
+        self.assertEqual(ip.evidence_revision(candidate(counterevidence=["new"])), ip.evidence_revision(candidate()))
+        added = candidate(internal_evidence=candidate()["internal_evidence"]
+                          + [{"ref": "board:item-999", "observed_at": "2026-09-25T01:00:00Z"}])
+        self.assertNotEqual(ip.evidence_revision(added), ip.evidence_revision(candidate()))
+
+    def test_evidence_identities(self):
+        c = candidate(internal_evidence=[{"ref": "Board:8C7450D0 the finder item, next action overdue",
+                                          "observed_at": "2026-09-24T18:00:00Z"},
+                                         {"ref": "board:8c7450d0", "observed_at": "2026-09-24T19:00:00Z"}],
+                      external_evidence=[{"source": "  Some   Publisher\tWeekly  ", "published_or_accessed": "2026-08-01",
+                                          "claim": "x", "status": "verified"},
+                                         {"source": "Anything", "url": "https://example.org/a",
+                                          "published_or_accessed": "2026-08-01", "claim": "y", "status": "unverified"}])
+        self.assertEqual(ip.validate_candidate(c), [])
+        self.assertEqual(ip.evidence_identities(c),
+                         (["board:8c7450d0"], ["some publisher weekly", "https://example.org/a"]))
+        long_source = candidate(external_evidence=[{"source": "A" * 200, "published_or_accessed": "2026-08-01",
+                                                    "claim": "x", "status": "verified"}])
+        self.assertEqual(ip.evidence_identities(long_source)[1], ["a" * 80])
+        bad_url = candidate(external_evidence=[{"source": "s", "url": "not a url", "published_or_accessed": "2026-08-01",
+                                                "claim": "x", "status": "verified"}])
+        self.assertIn("invalid_external_evidence", ip.validate_candidate(bad_url))
 
 
 class SuppressionTest(unittest.TestCase):
@@ -310,8 +351,38 @@ class SuppressionTest(unittest.TestCase):
         self.assertEqual(ip.suppression(c, docket, NOW)["status"], "suppressed")
         reworded = candidate(recommendation="Entirely different wording of the same idea.")
         self.assertEqual(ip.suppression(reworded, docket, NOW)["status"], "suppressed")
-        changed = candidate(counterevidence=["A new contrary study appeared."])
+        changed = candidate(external_evidence=candidate()["external_evidence"] + [
+            {"source": "A new contrary study", "url": "https://example.org/contrary", "published_or_accessed":
+             "2026-09-20", "claim": "Batching raised defect rates.", "status": "verified"}])
         self.assertEqual(ip.suppression(changed, docket, NOW)["status"], "eligible_changed_evidence")
+
+    def test_rewording_the_same_evidence_stays_suppressed_after_decline(self):
+        c = candidate()
+        docket = self.events(c)
+        reworded = candidate(
+            counterevidence=["Some clients like feedback to arrive continuously.", "Urgent fixes could wait longer."],
+            internal_evidence=[{"ref": "BOARD:item-142 (review exports item, still open)", "observed_at":
+                                "2026-09-25T09:00:00Z"},
+                               {"ref": "state/daily-scan/2026-09-24-brief.md  (section on reviews)",
+                                "observed_at": "2026-09-25T09:00:00Z"}],
+            external_evidence=[{"source": "https://example.org/batching-study", "published_or_accessed": "2026-09-25",
+                                "claim": "A case study reports shorter cycles when reviews are batched.",
+                                "status": "unverified"}],
+            question="Would batching review exports reduce client round trips?",
+            novelty="Differently worded novelty.", why_now="Differently worded why now.")
+        self.assertEqual(ip.evidence_revision(reworded), ip.evidence_revision(c))
+        self.assertEqual(ip.suppression(reworded, docket, NOW)["status"], "suppressed")
+        plan = ip.plan_pass([], NOW, backlog_count=0)
+        draft = ip.assemble_draft(plan, {"questions": ["a"], "used": {"source_opens": 1},
+                                         "coverage": {"internal": "complete", "external": "complete", "gaps": []},
+                                         "candidates": [reworded]}, {0: {"verdict": "survives", "notes": ""}},
+                                  generator="gpt-5.6-sol", challenger="claude-fable-5-1", started_at=NOW, now=NOW,
+                                  model_launches=2)
+        settled, proposals = ip.settle(draft, now=NOW, corpus=[], docket=docket)
+        self.assertEqual(([r["status"] for r in settled["candidates"]], proposals), (["suppressed"], []))
+        new_identity = candidate(internal_evidence=reworded["internal_evidence"]
+                                 + [{"ref": "board:item-777 a new related item", "observed_at": "2026-09-25T09:00:00Z"}])
+        self.assertEqual(ip.suppression(new_identity, docket, NOW)["status"], "eligible_changed_evidence")
         self.assertEqual(ip.suppression(candidate(dedupe_key="other-idea"), docket, NOW)["status"], "eligible")
 
     def test_future_snooze_holds(self):
@@ -337,6 +408,28 @@ class HandoffTest(unittest.TestCase):
         self.assertEqual(p["next_check_at"], "2026-10-09T16:00:00Z")  # recheck_after 09:00 PDT
         far = ip.to_docket_propose(candidate(recheck_after="2027-06-01"), now=NOW, event_id="e", verified_at=NOW)
         self.assertEqual(ip.instant(far["next_check_at"]) - NOW, dt.timedelta(days=30))
+
+    def test_packet_asks_the_specific_decision_and_says_why_now(self):
+        c = candidate()
+        p = ip.to_docket_propose(c, now=NOW, event_id="e", verified_at=NOW)
+        self.assertEqual(p["packet"]["question"], c["decision_question"])
+        self.assertEqual(p["packet"]["why_now"], "Independent discovery: " + c["why_now"])
+        self.assertNotIn("independently discovered opportunity proceed as prepared", p["packet"]["question"])
+        self.assertEqual([o["id"] for o in p["packet"]["options"]], ["proceed", "modify", "defer", "decline"])
+        for field in ("decision_question", "why_now"):
+            missing = candidate()
+            del missing[field]
+            self.assertIn("missing_field:" + field, ip.validate_candidate(missing))
+            self.assertIn("text_too_long:" + field, ip.validate_candidate(candidate(**{field: "x" * 1001})))
+
+    def test_discovered_at_uses_the_candidate_time_when_valid(self):
+        earlier = "2026-09-24T20:00:00Z"
+        p = ip.to_docket_propose(candidate(discovered_at=earlier), now=NOW, event_id="e", verified_at=NOW)
+        self.assertEqual(p["origin"]["discovered_at"], earlier)
+        for bad in ("2026-09-26T00:00:00Z", "2026-07-01T00:00:00Z", "yesterday", 5, None):
+            p = ip.to_docket_propose(candidate(discovered_at=bad), now=NOW, event_id="e", verified_at=NOW)
+            self.assertEqual(p["origin"]["discovered_at"], iso(NOW), bad)
+            self.assertTrue(docket_accepts(p, NOW))
 
     def test_private_or_invalid_candidate_never_reaches_the_docket(self):
         with self.assertRaisesRegex(ValueError, "private_text"):
@@ -391,6 +484,72 @@ class ReceiptTest(unittest.TestCase):
                                    model_launches=1)
         self.assertEqual(ip.settle(failed, now=NOW)[0]["outcome"], "failed")
 
+    def settle_one(self, c, **kwargs):
+        plan = ip.plan_pass([], NOW, backlog_count=0)
+        output = {"questions": ["a"], "used": {"source_opens": 1},
+                  "coverage": {"internal": "complete", "external": "complete", "gaps": []}, "candidates": [c]}
+        draft = ip.assemble_draft(plan, output, {0: {"verdict": "survives", "notes": ""}}, generator="gpt-5.6-sol",
+                                  challenger="claude-fable-5-1", started_at=NOW, now=NOW, model_launches=2)
+        return ip.settle(draft, now=NOW, **kwargs)
+
+    def test_candidate_without_proof_body_is_held_and_presented_proof_ref_is_the_opportunity(self):
+        c = candidate()
+        del c["proof_body"]
+        settled, proposals = self.settle_one(c, corpus=[], docket={"events": []})
+        self.assertEqual((settled["candidates"][0]["status"], settled["candidates"][0]["reasons"], proposals),
+                         ("held", ["proof_missing"], []))
+        self.assertEqual(settled["outcome"], "no_qualifying_opportunity")
+        settled, proposals = self.settle_one(candidate(proof={"kind": "analysis"}), corpus=[], docket={"events": []})
+        oid = ip.opportunity_id("batch-review-exports")
+        self.assertEqual(proposals[0]["source"]["reference"], {"kind": "artifact", "id": oid})
+        self.assertEqual(proposals[0]["origin"]["proof_ref"], {"kind": "artifact", "id": oid})
+        self.assertIn("invalid_proof_body", ip.validate_candidate(candidate(proof_body="x" * (20 * 1024 + 1))))
+        self.assertIn("invalid_proof_body", ip.validate_candidate(candidate(proof_body="  ")))
+        # Private-text rules do not apply to the local proof file.
+        self.assertEqual(ip.validate_candidate(candidate(proof_body="See /Users/someone/notes.md")), [])
+
+    def test_corpus_gaps_lower_internal_coverage(self):
+        settled, _ = self.settle_one(candidate(), corpus=[], corpus_gaps=["board: unavailable (URLError)"],
+                                     docket={"events": []})
+        self.assertEqual(settled["coverage"]["internal"], "partial")
+        self.assertIn("novelty_corpus_gap: board: unavailable (URLError)", settled["coverage"]["gaps"])
+        settled, _ = self.settle_one(candidate(), docket={"events": []})
+        self.assertEqual(settled["coverage"]["internal"], "partial")
+        self.assertIn("novelty_corpus_not_built", settled["coverage"]["gaps"])
+        settled, _ = self.settle_one(candidate(), corpus=[], docket={"events": []})
+        self.assertEqual(settled["coverage"]["internal"], "complete")
+
+    def test_allocation_excess_requires_a_reason(self):
+        within = ip.finalize_receipt(receipt("2026-09-25"))
+        self.assertEqual((within["allocation_exceeded"], within["allocation_exceeded_reason"]), (False, None))
+        for used in ({"wall_seconds": 1501, "model_launches": 3, "source_opens": 9},
+                     {"wall_seconds": 60, "model_launches": 4, "source_opens": 9},
+                     {"wall_seconds": 60, "model_launches": 3, "source_opens": 13}):
+            with self.assertRaisesRegex(ValueError, "allocation_exceeded_without_reason"):
+                ip.finalize_receipt(receipt("2026-09-25", used=used))
+            with self.assertRaisesRegex(ValueError, "allocation_exceeded_without_reason"):
+                ip.finalize_receipt(receipt("2026-09-25", used=used, allocation_exceeded_reason=None))
+            with self.assertRaisesRegex(ValueError, "invalid_allocation_exceeded_reason"):
+                ip.finalize_receipt(receipt("2026-09-25", used=used, allocation_exceeded_reason="  "))
+            ok = ip.finalize_receipt(receipt("2026-09-25", used=used, allocation_exceeded_reason="watchdog"))
+            self.assertTrue(ok["allocation_exceeded"])
+        # Non-numeric allocation values are not compared; the flag is never taken from the input.
+        loose = ip.finalize_receipt(receipt("2026-09-25", allocation={"source_opens": "about twelve"},
+                                            used={"wall_seconds": 9999, "model_launches": 9, "source_opens": 99},
+                                            allocation_exceeded=True))
+        self.assertFalse(loose["allocation_exceeded"])
+        plan = ip.plan_pass([], NOW, backlog_count=0)
+        draft = ip.assemble_draft(plan, {"used": {"source_opens": 40}, "allocation_exceeded_reason": "one long paper",
+                                         "coverage": {"internal": "complete", "external": "complete", "gaps": []}},
+                                  {}, generator="g", challenger="c", started_at=NOW, now=NOW, model_launches=1)
+        self.assertEqual(draft["allocation_exceeded_reason"], "model: one long paper")
+        self.assertTrue(ip.settle(draft, now=NOW, corpus=[], docket={"events": []})[0]["allocation_exceeded"])
+        host = ip.assemble_draft(plan, None, {}, generator="g", challenger="c", started_at=NOW,
+                                 now=NOW + dt.timedelta(minutes=26), model_launches=1, failed="watchdog",
+                                 exceeded_reason="model calls hit the 1500s watchdog")
+        settled, _ = ip.settle(host, now=NOW)
+        self.assertEqual((settled["outcome"], settled["allocation_exceeded"]), ("failed", True))
+
     def test_cli_round_trip_feeds_initiative_health(self):
         import initiative_health as health
         with tempfile.TemporaryDirectory() as tmp:
@@ -424,11 +583,121 @@ class ReceiptTest(unittest.TestCase):
             self.assertEqual(rc, 0, text)
             result = json.loads(text)
             self.assertEqual((result["outcome"], len(result["outbox"])), ("opportunities_prepared", 1))
-            self.assertTrue(docket_accepts(json.loads(Path(result["outbox"][0]).read_text()), NOW))
+            proposal = json.loads(Path(result["outbox"][0]).read_text())
+            self.assertTrue(docket_accepts(proposal, NOW))
+            oid = ip.opportunity_id("batch-review-exports")
+            proof = intel / "proofs" / (oid + ".md")
+            self.assertEqual(result["proofs"], [str(proof)])
+            self.assertEqual(proof.read_text(), candidate()["proof_body"])
+            self.assertEqual(stat.S_IMODE(proof.stat().st_mode), 0o600)
+            self.assertEqual(proposal["source"]["reference"]["id"], oid)
+            self.assertEqual(proposal["packet"]["question"], candidate()["decision_question"])
             rc, text = run("finalize", "--receipt", str(tmp / "draft.json"), "--dir", str(intel))
             self.assertEqual((rc, json.loads(text)["refused"]), (1, "receipt_exists"))
             seen = health.latest_dated_file(intel, "*.json")
             self.assertEqual((seen["latest_date"], seen["count"]), ("2026-09-25", 1))
+
+
+class CorpusTest(unittest.TestCase):
+    """build_corpus reads every source read-only and records each missing one as a gap."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(self.tmp), True)
+        (self.tmp / "plans.json").write_text(json.dumps({"lanes": [
+            {"name": "ad-system", "waiting_on_anthony": ["Rule the study scrape ceiling."]},
+            {"name": "quiet", "waiting_on_anthony": []}]}))
+        radar = self.tmp / "radar"
+        radar.mkdir()
+        (radar / "TOPICS.md").write_text("| ID | Topic | Scope | Cadence |\n| --- | --- | --- | --- |\n"
+                                         "| M01 | Conversion rate optimization | funnels, A/B tests | Daily |\n")
+        (radar / "DECISIONS.md").write_text("| ID / dedup key | Disposition | Reason | Approval |\n|---|---|---|---|\n"
+                                            "| D-001 — Mission Control | Excluded | Dormant | None |\n\n"
+                                            "**R-ENG-001 — deepened and challenged.** Defer architecture change.\n")
+        c = candidate()
+        (self.tmp / "docket.json").write_text(json.dumps({"events": [
+            docket_event(1, "propose", {"source": source_for(c), "packet": {
+                "question": "Should review exports be batched?", "recommendation": "Batch on one project."}}),
+            docket_event(2, "respond", {"disposition": "declined", "source": source_for(c)})]}))
+        self.intel = self.tmp / "intel"
+
+    def serve(self, body):
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                data = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return "http://127.0.0.1:%d/data/board.json" % server.server_address[1]
+
+    def config(self, **changes):
+        base = {"board_url": None, "plans_snapshot": str(self.tmp / "plans.json"),
+                "radar_dir": str(self.tmp / "radar"), "docket": str(self.tmp / "docket.json"),
+                "intelligence_dir": str(self.intel)}
+        base.update(changes)
+        return base
+
+    def test_all_sources_read_into_entries(self):
+        url = self.serve({"items": [{"id": "work-1", "project": "PG ad-script pass",
+                                     "next_action": "Line-edit the prepared scripts."}, "junk"]})
+        corpus = ip.build_corpus(self.config(board_url=url))
+        self.assertEqual(corpus["gaps"], [])
+        ids = {e["id"]: e for e in corpus["entries"]}
+        self.assertEqual(ids["board:work-1"]["kind"], "backlog")
+        self.assertIn("Line-edit", ids["board:work-1"]["text"])
+        self.assertEqual(ids["plans:ad-system:waiting-0"]["text"], "Rule the study scrape ceiling.")
+        self.assertIn("radar-topic:M01", ids)
+        self.assertIn("radar-decision:D-001", ids)
+        self.assertIn("radar-decision:R-ENG-001", ids)
+        self.assertNotIn("radar-topic:ID", ids)
+        oid = ip.opportunity_id("batch-review-exports")
+        self.assertEqual((ids[oid]["kind"], ids[oid]["text"]), ("docket", "Should review exports be batched? "
+                                                                          "Batch on one project."))
+        self.assertTrue(all(set(e) == {"id", "kind", "text"} and e["kind"] in ip.CORPUS_KINDS
+                            for e in corpus["entries"]))
+
+    def test_missing_sources_become_gaps_never_errors(self):
+        corpus = ip.build_corpus(self.config(board_url="http://127.0.0.1:1/data/board.json",
+                                             plans_snapshot=str(self.tmp / "nope.json"),
+                                             radar_dir=str(self.tmp / "nothing"), docket=None))
+        self.assertEqual([g.split(":")[0] for g in corpus["gaps"]], ["board", "plans_snapshot", "radar", "docket"])
+        self.assertIn("plans_snapshot: missing", corpus["gaps"])
+        self.assertIn("docket: not configured", corpus["gaps"])
+        remote = ip.build_corpus(self.config(board_url="http://example.org/data/board.json"))
+        self.assertEqual(remote["gaps"], ["board: unavailable (ValueError)"])
+
+    def test_cli_writes_private_corpus_and_finalize_uses_it(self):
+        out = self.intel / "raw" / "corpus-2026-09-25.json"
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = ip.main(["corpus", "--dir", str(self.intel), "--out", str(out), "--board-url", "",
+                          "--plans", str(self.tmp / "plans.json"), "--radar-dir", str(self.tmp / "radar"),
+                          "--now", iso(NOW)])
+        self.assertEqual(rc, 0, stdout.getvalue())
+        self.assertEqual(stat.S_IMODE(out.stat().st_mode), 0o600)
+        value = json.loads(out.read_text())
+        self.assertEqual(value["gaps"], ["board: not configured", "docket: not configured"])
+        entries, gaps = ip.load_corpus_file(str(out))
+        self.assertEqual(len(gaps), 2)
+        self.assertTrue(entries)
+        # A near-duplicate of a board item is rejected as not novel.
+        near = candidate(dedupe_key="ssp-edit", question="Line-edit the prepared SSP ad scripts?",
+                         recommendation="Line-edit the prepared scripts in the PG ad-script pass.")
+        corpus = [{"id": "board:work-1", "kind": "backlog",
+                   "text": "PG ad-script pass Line-edit the prepared SSP ad scripts."}]
+        self.assertFalse(ip.novelty_check(near, corpus)["novel"])
 
 
 @unittest.skipUnless(shutil.which("bash"), "bash required")
@@ -481,7 +750,19 @@ class StageFourStubTest(unittest.TestCase):
         value = json.loads(receipts[0].read_text())
         self.assertEqual((value["used"]["model_launches"], value["candidates"][0]["status"]),
                          (2, "presented_to_outbox"))
-        self.assertEqual(len(list((state / "intelligence-stub" / "outbox").glob("opportunity-*.json"))), 1)
+        outbox = list((state / "intelligence-stub" / "outbox").glob("opportunity-*.json"))
+        self.assertEqual(len(outbox), 1)
+        proposal = json.loads(outbox[0].read_text())
+        oid = proposal["source"]["work_item_id"]
+        self.assertTrue(proposal["packet"]["question"].startswith("STUB: should"))
+        self.assertTrue((state / "intelligence-stub" / "proofs" / (oid + ".md")).is_file())
+        self.assertEqual(proposal["source"]["reference"]["id"], oid)
+        corpus = json.loads((state / "intelligence-stub" / "raw").glob("corpus-*.json").__next__().read_text())
+        self.assertIn("board: not configured", corpus["gaps"])
+        self.assertIn("plans_snapshot: missing", corpus["gaps"])
+        self.assertEqual(value["coverage"]["internal"], "partial")
+        self.assertTrue(any(g.startswith("novelty_corpus_gap: board") for g in value["coverage"]["gaps"]))
+        self.assertEqual((value["mode"], value["gap_dates"], value["allocation_exceeded"]), ("scheduled", [], False))
         calls = (Path(self.tmp) / "calls").read_text() if (Path(self.tmp) / "calls").exists() else ""
         self.assertNotIn("codex", calls)
         self.assertNotIn("claude", calls)

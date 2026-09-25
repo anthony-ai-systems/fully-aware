@@ -13,8 +13,10 @@ Try to break it. Look for:
 - simpler alternatives that get most of the value;
 - the no-change option: what happens if Anthony does nothing, and whether that is fine.
 
-Also check that the candidate stays within existing authority, and that no external
-claim is being treated as a fact about Anthony or as one of his preferences.
+Also check that the candidate stays within existing authority, that no external
+claim is being treated as a fact about Anthony or as one of his preferences, that
+`proof_body` actually supports the recommendation, and that `decision_question`
+asks Anthony one specific decision rather than a generic "should this proceed?".
 
 Verdicts:
 

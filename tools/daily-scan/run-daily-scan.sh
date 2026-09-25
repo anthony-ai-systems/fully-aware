@@ -15,9 +15,9 @@
 #                          (read-only) forms questions and candidates, a fresh
 #                          Fable call challenges each candidate, and
 #                          tools/convergence/intelligence_pass.py does the
-#                          accounting, receipt and docket-handoff outbox under
-#                          state/intelligence/. Unset, it logs one SKIPPED line
-#                          and does nothing else.
+#                          novelty corpus, accounting, receipt, saved proofs and
+#                          docket-handoff outbox under state/intelligence/.
+#                          Unset, it logs one SKIPPED line and does nothing else.
 #
 # The thread is the point. Stage 1 records the Codex session id in
 # state/daily-scan/thread-id and every later run resumes THAT id, so the scanner
@@ -48,8 +48,8 @@
 # no tokens and does not regenerate the boot pack. It still writes the state/
 # outputs, markers and logs -- that plumbing is the thing being exercised. With
 # DAILY_SCAN_INTELLIGENCE=1 it stubs stage 4's model calls too, ignores the pass
-# window, does not read the IRIS docket, and writes to state/intelligence-stub/
-# so a rehearsal never consumes the day's real pass.
+# window, reads neither the IRIS docket nor the local board, and writes to
+# state/intelligence-stub/ so a rehearsal never consumes the day's real pass.
 
 set -uo pipefail  # NOT -e: a failed stage must degrade, not abort.
 
@@ -768,8 +768,12 @@ fi
 # plan's deep_candidates) gets its own fresh Fable challenge call, and the host --
 # not either model -- stamps who generated and who challenged. The receipt and
 # the outbox (the IRIS docket's opportunity_proposal propose input) are written
-# under state/intelligence/. Nothing here writes the docket; it is read only, for
-# suppression of already-declined ideas.
+# under state/intelligence/, with each presented candidate's proof saved at
+# proofs/<opportunity_id>.md. Before the model runs, the novelty corpus is built
+# (read-only: the local board over loopback, the plans snapshot, Radar topics and
+# decisions, earlier docket packets and outbox files) into raw/corpus-<date>.json;
+# any source it cannot read is a recorded gap. Nothing here writes the docket; it
+# is read only, for suppression of already-declined ideas and for the corpus.
 if [ "${DAILY_SCAN_INTELLIGENCE:-0}" != "1" ]; then
     log "stage4 SKIPPED (not enabled) -- set DAILY_SCAN_INTELLIGENCE=1 to run the intelligence pass"
 else
@@ -783,7 +787,8 @@ else
     # native web_search tool. Empty disables it; the pass then reports external
     # coverage as a gap instead of pretending.
     INTEL_CODEX_SEARCH="${DAILY_SCAN_INTEL_CODEX_SEARCH:-live}"
-    INTEL_CORPUS="${DAILY_SCAN_INTEL_CORPUS:-}"
+    INTEL_CORPUS="${DAILY_SCAN_INTEL_CORPUS:-}"  # set = use this corpus file instead of building one
+    INTEL_BOARD_URL="${DAILY_SCAN_INTEL_BOARD_URL-http://127.0.0.1:4180/data/board.json}"
     INTEL_DOCKET="${DAILY_SCAN_INTEL_DOCKET:-${HOME}/Library/Application Support/IRIS/orchestrator/initiative/docket.json}"
     # Stub receipts never share a directory with real ones: a rehearsal must not
     # consume the day's pass or read as a real receipt in initiative health.
@@ -799,7 +804,8 @@ else
     INTEL_RESULT="${RAW_DIR}/${DATE}-intel-result.json"
     INTEL_LAUNCHES="${RAW_DIR}/${DATE}-intel-launches"
     INTEL_RAW="${RAW_DIR}/${DATE}-intel.raw.log"
-    rm -f "${INTEL_PLAN}" "${INTEL_INPUT}" "${INTEL_OUT}" "${INTEL_DRAFT}" "${INTEL_RESULT}" \
+    INTEL_CORPUS_SUMMARY="${RAW_DIR}/${DATE}-intel-corpus.json"
+    rm -f "${INTEL_PLAN}" "${INTEL_INPUT}" "${INTEL_OUT}" "${INTEL_DRAFT}" "${INTEL_RESULT}" "${INTEL_CORPUS_SUMMARY}" \
           "${INTEL_LAUNCHES}" "${RAW_DIR}/${DATE}"-intel-candidate-*.json "${RAW_DIR}/${DATE}"-intel-challenge-*
     : > "${INTEL_LAUNCHES}"
 
@@ -826,7 +832,10 @@ print("" if v is None or isinstance(v, dict) else len(v) if isinstance(v, list) 
    "perspective": "$(intel_field "${INTEL_PLAN}" perspective)", "goal_link": "Stub rehearsal of the stage 4 plumbing.",
    "novelty": "Stub candidate; nothing here is new.", "internal_evidence": [{"ref": "stub:boot-pack", "observed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"}],
    "external_gap": "Stub run: no external sources are opened.", "counterevidence": ["Stub output proves plumbing only."],
-   "proof": {"kind": "analysis", "ref": "stub:analysis"}, "recommendation": "Do nothing; this is a stub rehearsal.",
+   "proof": {"kind": "analysis"}, "proof_body": "# STUB proof\n\nStub rehearsal of the stage 4 plumbing; nothing was analysed.\n",
+   "recommendation": "Do nothing; this is a stub rehearsal.",
+   "decision_question": "STUB: should the stub rehearsal proposal be declined so it never reaches a real docket?",
+   "why_now": "Stub rehearsal of the stage 4 plumbing; nothing is actually due.",
    "effort": "none", "confidence": 0.1, "recheck_after": "2099-01-01"}]}
 STUBJSON
             return 0
@@ -886,6 +895,7 @@ STUBJSON
     [ "${STUB}" = "1" ] && plan_args+=(--ignore-window)
 
     intel_failed=""
+    intel_over=""
     if [ ! -f "${INTEL_PY}" ]; then
         fail_stage stage4 "missing ${INTEL_PY}"
     else
@@ -902,7 +912,27 @@ STUBJSON
             started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             deep="$(intel_field "${INTEL_PLAN}" reserved.deep_candidates)"
             deep="${deep:-0}"
-            log "stage4 -- pass $(intel_field "${INTEL_PLAN}" mode) for $(intel_field "${INTEL_PLAN}" covers_date), perspective $(intel_field "${INTEL_PLAN}" perspective)"
+            gap_note=""
+            gap_count="$(intel_field "${INTEL_PLAN}" gap_dates)"
+            [ "${gap_count:-0}" != "0" ] && gap_note=", ${gap_count} missed day(s) listed, not re-run"
+            log "stage4 -- pass $(intel_field "${INTEL_PLAN}" mode) for $(intel_field "${INTEL_PLAN}" covers_date), perspective $(intel_field "${INTEL_PLAN}" perspective)${gap_note}"
+            if [ -z "${INTEL_CORPUS}" ]; then
+                # The novelty corpus is built by default. A failed build is not a
+                # failed pass: finalize records the missing corpus as a coverage gap.
+                INTEL_CORPUS="${INTEL_DIR}/raw/corpus-${DATE}.json"
+                corpus_args=(corpus --dir "${INTEL_DIR}" --out "${INTEL_CORPUS}")
+                if [ "${STUB}" = "1" ]; then
+                    corpus_args+=(--board-url "")  # a rehearsal reads no live board and no docket
+                else
+                    corpus_args+=(--board-url "${INTEL_BOARD_URL}" --docket "${INTEL_DOCKET}")
+                fi
+                if "${PY}" "${INTEL_PY}" "${corpus_args[@]}" > "${INTEL_CORPUS_SUMMARY}" 2>>"${INTEL_RAW}"; then
+                    log "stage4 -- novelty corpus: $(intel_field "${INTEL_CORPUS_SUMMARY}" entries) entries, $(intel_field "${INTEL_CORPUS_SUMMARY}" gaps) source gap(s)"
+                else
+                    log "stage4 WARNING -- novelty corpus build failed (see ${INTEL_CORPUS_SUMMARY}); recorded as a coverage gap"
+                    INTEL_CORPUS=""
+                fi
+            fi
             if [ ! -f "${INTEL_PROMPT}" ] || [ ! -f "${INTEL_CHALLENGE_PROMPT}" ]; then
                 intel_failed="missing intelligence prompt(s) under ${PROMPT_DIR}"
             elif [ "${STUB}" != "1" ] && ! command -v codex >/dev/null 2>&1; then
@@ -915,13 +945,14 @@ STUBJSON
                     printf '\n\n---\n\n## PASS PARAMETERS (%s)\n\n```json\n' "${DATE}"
                     cat "${INTEL_PLAN}"
                     printf '```\n\n## INTERNAL EVIDENCE (read-only paths)\n\n'
-                    printf -- '- boot pack: %s\n- today'\''s scan: %s\n- today'\''s review: %s\n- today'\''s brief: %s\n- earlier pass receipts: %s\n' \
-                        "${BOOT_PACK}" "${SCAN_FILE}" "${REVIEW_FILE}" "${BRIEF_FILE}" "${INTEL_DIR}"
+                    printf -- '- boot pack: %s\n- today'\''s scan: %s\n- today'\''s review: %s\n- today'\''s brief: %s\n- earlier pass receipts: %s\n- novelty corpus (what the overlap check compares against, with its gaps): %s\n' \
+                        "${BOOT_PACK}" "${SCAN_FILE}" "${REVIEW_FILE}" "${BRIEF_FILE}" "${INTEL_DIR}" "${INTEL_CORPUS:-not built}"
                 } > "${INTEL_INPUT}"
                 run_watchdog "${INTEL_TIMEOUT}" stage4 intel_model_calls "${deep}"
                 intel_rc=$?
                 if [ "${intel_rc}" -eq 124 ]; then
                     intel_failed="model calls hit the ${INTEL_TIMEOUT}s watchdog"
+                    intel_over="model calls hit the ${INTEL_TIMEOUT}s watchdog"
                 elif [ "${intel_rc}" -ne 0 ]; then
                     intel_failed="generator exited ${intel_rc} (raw log: ${INTEL_RAW})"
                 fi
@@ -936,6 +967,7 @@ STUBJSON
                 draft_args+=(--challenge "${idx%.json}:${challenge}")
             done
             [ -n "${intel_failed}" ] && draft_args+=(--failed "${intel_failed}")
+            [ -n "${intel_over}" ] && draft_args+=(--allocation-exceeded-reason "${intel_over}")
             finalize_args=(finalize --receipt "${INTEL_DRAFT}" --dir "${INTEL_DIR}")
             [ -n "${INTEL_CORPUS}" ] && finalize_args+=(--corpus "${INTEL_CORPUS}")
             [ "${STUB}" != "1" ] && finalize_args+=(--docket "${INTEL_DOCKET}")
