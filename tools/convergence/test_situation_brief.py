@@ -421,9 +421,14 @@ class FileTests(unittest.TestCase):
     def test_undocumented_unavailable_priority_payload_still_joins(self):
         # Only the documented unavailable form is excluded; a bare or foreign
         # payload claiming unavailability still has to carry the selection.
+        envelope = {"schema": "iris-priority-context/v1", "status": "unavailable",
+                    "reason": "not_configured", "checked_at": VERIFIED, "plan": None}
+        no_plan = {k: v for k, v in envelope.items() if k != "plan"}
         for payload in ({"status": "unavailable", "plan": None},
-                        {"schema": "iris-priority-context/v1", "status": "unavailable",
-                         "reason": "some_other_reason", "checked_at": VERIFIED, "plan": None}):
+                        dict(envelope, reason="some_other_reason"),
+                        None, [], "not json object",           # HTTP 200 with a malformed body
+                        no_plan,                               # plan absent is not plan: null
+                        dict(envelope, reason=[]), dict(envelope, reason={})):  # must not crash
             with self.subTest(payload=payload):
                 endpoints = self.selected_endpoints()
                 endpoints.values["/priority.json"] = payload

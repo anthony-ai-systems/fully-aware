@@ -320,19 +320,25 @@ def _selection_join(payloads: Mapping[str, Any], excluded: Tuple[str, ...] = ())
 
 
 def _priority_read_unavailable(observation: Mapping[str, Any]) -> bool:
-    """True when the optional priority read supplied no planning payload.
+    """True only when the optional priority read supplied no planning payload.
 
-    A failed, non-200 or source-declared unavailable (for example
-    ``not_configured``) read without a ``selection`` field is left out of the
+    A transport failure or non-200 read supplied nothing, and a well-formed
+    source-declared unavailable envelope (``iris-priority-context/v1`` with
+    ``status: unavailable``, an explicit ``plan: null``, a documented string
+    reason and no ``selection`` field) declares none.  Either is left out of the
     selection join: its rows are cleared by the priority projection without
-    invalidating other evidence.  A present payload still joins as usual.
+    invalidating other evidence.  Anything else that arrived with HTTP 200 --
+    including a malformed body -- still joins and fails closed as before.
     """
-    data = observation.get("data")
-    if observation.get("status") != 200 or not isinstance(data, dict):
+    if observation.get("status") != 200:
         return True
+    data = observation.get("data")
+    if not isinstance(data, dict):
+        return False
+    reason = data.get("reason")
     return ("selection" not in data and data.get("schema") == "iris-priority-context/v1"
-            and data.get("status") == "unavailable" and data.get("plan") is None
-            and data.get("reason") in {"not_configured", "evidence_unavailable"})
+            and data.get("status") == "unavailable" and "plan" in data and data["plan"] is None
+            and isinstance(reason, str) and reason in {"not_configured", "evidence_unavailable"})
 
 
 def _selection_projection(join: Mapping[str, Any], current_work: bool) -> Optional[Dict[str, Any]]:
