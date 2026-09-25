@@ -1,6 +1,6 @@
 {
   "schema": "defect-register/v1",
-  "updated": "2026-08-28",
+  "updated": "2026-09-25",
   "purpose": "The single list of what is broken across Anthony's estate. Every item carries a shell command that exits 0 when the defect is gone. Status is never stored here; it is computed each morning into state/defects-status.json and rendered at the top of the boot pack.",
   "rules": {
     "severity": {
@@ -758,6 +758,26 @@
       "not_before": null,
       "pr_check": null,
       "added": "2026-08-28"
+    },
+    {
+      "id": "INITIATIVE-1",
+      "severity": "P1",
+      "system": "initiative loop (IRIS sweep heartbeat and the daily intelligence pass)",
+      "owner": "anthony",
+      "fix_scope": "decision",
+      "size": "M",
+      "since": "2026-09-25",
+      "symptom": "Nothing on this Mac can wake IRIS to originate or advance work: the iris-proactive-work-sweep heartbeat is absent from both local Codex automation stores, its paused hold cannot resume because its target thread is archived, the last successful sweep ended 2026-09-22, and the one answered docket request has no recorded follow-through, yet the quiet looks like an ordinary day.",
+      "verify": "echo \"provisional: activates once the running checkout carries tools/convergence/initiative_health.py; the real check is: python3 \\\"$HOME/code/fully-aware/tools/convergence/initiative_health.py\\\" --check\"; exit 1",
+      "fix_hint": "Anthony decides how IRIS gets a heartbeat (recreate a supported driver or rule on an alternative); the fully-aware-convergence lane then merges tools/convergence/initiative_health.py, and once ~/code/fully-aware carries it, this item's verify becomes python3 \"$HOME/code/fully-aware/tools/convergence/initiative_health.py\" --check (exit 0 only when the loop is operating; 1 stopped or degraded; 3 unknown) and provisional flips to false.",
+      "accepted": null,
+      "source": "proactive audit 2026-09-25 (CL-01/CL-03/CL-05/CL-07); lane fully-aware-convergence; SPEC-fully-aware-initiative-loop Part D",
+      "provisional": true,
+      "repo": null,
+      "remote": null,
+      "not_before": null,
+      "pr_check": null,
+      "added": "2026-09-25"
     }
   ]
 }
