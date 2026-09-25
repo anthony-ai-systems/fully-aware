@@ -11,14 +11,16 @@ except ImportError:
     import sweep_clock as clock
 
 AUTOMATION = 'iris-proactive-work-sweep'
-OWNER = '01a08366-bd65-72a3-b7a8-ae0e5ab5bb20'
+OWNER = '01a0cf00-be7a-7263-ac37-4d175f09b546'
+LEGACY_OWNER = '01a08366-bd65-72a3-b7a8-ae0e5ab5bb20'
+LEGACY_RETIRED_AT = dt.datetime(2026, 9, 23, 16, 8, 12, tzinfo=dt.timezone.utc)
 ROOT = Path('/Users/anthonyflores/Library/Application Support/IRIS/orchestrator/sweep-runs')
 SCHEMA = 'iris-sweep-attempt/v1'
 KEYS = {'schema', 'automation_id', 'owner_thread_id', 'run_id', 'trigger_at', 'intended_slot',
         'closed_at', 'recorded_at', 'status', 'receipt'}
 
 
-def receipt_facts(receipt, run_id):
+def receipt_facts(receipt, run_id, *, owner=OWNER):
     if not isinstance(receipt, dict): raise ValueError('invalid_receipt')
     trigger = receipt.get('trigger_at')
     if receipt.get('schema') == 'iris-sweep-outcome/v1':
@@ -28,7 +30,7 @@ def receipt_facts(receipt, run_id):
             raise ValueError('receipt_time_order')
     elif receipt.get('schema') == 'iris-sweep-late-closure/v1':
         if receipt.get('automation_id') != AUTOMATION: raise ValueError('receipt_automation_mismatch')
-        if receipt.get('owner') != 'IRIS existing task ' + OWNER:
+        if receipt.get('owner') != 'IRIS existing task ' + owner:
             raise ValueError('receipt_owner_mismatch')
         closed = receipt.get('late_closure_at'); status = 'unknown'
         if (receipt.get('original_start_monotonic') == 'not_recorded'
@@ -50,7 +52,9 @@ def validate(value, envelope_path, *, root=ROOT, now=None):
     if path.name != 'attempt.json' or not path.is_absolute() or path.resolve() != path or path.parent.parent != root.resolve():
         raise ValueError('attempt_outside_run_root')
     clock.directory(path.parent)
-    if value['run_id'] != path.parent.name or value['automation_id'] != AUTOMATION or value['owner_thread_id'] != OWNER:
+    owner = value['owner_thread_id']
+    if (value['run_id'] != path.parent.name or value['automation_id'] != AUTOMATION
+            or owner not in (OWNER, LEGACY_OWNER)):
         raise ValueError('attempt_identity_mismatch')
     slot = value['intended_slot']
     if (not isinstance(slot, dict) or set(slot) != {'local_date', 'hour', 'timezone'}
@@ -61,6 +65,9 @@ def validate(value, envelope_path, *, root=ROOT, now=None):
     if day.isoformat() != slot['local_date']: raise ValueError('invalid_schedule_date')
     scheduled = dt.datetime.combine(day, dt.time(slot['hour']), ZoneInfo(slot['timezone']))
     trigger = clock.instant(value['trigger_at']); closed = clock.instant(value['closed_at'])
+    # Retained attempts keep their original owner; retirement never rewrites history.
+    if owner == LEGACY_OWNER and trigger >= LEGACY_RETIRED_AT:
+        raise ValueError('retired_attempt_owner')
     recorded = clock.instant(value['recorded_at'])
     if not 0 <= (trigger - scheduled).total_seconds() <= 900:
         raise ValueError('trigger_outside_declared_slot')
@@ -74,7 +81,7 @@ def validate(value, envelope_path, *, root=ROOT, now=None):
     if clock.sha(raw) != ref['sha256']: raise ValueError('receipt_hash_mismatch')
     expected_schema = 'iris-sweep-outcome/v1' if target.name == 'outcome.json' else 'iris-sweep-late-closure/v1'
     if receipt.get('schema') != expected_schema: raise ValueError('receipt_filename_schema_mismatch')
-    r_trigger, r_closed, status = receipt_facts(receipt, value['run_id'])
+    r_trigger, r_closed, status = receipt_facts(receipt, value['run_id'], owner=owner)
     if value['trigger_at'] != r_trigger or value['closed_at'] != r_closed or value['status'] != status:
         raise ValueError('receipt_facts_mismatch')
     return value

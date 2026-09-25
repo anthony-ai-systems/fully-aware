@@ -47,6 +47,14 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(value["configured_status"], "unknown")
         self.assertEqual(value["reason"], "local_configuration_missing")
 
+    def test_current_owner_is_expected_and_archived_owner_is_not(self):
+        self.path.write_text(config(owner="01a0cf00-be7a-7263-ac37-4d175f09b546"))
+        self.assertTrue(self.read()["expected_owner"])
+        self.path.write_text(config(owner="01a08366-bd65-72a3-b7a8-ae0e5ab5bb20"))
+        value = self.read()
+        self.assertFalse(value["expected_owner"])
+        self.assertFalse(value["execution_verified"])
+
     def test_owner_or_schedule_changes_are_visible_without_echoing_them(self):
         self.path.write_text(config(owner="PRIVATE_CHANGED_OWNER", schedule="PRIVATE_SCHEDULE"))
         value = self.read()

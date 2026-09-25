@@ -10,7 +10,7 @@ import stat
 import tomllib
 
 AUTOMATION = "iris-proactive-work-sweep"
-OWNER = "01a08366-bd65-72a3-b7a8-ae0e5ab5bb20"
+OWNER = "01a0cf00-be7a-7263-ac37-4d175f09b546"
 SCHEDULE = "FREQ=DAILY;BYHOUR=9,13,17;BYMINUTE=0;BYSECOND=0"
 MAX_BYTES = 256 * 1024
 
