@@ -1053,6 +1053,28 @@ class ReceiptTest(unittest.TestCase):
             self.assertEqual(rc, 2, text)
             self.assertFalse(outbox.exists() and any(outbox.iterdir()))
 
+    def test_total_storage_failure_still_reports_what_rollback_left(self):
+        real_outbox, real_unlink = ip.write_outbox, os.unlink
+        with tempfile.TemporaryDirectory() as tmp:
+            intel = Path(tmp) / "intelligence"
+            run, _ = self.finalize_into(tmp, intel)
+            published = []
+
+            def publish(directory, proposal):
+                path = real_outbox(directory, proposal)
+                published.append(Path(path))
+                return path
+            with mock.patch.object(ip, "write_outbox", side_effect=publish), \
+                    mock.patch.object(ip, "write_receipt", side_effect=OSError(28, "No space left on device")), \
+                    mock.patch.object(ip.os, "unlink", side_effect=lambda p: (_ for _ in ()).throw(OSError(13, "denied"))
+                                      if published and Path(p) == published[0] else real_unlink(p)):
+                rc, text = run()
+            self.assertEqual(rc, 2, text)
+            result = json.loads(text)
+            self.assertIsNone(result["receipt_path"])
+            self.assertIn("No space left", result["receipt_write_failed"])
+            self.assertIn("may remain", result["rollback_failed"][0])
+
     def test_listed_gaps_outrank_complete_coverage_labels(self):
         gapped = receipt("2026-09-25", outcome="no_qualifying_opportunity",
                          coverage={"internal": "complete", "external": "complete",

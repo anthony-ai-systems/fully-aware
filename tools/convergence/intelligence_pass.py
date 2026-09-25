@@ -1758,9 +1758,14 @@ def finalize_command(a, now):
                 result["rollback_failed"] = stuck
             result.update(refused=refused, outbox=[], proofs=[], outcome=receipt["outcome"],
                           candidates=receipt["candidates"])
-            # If even this write fails, the error surfaces (exit 2) after the rollback:
-            # nothing is left handed off, and the next run may record the day.
-            result["receipt_path"] = str(write_receipt(a.dir, receipt))
+            try:
+                result["receipt_path"] = str(write_receipt(a.dir, receipt))
+            except (OSError, ValueError) as exc:
+                # Receipt storage itself failed after the rollback. Say so, with anything
+                # the rollback could not undo, rather than losing that context.
+                result.update(receipt_path=None, receipt_write_failed=clip(type(exc).__name__ + ": " + str(exc), 200))
+                emit(result)
+                return 2
     emit(result)
     return 5 if refused else 0
 
