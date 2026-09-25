@@ -27,12 +27,12 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, ProxyHand
 
 try:
     from .work_view import build_view, load_input
-    from .priority_context import project_priority
+    from .priority_context import _aware as _priority_timestamp, project_priority
     from .sweep_attempt import read_attempt
     from .sweep_route import read_route
 except ImportError:  # Direct execution from tools/convergence.
     from work_view import build_view, load_input
-    from priority_context import project_priority
+    from priority_context import _aware as _priority_timestamp, project_priority
     from sweep_attempt import read_attempt
     from sweep_route import read_route
 
@@ -243,15 +243,18 @@ def _selection_reference(value: Any) -> Tuple[Optional[Dict[str, Any]], Optional
     return reference, None
 
 
-def _selection_join(payloads: Mapping[str, Any]) -> Dict[str, Any]:
+def _selection_join(payloads: Mapping[str, Any], excluded: Tuple[str, ...] = ()) -> Dict[str, Any]:
     """Join the five work-bound payloads when a selected generation is present.
 
     Older IRIS payloads omit ``selection`` entirely.  They keep the existing
     reader behavior.  Once any work-bound payload advertises the field, every
-    required payload must carry the same valid active reference.
+    required payload must carry the same valid active reference.  Names in
+    ``excluded`` (an optional payload whose read supplied no planning data)
+    do not participate; the remaining payloads must still agree.
     """
-    advertised = any(isinstance(payload, dict) and "selection" in payload
-                     for payload in payloads.values())
+    required = tuple(name for name in SELECTION_PAYLOADS if name not in excluded)
+    advertised = any(isinstance(payloads.get(name), dict) and "selection" in payloads[name]
+                     for name in required)
     if not advertised:
         return {"advertised": False, "current": True, "reason": None, "issues": []}
 
@@ -259,7 +262,7 @@ def _selection_join(payloads: Mapping[str, Any]) -> Dict[str, Any]:
     malformed: List[str] = []
     disabled: List[str] = []
     references: Dict[str, Dict[str, Any]] = {}
-    for name in SELECTION_PAYLOADS:
+    for name in required:
         payload = payloads.get(name)
         if not isinstance(payload, dict) or "selection" not in payload:
             missing.append(name)
@@ -312,8 +315,41 @@ def _selection_join(payloads: Mapping[str, Any]) -> Dict[str, Any]:
     if disabled:
         result["disabled"] = disabled
     if reason is None and references:
-        result["reference"] = references[SELECTION_PAYLOADS[0]]
+        result["reference"] = references[required[0]]
     return result
+
+
+_UNAVAILABLE_PRIORITY_FIELDS = frozenset({"schema", "status", "reason", "checked_at", "plan"})
+
+
+def _priority_read_unavailable(observation: Mapping[str, Any], now: dt.datetime) -> bool:
+    """True only when the optional priority read supplied no planning payload.
+
+    A transport failure or non-200 read supplied nothing.  A complete, valid
+    source-declared unavailable envelope declares none: exactly the documented
+    ``iris-priority-context/v1`` fields, ``status: unavailable``, an explicit
+    ``plan: null``, a documented string reason, and an aware ``checked_at`` that
+    is not in the future (no ``selection`` field).  Either is left out of the
+    selection join: its rows are cleared by the priority projection without
+    invalidating other evidence.  Anything else that arrived with HTTP 200 --
+    including a malformed or incomplete envelope -- still joins and fails closed.
+    """
+    if observation.get("status") != 200:
+        return True
+    data = observation.get("data")
+    if not isinstance(data, dict) or set(data) != _UNAVAILABLE_PRIORITY_FIELDS:
+        return False
+    reason = data["reason"]
+    if not (data["schema"] == "iris-priority-context/v1" and data["status"] == "unavailable"
+            and data["plan"] is None and isinstance(reason, str)
+            and reason in {"not_configured", "evidence_unavailable"}):
+        return False
+    try:
+        # The priority validator's own timestamp rule, so the two cannot drift.
+        checked, _text = _priority_timestamp(data["checked_at"])
+    except ValueError:  # the validator's private _Invalid is a ValueError: malformed
+        return False
+    return checked <= now
 
 
 def _selection_projection(join: Mapping[str, Any], current_work: bool) -> Optional[Dict[str, Any]]:
@@ -819,7 +855,7 @@ def _observe_iris(now: dt.datetime, opener: Any = None) -> Tuple[Dict[str, Any],
         "health": health.get("data"),
         "focus": focus.get("data"),
         "priority": priority.get("data"),
-    })
+    }, excluded=("priority",) if _priority_read_unavailable(priority, collection_now) else ())
     selection_current = bool(selection_join.get("current"))
     selection_issue = selection_join.get("reason") if selection_join.get("advertised") and not selection_current else None
     if selection_issue is not None:
