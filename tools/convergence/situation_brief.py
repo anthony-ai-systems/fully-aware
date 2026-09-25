@@ -17,6 +17,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import unicodedata
@@ -64,6 +65,12 @@ CLOSED_STATUSES = {
     "complete", "completed", "done", "delivered", "cancelled", "canceled", "parked", "superseded", "closed",
 }
 HEX64 = set("0123456789abcdefABCDEF")
+SELECTION_SCHEMA = "iris-selection-reference/v1"
+SELECTION_FIELDS = {"schema", "revision", "operation_id", "mode", "manifest_sha256"}
+SELECTION_PAYLOADS = ("board_before", "board_after", "health", "focus", "priority")
+SELECTION_MAX_REVISION = 2_147_483_647
+SELECTION_OPERATION_RE = re.compile(r"^[0-9a-f]{32}$")
+SELECTION_MANIFEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _stamp(value: dt.datetime) -> str:
@@ -201,6 +208,134 @@ def _identity(value: Any, limit: int = 160) -> Optional[str]:
         return None
     cleaned = _clean_text(value, limit)
     return cleaned if cleaned == value else None
+
+
+def _selection_reference(value: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Validate one closed selected-generation reference without widening it."""
+    if type(value) is not dict or set(value) != SELECTION_FIELDS:
+        return None, "selection_malformed"
+    if value.get("schema") != SELECTION_SCHEMA:
+        return None, "selection_malformed"
+    revision = value.get("revision")
+    if type(revision) is not int or revision <= 0 or revision > SELECTION_MAX_REVISION:
+        return None, "selection_malformed"
+    operation_id = value.get("operation_id")
+    if type(operation_id) is not str or SELECTION_OPERATION_RE.fullmatch(operation_id) is None:
+        return None, "selection_malformed"
+    mode = value.get("mode")
+    if type(mode) is not str or mode not in {"active", "disabled"}:
+        return None, "selection_malformed"
+    manifest = value.get("manifest_sha256")
+    if mode == "active":
+        if type(manifest) is not str or SELECTION_MANIFEST_RE.fullmatch(manifest) is None:
+            return None, "selection_malformed"
+    elif manifest is not None:
+        return None, "selection_malformed"
+    reference = {
+        "schema": SELECTION_SCHEMA,
+        "revision": revision,
+        "operation_id": operation_id,
+        "mode": mode,
+        "manifest_sha256": manifest,
+    }
+    if mode == "disabled":
+        return reference, "selection_disabled"
+    return reference, None
+
+
+def _selection_join(payloads: Mapping[str, Any]) -> Dict[str, Any]:
+    """Join the five work-bound payloads when a selected generation is present.
+
+    Older IRIS payloads omit ``selection`` entirely.  They keep the existing
+    reader behavior.  Once any work-bound payload advertises the field, every
+    required payload must carry the same valid active reference.
+    """
+    advertised = any(isinstance(payload, dict) and "selection" in payload
+                     for payload in payloads.values())
+    if not advertised:
+        return {"advertised": False, "current": True, "reason": None, "issues": []}
+
+    missing: List[str] = []
+    malformed: List[str] = []
+    disabled: List[str] = []
+    references: Dict[str, Dict[str, Any]] = {}
+    for name in SELECTION_PAYLOADS:
+        payload = payloads.get(name)
+        if not isinstance(payload, dict) or "selection" not in payload:
+            missing.append(name)
+            continue
+        reference, issue = _selection_reference(payload.get("selection"))
+        if issue == "selection_malformed":
+            malformed.append(name)
+        elif issue == "selection_disabled":
+            disabled.append(name)
+        elif reference is not None:
+            references[name] = reference
+
+    issues: List[str] = []
+    reason: Optional[str] = None
+    if malformed:
+        reason = "selection_malformed"
+        issues.append(reason)
+    elif disabled:
+        reason = "selection_disabled"
+        issues.append(reason)
+    elif missing:
+        reason = "selection_missing"
+        issues.append(reason)
+    else:
+        unique = list(references.values())
+        baseline = unique[0] if unique else None
+        mismatched_fields = []
+        if baseline is None:
+            reason = "selection_missing"
+            issues.append(reason)
+        else:
+            for field in ("revision", "operation_id", "manifest_sha256"):
+                if any(reference[field] != baseline[field] for reference in unique[1:]):
+                    mismatched_fields.append(field)
+            if mismatched_fields:
+                reason = "selection_mismatch"
+                issues.append(reason)
+                issues.extend("selection_%s_mismatch" % field for field in mismatched_fields)
+
+    result: Dict[str, Any] = {
+        "advertised": True,
+        "current": reason is None,
+        "reason": reason,
+        "issues": issues,
+    }
+    if missing:
+        result["missing"] = missing
+    if malformed:
+        result["malformed"] = malformed
+    if disabled:
+        result["disabled"] = disabled
+    if reason is None and references:
+        result["reference"] = references[SELECTION_PAYLOADS[0]]
+    return result
+
+
+def _selection_projection(join: Mapping[str, Any], current_work: bool) -> Optional[Dict[str, Any]]:
+    """Expose only bounded selected-generation join state in the brief."""
+    if not join.get("advertised"):
+        return None
+    result: Dict[str, Any] = {
+        "advertised": True,
+        "current": bool(join.get("current")),
+        "identity_consistent": bool(join.get("current")),
+        "current_work_authority": bool(current_work),
+        "status": "active" if join.get("current") else "unavailable",
+        "reason": join.get("reason"),
+        "issues": list(join.get("issues", []))[:4],
+    }
+    if isinstance(join.get("reference"), dict):
+        result["reference"] = join["reference"]
+    for key in ("missing", "malformed", "disabled"):
+        values = join.get(key)
+        if isinstance(values, list) and values:
+            result[key] = values[:len(SELECTION_PAYLOADS)]
+    return result
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -484,7 +619,8 @@ def _health_current(health: Any, board: Mapping[str, Any], now: dt.datetime) -> 
     return not issues, issues
 
 
-def _project_focus(payload: Any, now: dt.datetime, board_current: bool, meta: Mapping[str, Any]) -> Dict[str, Any]:
+def _project_focus(payload: Any, now: dt.datetime, board_current: bool, meta: Mapping[str, Any],
+                   *, selection_issue: Optional[str] = None) -> Dict[str, Any]:
     ref = str(meta.get("reference", "/focus.json"))
     observed = _time_state(payload.get("observed_at") if isinstance(payload, dict) else None, now)
     if not isinstance(payload, dict) or payload.get("schema") != "iris-focus/v1" or payload.get("status") != "ok":
@@ -548,6 +684,9 @@ def _project_focus(payload: Any, now: dt.datetime, board_current: bool, meta: Ma
     projected = projected[:MAX_FOCUS_REQUESTS]
     source_current = bool(board_current and payload.get("work_verification") == "current"
                           and time_issue is None and age is not None and age <= 300)
+    issues = ["board_not_current"] if not board_current else []
+    if selection_issue is not None:
+        issues.append(selection_issue)
     return {
         **_source_metadata(ref, meta.get("sha256"), meta.get("observed_at", _stamp(now)), status=meta.get("http_status"), byte_count=meta.get("bytes")),
         "availability": "available",
@@ -562,7 +701,7 @@ def _project_focus(payload: Any, now: dt.datetime, board_current: bool, meta: Ma
         "requests": projected,
         "authority": _clean_text(payload.get("authority"), 80) or "unknown",
         "delivery": _clean_text(payload.get("delivery"), 120) or "unknown",
-        "issues": (["board_not_current"] if not board_current else []),
+        "issues": issues,
         "limits": ["transport is a source record; no human-read, answer, delivery, or authority is inferred"],
     }
 
@@ -674,7 +813,19 @@ def _observe_iris(now: dt.datetime, opener: Any = None) -> Tuple[Dict[str, Any],
         issues.append("ordered_work_binding_mismatch")
     health_current, health_issues = _health_current(health.get("data"), after_data if isinstance(after_data, dict) else {}, collection_now)
     issues.extend(health_issues)
-    current = bool(coherent and health_current and board_after.get("status") == 200)
+    selection_join = _selection_join({
+        "board_before": before_data,
+        "board_after": after_data,
+        "health": health.get("data"),
+        "focus": focus.get("data"),
+        "priority": priority.get("data"),
+    })
+    selection_current = bool(selection_join.get("current"))
+    selection_issue = selection_join.get("reason") if selection_join.get("advertised") and not selection_current else None
+    if selection_issue is not None:
+        issues.append(selection_issue)
+        health_issues.append(selection_issue)
+    current = bool(coherent and health_current and board_after.get("status") == 200 and selection_current)
     board_summary: Dict[str, Any] = {
         "reference": "/data/board.json",
         "availability": "available" if isinstance(after_data, dict) else "unavailable",
@@ -721,22 +872,39 @@ def _observe_iris(now: dt.datetime, opener: Any = None) -> Tuple[Dict[str, Any],
             "aggregate": _clean_text(coverage.get("aggregate"), 40),
             "narrative_deadlines": _clean_text(coverage.get("narrative_deadlines"), 40),
         } if isinstance(coverage, dict) else None
-    health_summary["current"] = health_current and health.get("status") == 200
-    health_summary["issues"] = health_issues
+    health_summary["current"] = health_current and health.get("status") == 200 and selection_current
+    health_summary["issues"] = list(dict.fromkeys(health_issues))
     try:
-        focus_summary = _project_focus(focus.get("data"), collection_now, current, _http_source_summary(focus, "/focus.json"))
+        focus_summary = _project_focus(focus.get("data"), collection_now, current,
+                                       _http_source_summary(focus, "/focus.json"),
+                                       selection_issue=selection_issue)
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
         focus_summary = _unavailable("/focus.json", "focus_projection_invalid")
     try:
         local_summary = _project_local_agent(local_agent.get("data"), collection_now, _http_source_summary(local_agent, "/local-agent.json"))
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
         local_summary = _unavailable("/local-agent.json", "local_agent_projection_invalid")
-    priority_summary = project_priority(priority.get("data") if priority.get("status") == 200 else None,
+    priority_data = priority.get("data") if priority.get("status") == 200 else None
+    if isinstance(priority_data, dict) and "selection" in priority_data:
+        priority_data = dict(priority_data)
+        priority_data.pop("selection", None)
+    priority_summary = project_priority(priority_data,
                                         collection_now, _http_source_summary(priority, "/priority.json"),
                                         work_current=current)
     iris = {"health": health_summary, "board": board_summary, "focus": focus_summary, "local_agent": local_summary,
             "priorities": priority_summary,
             "limits": ["IRIS projections are read-only; task status, model result, accepted action, human answer, and authority remain separate"]}
+    selection_projection = _selection_projection(selection_join, current)
+    if selection_projection is not None:
+        iris["selection"] = selection_projection
+        if selection_issue is not None:
+            priority_summary["work_current"] = False
+            priority_summary["issues"] = [selection_issue]
+            priority_summary["binding_note"] = (
+                "work binding unavailable because the IRIS selection reference is not one valid active generation"
+            )
+        else:
+            priority_summary["work_current"] = bool(current)
     return iris, after_data if isinstance(after_data, dict) else None
 
 
@@ -1397,6 +1565,10 @@ def render_markdown(brief: Mapping[str, Any]) -> str:
     board = iris.get("board", {}) if isinstance(iris.get("board"), dict) else {}
     lines.extend(["", "## IRIS", "- service: %s; current `%s`; freshness `%s`" % (_md(health.get("status")), _md(health.get("current")), _md(health.get("freshness"))),
                   "- board: %s items, %s activity; current `%s`" % (_md((board.get("shape") or {}).get("items") if isinstance(board.get("shape"), dict) else None), _md((board.get("shape") or {}).get("activity") if isinstance(board.get("shape"), dict) else None), _md(board.get("current")))])
+    selection = iris.get("selection") if isinstance(iris.get("selection"), dict) else None
+    if selection is not None:
+        lines.append("- selected generation: current-work authority `%s`; status `%s`; reason `%s`" % (
+            _md(selection.get("current_work_authority")), _md(selection.get("status")), _md(selection.get("reason"))))
     focus = iris.get("focus", {}) if isinstance(iris.get("focus"), dict) else {}
     lines.append("- focus: %s requests; authority `%s`; delivery `%s`" % (_md(focus.get("request_count")), _md(focus.get("authority")), _md(focus.get("delivery"))))
     lines.append("- focus counts: %s; omitted requests: %s" % (_md(focus.get("counts")), _md(focus.get("omitted_requests"))))

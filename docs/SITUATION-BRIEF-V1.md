@@ -34,6 +34,19 @@ refresh the source capture. The source timestamp remains visible. The source
 limit mirrors `IRIS/client-work-board/scripts/freshness_model.py` at the accepted
 consumer revision; there is no runtime cross-repository import.
 
+The reader accepts the legacy contract when none of the work-bound board,
+health, focus, or priority payloads has a `selection` field. If any of those
+payloads advertises `selection`, the board-before and board-after reads plus
+health, focus, and priority must each carry the same closed
+`iris-selection-reference/v1` object with a positive integer revision, a
+32-character lowercase operation ID, `mode: "active"`, and a 64-character
+lowercase manifest hash. Missing, malformed, disabled, or mismatched
+references make current-work authority unavailable while retaining bounded
+historical focus requests and priority text. A matching reference does not
+override the existing board or health freshness checks. Local-agent activity,
+sweep attempts, and Fully Aware snapshots are independent observations and do
+not participate in this join.
+
 Focus rows retain the source key/work identity, group, state, applicability,
 match, bounded question/recommendation, snooze, transport, and response count.
 They do not turn transport into human delivery, an answer, or authority. Local

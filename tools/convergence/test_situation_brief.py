@@ -94,6 +94,12 @@ def priority_payload():
                       "url": None, "binding_status": "current"} for i in range(8)]}}
 
 
+def selection_reference(*, revision=1, operation_id="a" * 32, mode="active", manifest_sha256="f" * 64):
+    return {"schema": "iris-selection-reference/v1", "revision": revision,
+            "operation_id": operation_id, "mode": mode,
+            "manifest_sha256": manifest_sha256 if mode == "active" else None}
+
+
 def latest_outcome(ended="2026-09-20T17:30:00Z"):
     return {
         "schema": "iris-sweep-outcome/v1",
@@ -158,6 +164,14 @@ class FileTests(unittest.TestCase):
         values.update(kwargs)
         return Endpoints(values)
 
+    def selected_endpoints(self, reference=None):
+        values = {"/data/board.json": board(), "/healthz": health(), "/focus.json": focus(),
+                  "/local-agent.json": local_agent(), "/priority.json": priority_payload()}
+        selected = reference or selection_reference()
+        for path in ("/data/board.json", "/healthz", "/focus.json", "/priority.json"):
+            values[path]["selection"] = copy.deepcopy(selected)
+        return Endpoints(values)
+
     def make_brief(self, endpoints, **kwargs):
         boot_path, plans_path = self.paths()
         with mock.patch.object(brief, "fetch_endpoint", side_effect=endpoints):
@@ -219,6 +233,138 @@ class FileTests(unittest.TestCase):
         self.assertIn("omitted priority rows: 1", markdown)
         self.assertIn("Coverage: partial", markdown)
         self.assertIn("2026-09-20T17:57:00Z", markdown)
+
+    def test_legacy_payloads_and_independent_local_activity_keep_existing_behavior(self):
+        values = {"/data/board.json": board(), "/healthz": health(), "/focus.json": focus(),
+                  "/local-agent.json": local_agent(), "/priority.json": priority_payload()}
+        values["/local-agent.json"]["selection"] = selection_reference()
+        output = self.make_brief(Endpoints(values))
+        self.assertNotIn("selection", output["iris"])
+        self.assertTrue(output["iris"]["board"]["current"])
+        self.assertTrue(output["iris"]["health"]["current"])
+        self.assertTrue(output["iris"]["focus"]["current"])
+        self.assertNotIn("work_current", output["iris"]["priorities"])
+
+    def test_valid_selection_reference_joins_all_work_bound_payloads(self):
+        output = self.make_brief(self.selected_endpoints())
+        selection = output["iris"]["selection"]
+        self.assertTrue(selection["advertised"])
+        self.assertTrue(selection["current_work_authority"])
+        self.assertEqual(selection["status"], "active")
+        self.assertEqual(selection["reference"], selection_reference())
+        self.assertTrue(output["iris"]["board"]["current"])
+        self.assertTrue(output["iris"]["health"]["current"])
+        self.assertTrue(output["iris"]["focus"]["current"])
+        self.assertTrue(output["iris"]["priorities"]["current"])
+        self.assertTrue(output["iris"]["priorities"]["work_current"])
+
+    def test_matching_selection_does_not_freshen_stale_priority_plan(self):
+        endpoints = self.selected_endpoints()
+        stale = priority_payload()
+        stale.update(status="stale", reason="plan_expired", plan=None)
+        stale["selection"] = copy.deepcopy(selection_reference())
+        endpoints.values["/priority.json"] = stale
+        output = self.make_brief(endpoints)
+        self.assertTrue(output["iris"]["selection"]["current_work_authority"])
+        self.assertEqual(output["iris"]["priorities"]["status"], "stale")
+        self.assertFalse(output["iris"]["priorities"]["current"])
+        self.assertEqual(output["iris"]["priorities"]["rows"], [])
+        self.assertTrue(output["iris"]["board"]["current"])
+
+    def test_board_selection_change_during_collection_refuses_current_work(self):
+        endpoints = self.selected_endpoints()
+        changed = copy.deepcopy(endpoints.values['/data/board.json'])
+        changed['selection'] = selection_reference(revision=2, operation_id='b' * 32)
+        endpoints.after = changed
+        output = self.make_brief(endpoints)
+        self.assertEqual(output['iris']['selection']['reason'], 'selection_mismatch')
+        self.assertFalse(output['iris']['board']['current'])
+        self.assertFalse(output['iris']['selection']['current_work_authority'])
+        self.assertEqual(output['iris']['focus']['requests'][0]['key'], 'focus-key')
+
+    def test_selection_revision_or_operation_mismatch_fails_current_work_only(self):
+        for field, value in (("revision", 2), ("operation_id", "b" * 32)):
+            with self.subTest(field=field):
+                endpoints = self.selected_endpoints()
+                replacement = selection_reference()
+                replacement[field] = value
+                endpoints.values["/focus.json"]["selection"] = replacement
+                output = self.make_brief(endpoints)
+                selection = output["iris"]["selection"]
+                self.assertFalse(selection["current_work_authority"])
+                self.assertEqual(selection["reason"], "selection_mismatch")
+                self.assertIn("selection_%s_mismatch" % field, selection["issues"])
+                self.assertFalse(output["iris"]["board"]["current"])
+                self.assertFalse(output["iris"]["health"]["current"])
+                self.assertFalse(output["iris"]["focus"]["current"])
+                self.assertEqual(output["iris"]["focus"]["requests"][0]["key"], "focus-key")
+                self.assertFalse(output["iris"]["priorities"]["work_current"])
+                self.assertEqual(output["iris"]["priorities"]["rows"][0]["title"], "Priority 0")
+                self.assertEqual({row["binding_status"] for row in output["iris"]["priorities"]["rows"]}, {"unavailable"})
+
+    def test_selection_absent_malformed_and_disabled_fail_closed_but_preserve_text(self):
+        cases = {
+            "absent": (None, "selection_missing"),
+            "malformed": ("malformed", "selection_malformed"),
+            "disabled": (selection_reference(mode="disabled"), "selection_disabled"),
+        }
+        for name, (mutation, reason) in cases.items():
+            with self.subTest(name=name):
+                endpoints = self.selected_endpoints()
+                if name == "absent":
+                    del endpoints.values["/priority.json"]["selection"]
+                elif name == "malformed":
+                    malformed = selection_reference()
+                    malformed["revision"] = True
+                    endpoints.values["/healthz"]["selection"] = malformed
+                else:
+                    for path in ("/data/board.json", "/healthz", "/focus.json", "/priority.json"):
+                        endpoints.values[path]["selection"] = copy.deepcopy(mutation)
+                output = self.make_brief(endpoints)
+                selection = output["iris"]["selection"]
+                self.assertFalse(selection["current_work_authority"])
+                self.assertEqual(selection["reason"], reason)
+                self.assertFalse(output["iris"]["board"]["current"])
+                self.assertFalse(output["iris"]["focus"]["current"])
+                self.assertEqual(output["iris"]["focus"]["requests"][0]["work_id"], "a")
+                self.assertEqual(output["iris"]["priorities"]["rows"][0]["title"], "Priority 0")
+
+    def test_nested_malformed_mode_and_oversized_revision_keep_brief_useful(self):
+        cases = {
+            "nested_mode": {"mode": []},
+            "oversized_revision": {"revision": brief.SELECTION_MAX_REVISION + 1},
+        }
+        for name, changes in cases.items():
+            with self.subTest(name=name):
+                endpoints = self.selected_endpoints()
+                malformed = selection_reference()
+                malformed.update(changes)
+                endpoints.values["/focus.json"]["selection"] = malformed
+                output = self.make_brief(endpoints)
+                self.assertNotEqual(output.get("status"), "bounded_unavailable")
+                self.assertEqual(output["iris"]["selection"]["reason"], "selection_malformed")
+                self.assertEqual(output["iris"]["focus"]["requests"][0]["key"], "focus-key")
+                self.assertEqual(output["iris"]["priorities"]["rows"][0]["title"], "Priority 0")
+
+    def test_selection_identity_does_not_override_stale_board_or_health(self):
+        cases = {
+            "stale_health": {"/healthz": health(generated="2026-09-19T00:00:00Z")},
+            "stale_board": {"/data/board.json": dict(board(), generated_at="2026-09-19T00:00:00Z")},
+        }
+        for name, replacements in cases.items():
+            with self.subTest(name=name):
+                endpoints = self.selected_endpoints()
+                for path, replacement in replacements.items():
+                    replacement = copy.deepcopy(replacement)
+                    replacement["selection"] = copy.deepcopy(selection_reference())
+                    endpoints.values[path] = replacement
+                output = self.make_brief(endpoints)
+                selection = output["iris"]["selection"]
+                self.assertTrue(selection["identity_consistent"])
+                self.assertFalse(selection["current_work_authority"])
+                self.assertEqual(selection["reference"], selection_reference())
+                self.assertEqual(output["iris"]["focus"]["requests"][0]["key"], "focus-key")
+                self.assertEqual(output["iris"]["priorities"]["rows"][0]["title"], "Priority 0")
 
     def test_incoherent_board_downgrades_priority_work_binding_only(self):
         endpoints = self.endpoints(**{"/priority.json": priority_payload()})
