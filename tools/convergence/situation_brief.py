@@ -319,26 +319,33 @@ def _selection_join(payloads: Mapping[str, Any], excluded: Tuple[str, ...] = ())
     return result
 
 
-def _priority_read_unavailable(observation: Mapping[str, Any]) -> bool:
+_UNAVAILABLE_PRIORITY_FIELDS = frozenset({"schema", "status", "reason", "checked_at", "plan"})
+
+
+def _priority_read_unavailable(observation: Mapping[str, Any], now: dt.datetime) -> bool:
     """True only when the optional priority read supplied no planning payload.
 
-    A transport failure or non-200 read supplied nothing, and a well-formed
-    source-declared unavailable envelope (``iris-priority-context/v1`` with
-    ``status: unavailable``, an explicit ``plan: null``, a documented string
-    reason and no ``selection`` field) declares none.  Either is left out of the
+    A transport failure or non-200 read supplied nothing.  A complete, valid
+    source-declared unavailable envelope declares none: exactly the documented
+    ``iris-priority-context/v1`` fields, ``status: unavailable``, an explicit
+    ``plan: null``, a documented string reason, and an aware ``checked_at`` that
+    is not in the future (no ``selection`` field).  Either is left out of the
     selection join: its rows are cleared by the priority projection without
     invalidating other evidence.  Anything else that arrived with HTTP 200 --
-    including a malformed body -- still joins and fails closed as before.
+    including a malformed or incomplete envelope -- still joins and fails closed.
     """
     if observation.get("status") != 200:
         return True
     data = observation.get("data")
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or set(data) != _UNAVAILABLE_PRIORITY_FIELDS:
         return False
-    reason = data.get("reason")
-    return ("selection" not in data and data.get("schema") == "iris-priority-context/v1"
-            and data.get("status") == "unavailable" and "plan" in data and data["plan"] is None
-            and isinstance(reason, str) and reason in {"not_configured", "evidence_unavailable"})
+    reason = data["reason"]
+    if not (data["schema"] == "iris-priority-context/v1" and data["status"] == "unavailable"
+            and data["plan"] is None and isinstance(reason, str)
+            and reason in {"not_configured", "evidence_unavailable"}):
+        return False
+    checked, issue = _parse_time(data["checked_at"])
+    return issue is None and checked is not None and checked <= now
 
 
 def _selection_projection(join: Mapping[str, Any], current_work: bool) -> Optional[Dict[str, Any]]:
@@ -844,7 +851,7 @@ def _observe_iris(now: dt.datetime, opener: Any = None) -> Tuple[Dict[str, Any],
         "health": health.get("data"),
         "focus": focus.get("data"),
         "priority": priority.get("data"),
-    }, excluded=("priority",) if _priority_read_unavailable(priority) else ())
+    }, excluded=("priority",) if _priority_read_unavailable(priority, collection_now) else ())
     selection_current = bool(selection_join.get("current"))
     selection_issue = selection_join.get("reason") if selection_join.get("advertised") and not selection_current else None
     if selection_issue is not None:

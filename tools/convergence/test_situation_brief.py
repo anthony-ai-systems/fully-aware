@@ -428,7 +428,11 @@ class FileTests(unittest.TestCase):
                         dict(envelope, reason="some_other_reason"),
                         None, [], "not json object",           # HTTP 200 with a malformed body
                         no_plan,                               # plan absent is not plan: null
-                        dict(envelope, reason=[]), dict(envelope, reason={})):  # must not crash
+                        dict(envelope, reason=[]), dict(envelope, reason={}),  # must not crash
+                        {k: v for k, v in envelope.items() if k != "checked_at"},
+                        dict(envelope, checked_at=[]), dict(envelope, checked_at="not a time"),
+                        dict(envelope, checked_at="2999-01-01T00:00:00Z"),       # future check
+                        dict(envelope, rows=[])):                              # unexpected field
             with self.subTest(payload=payload):
                 endpoints = self.selected_endpoints()
                 endpoints.values["/priority.json"] = payload
