@@ -1060,6 +1060,45 @@ def write_receipt(directory, receipt, policy=None):
     return _write_json(base / (as_date(receipt["date"]).isoformat() + ".json"), receipt, replace=False)
 
 
+def snapshot_outbox(directory, proposals):
+    """Exact bytes of each outbox file this attempt may replace (``None`` when absent).
+
+    Raises ``OSError`` when an existing target cannot be read or is a symlink, so an
+    unknown earlier handoff is never overwritten or deleted by this attempt.
+    """
+    prior = {}
+    for proposal in proposals:
+        target = Path(directory) / "outbox" / (proposal["source"]["work_item_id"] + ".json")
+        if target.is_symlink():
+            raise OSError("outbox_target_is_symlink")
+        prior[target] = target.read_bytes() if target.exists() else None
+    return prior
+
+
+def rollback_outbox(prior):
+    """Put each touched outbox file back as it was; return what could not be undone.
+
+    An earlier handoff is restored byte for byte; if that fails, this attempt's file is
+    at least withdrawn (and the lost earlier handoff reported). A file that cannot even
+    be removed is reported as possibly still handed off.
+    """
+    stuck = []
+    for target, before in prior.items():
+        try:
+            if before is None:
+                if target.exists() or target.is_symlink():
+                    os.unlink(target)
+                continue
+            try:
+                _write_bytes(target, before, replace=True)
+            except (OSError, ValueError):
+                os.unlink(target)
+                stuck.append(target.name + ": earlier handoff could not be restored; withdrawn")
+        except (OSError, ValueError):
+            stuck.append(target.name + ": could not be withdrawn; this attempt's proposal may remain")
+    return stuck
+
+
 def write_outbox(directory, proposal):
     oid = proposal["source"]["work_item_id"]
     if not OPPORTUNITY.fullmatch(oid):
@@ -1689,41 +1728,39 @@ def finalize_command(a, now):
     if a.dir:
         if (Path(a.dir) / (receipt["date"] + ".json")).exists():
             raise ValueError("receipt_exists")  # the day is already recorded; before any outbox write
-        # Snapshot any earlier outbox file this attempt may replace, so a failure can put
-        # it back exactly (or remove this attempt's file) — including after a rename whose
-        # directory fsync then failed, when the writer never returned its path.
-        prior_outbox = {}
-        for proposal in proposals:
-            target = Path(a.dir) / "outbox" / (proposal["source"]["work_item_id"] + ".json")
-            try:
-                prior_outbox[target] = target.read_bytes() if target.is_file() and not target.is_symlink() else None
-            except OSError:
-                prior_outbox[target] = None
+        failure, prior, stuck = None, {}, []
         try:
-            for proposal in proposals:
-                oid = proposal["source"]["work_item_id"]
-                c = presented[oid]
-                # The proof lands first, so an outbox file never names a missing proof.
-                result["proofs"].append(str(write_proof(a.dir, oid, c["proof_body"])))
-                write_ledger(a.dir, oid, proposal["source"]["work_revision"], evidence_tokens(c))
-                result["outbox"].append(str(write_outbox(a.dir, proposal)))
-        except (OSError, ValueError) as exc:
-            # A failed preparation write is a failed pass, recorded like any refusal. Withdraw
-            # this attempt's outbox files so nothing is handed off under a failed receipt.
-            for target, before in prior_outbox.items():
-                try:
-                    if before is None:
-                        if target.exists() or target.is_symlink():
-                            os.unlink(target)
-                    else:
-                        _write_bytes(target, before, replace=True)  # exact earlier bytes
-                except (OSError, ValueError):
-                    pass
-            refused = clip("preparation_write_failed:" + type(exc).__name__, 200)
-            result.update(refused=refused, outbox=[])
+            prior = snapshot_outbox(a.dir, proposals)
+        except OSError as exc:
+            # An earlier handoff we cannot read must never be overwritten or deleted.
+            failure = "outbox_snapshot_failed:" + type(exc).__name__
+        if failure is None:
+            try:
+                for proposal in proposals:
+                    oid = proposal["source"]["work_item_id"]
+                    c = presented[oid]
+                    # The proof lands first, so an outbox file never names a missing proof.
+                    result["proofs"].append(str(write_proof(a.dir, oid, c["proof_body"])))
+                    write_ledger(a.dir, oid, proposal["source"]["work_revision"], evidence_tokens(c))
+                    result["outbox"].append(str(write_outbox(a.dir, proposal)))
+                # The receipt is inside the same boundary: a handoff without its day's
+                # receipt would be unrecorded and could be repeated by a second pass.
+                result["receipt_path"] = str(write_receipt(a.dir, receipt))
+            except (OSError, ValueError) as exc:
+                failure = "preparation_write_failed:" + type(exc).__name__
+                stuck = rollback_outbox(prior)
+        if failure is not None:
+            refused = clip(failure, 200)
             receipt = refusal_receipt(value, refused, now=now)
-            result.update(outcome=receipt["outcome"], candidates=receipt["candidates"])
-        result["receipt_path"] = str(write_receipt(a.dir, receipt))
+            if stuck:
+                # Say exactly what could not be undone instead of reporting a clean outbox.
+                receipt["coverage"]["gaps"].append(clip("outbox_rollback_failed: " + "; ".join(stuck), 1000))
+                result["rollback_failed"] = stuck
+            result.update(refused=refused, outbox=[], proofs=[], outcome=receipt["outcome"],
+                          candidates=receipt["candidates"])
+            # If even this write fails, the error surfaces (exit 2) after the rollback:
+            # nothing is left handed off, and the next run may record the day.
+            result["receipt_path"] = str(write_receipt(a.dir, receipt))
     emit(result)
     return 5 if refused else 0
 

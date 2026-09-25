@@ -961,6 +961,98 @@ class ReceiptTest(unittest.TestCase):
                 else:
                     self.assertEqual(target.read_bytes(), earlier)
 
+    def finalize_into(self, tmp, intel, earlier=None):
+        draft_path = Path(tmp) / "draft.json"
+        draft_path.write_text(json.dumps(self.good_draft()))
+        docket_path = Path(tmp) / "docket.json"
+        docket_path.write_text(json.dumps({"events": []}))
+        target = None
+        if earlier is not None:
+            proposals = ip.settle(self.good_draft(), now=NOW, corpus=[], docket={"events": []})[1]
+            target = intel / "outbox" / (proposals[0]["source"]["work_item_id"] + ".json")
+            target.parent.mkdir(parents=True)
+            target.write_bytes(earlier)
+        run = lambda: self.run_cli("finalize", "--receipt", str(draft_path), "--dir", str(intel),
+                                   "--docket", str(docket_path))
+        return run, target
+
+    def test_unreadable_earlier_outbox_is_never_touched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            intel = Path(tmp) / "intelligence"
+            run, target = self.finalize_into(tmp, intel, earlier=b'{"earlier": 1}\n')
+            os.chmod(target, 0)
+            try:
+                rc, text = run()
+            finally:
+                os.chmod(target, 0o600)
+            self.assertEqual(rc, 5, text)
+            result = json.loads(text)
+            self.assertEqual(result["refused"], "outbox_snapshot_failed:PermissionError")
+            self.assertEqual(target.read_bytes(), b'{"earlier": 1}\n')
+            self.assertFalse((intel / "proofs").exists())
+            self.assertEqual(json.loads(Path(result["receipt_path"]).read_text())["outcome"], "failed")
+
+    def test_failed_restore_withdraws_and_reports_instead_of_leaving_the_proposal(self):
+        real_outbox, real_bytes = ip.write_outbox, ip._write_bytes
+        earlier = b'{"earlier": 2}\n'
+
+        def rename_then_fail(directory, proposal):
+            real_outbox(directory, proposal)
+            raise OSError("directory fsync failed")
+
+        def no_restore(path, data, *, replace):
+            if data == earlier:
+                raise OSError("cannot create restoration temp file")
+            return real_bytes(path, data, replace=replace)
+        with tempfile.TemporaryDirectory() as tmp:
+            intel = Path(tmp) / "intelligence"
+            run, target = self.finalize_into(tmp, intel, earlier=earlier)
+            with mock.patch.object(ip, "write_outbox", side_effect=rename_then_fail), \
+                    mock.patch.object(ip, "_write_bytes", side_effect=no_restore):
+                rc, text = run()
+            self.assertEqual(rc, 5, text)
+            result = json.loads(text)
+            self.assertFalse(target.exists())  # this attempt's proposal is withdrawn
+            self.assertIn("earlier handoff could not be restored", result["rollback_failed"][0])
+            value = json.loads(Path(result["receipt_path"]).read_text())
+            self.assertTrue(any(g.startswith("outbox_rollback_failed") for g in value["coverage"]["gaps"]))
+            # If even withdrawal fails, the receipt says the proposal may remain.
+            shutil.rmtree(intel)
+            run, target = self.finalize_into(tmp, intel, earlier=earlier)
+            real_unlink = os.unlink
+            with mock.patch.object(ip, "write_outbox", side_effect=rename_then_fail), \
+                    mock.patch.object(ip, "_write_bytes", side_effect=no_restore), \
+                    mock.patch.object(ip.os, "unlink", side_effect=lambda p: (_ for _ in ()).throw(OSError("busy"))
+                                      if Path(p) == target else real_unlink(p)):
+                rc, text = run()
+            self.assertEqual(rc, 5, text)
+            self.assertIn("may remain", json.loads(text)["rollback_failed"][0])
+
+    def test_receipt_write_failure_rolls_back_the_handoff(self):
+        real = ip.write_receipt
+        with tempfile.TemporaryDirectory() as tmp:
+            intel = Path(tmp) / "intelligence"
+            run, _ = self.finalize_into(tmp, intel)
+            calls = []
+
+            def once(directory, value, policy=None):
+                calls.append(value["outcome"])
+                if len(calls) == 1:
+                    raise OSError("disk full")
+                return real(directory, value, policy)
+            with mock.patch.object(ip, "write_receipt", side_effect=once):
+                rc, text = run()
+            self.assertEqual((rc, calls), (5, ["opportunities_prepared", "failed"]), text)
+            outbox = intel / "outbox"
+            self.assertFalse(outbox.exists() and any(outbox.iterdir()))
+            # Receipt storage fully down: exit 2, and still nothing left handed off.
+            shutil.rmtree(intel)
+            run, _ = self.finalize_into(tmp, intel)
+            with mock.patch.object(ip, "write_receipt", side_effect=OSError("disk full")):
+                rc, text = run()
+            self.assertEqual(rc, 2, text)
+            self.assertFalse(outbox.exists() and any(outbox.iterdir()))
+
     def test_listed_gaps_outrank_complete_coverage_labels(self):
         gapped = receipt("2026-09-25", outcome="no_qualifying_opportunity",
                          coverage={"internal": "complete", "external": "complete",
