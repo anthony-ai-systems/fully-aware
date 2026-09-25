@@ -472,10 +472,16 @@ def automation_driver(snapshot, automation_id):
     if db["availability"] != "available":
         # Without the scheduler store, absence cannot be established either way.
         present = True if in_config else None
+        presence = "config_only_store_unreadable" if in_config else "unknown"
     else:
-        present = bool(in_db or in_config)
-    status = (in_db or {}).get("status") or (in_config or {}).get("status") or ("ABSENT" if present is False else None)
-    return {"present": present, "status": status,
+        # The scheduler fires only what its store holds: a config file alone is not a driver.
+        present = bool(in_db)
+        presence = "scheduler_row" if in_db else "present_in_config_only" if in_config else "absent"
+    if presence == "present_in_config_only":
+        status = "present_in_config_only"
+    else:
+        status = (in_db or {}).get("status") or (in_config or {}).get("status") or ("ABSENT" if present is False else None)
+    return {"present": present, "presence": presence, "status": status,
             "last_run_at": (in_db or {}).get("last_run_at"),
             "next_run_at": (in_db or {}).get("next_run_at"), "evidence": evidence}
 
@@ -616,7 +622,7 @@ def assess(snapshot, now, policy=None):
     last_success, missed, sweep_evidence, sweep_known = sweep_success(snapshot, now)
     recent = last_success is not None and now - last_success <= stale_after
     iris_row = {"driver": "iris_sweep_heartbeat", "automation_id": IRIS_AUTOMATION, "present": iris["present"],
-                "status": iris["status"], "last_success_at": stamp(last_success),
+                "presence": iris["presence"], "status": iris["status"], "last_success_at": stamp(last_success),
                 "next_run_at": iris["next_run_at"], "evidence": iris["evidence"] + sweep_evidence}
     scan = snapshot["daily_scan"]
     intel = snapshot["intelligence"]
@@ -628,7 +634,7 @@ def assess(snapshot, now, policy=None):
          else "unavailable", "last_success_at": scan.get("latest_date"), "next_run_at": None,
          "evidence": ["brief_file_presence_only", "daily_scan_dir:" + scan.get("reason", "read")]},
         {"driver": "radar_daily", "automation_id": RADAR_AUTOMATION, "present": radar["present"],
-         "status": radar["status"], "last_success_at": radar["last_run_at"], "next_run_at": radar["next_run_at"],
+         "presence": radar["presence"], "status": radar["status"], "last_success_at": radar["last_run_at"], "next_run_at": radar["next_run_at"],
          "evidence": radar["evidence"] + ["last_run_is_not_success_proof"]},
         {"driver": "intelligence_pass",
          "present": bool(intel.get("latest_date")) if intel["availability"] == "available" else False,
@@ -643,6 +649,8 @@ def assess(snapshot, now, policy=None):
         reason = "scheduler_store_unavailable" if not db_available else "sweep_evidence_unavailable"
     elif iris["present"] and iris["status"] == "ACTIVE" and recent and not missed:
         state, reason = "operating", "driver_active_and_recent_success"
+    elif iris["presence"] == "present_in_config_only":
+        state, reason = "degraded", "scheduler_row_missing"
     elif not iris["present"] and not recent:
         state, reason = "stopped", "no_iris_sweep_driver_and_no_recent_success"
     elif not iris["present"]:
@@ -653,9 +661,15 @@ def assess(snapshot, now, policy=None):
         state, reason = "degraded", "last_success_stale"
     else:
         state, reason = "degraded", "missed_attempts"
-    since = snapshot["observed_at"] if state == "unknown" else stamp(last_success) or snapshot["observed_at"]
+    if last_success is None:
+        since = None  # rendered as "since unknown (no successful sweep observed)"
+    else:
+        since = snapshot["observed_at"] if state == "unknown" else stamp(last_success)
     next_run = when(iris["next_run_at"])
-    if state in {"operating", "degraded"} and iris["present"] and next_run and next_run > now:
+    # Only an ACTIVE driver with a scheduler row can make idling legitimate; a paused
+    # driver's next_run_at is not a wake.
+    if (state in {"operating", "degraded"} and iris["present"] and iris["status"] == "ACTIVE"
+            and next_run and next_run > now):
         idle = {"legitimate": True, "reason": "driver_scheduled",
                 "next_wake": {"kind": "iris_sweep_heartbeat", "at": stamp(next_run)}}
     elif state != "unknown" and hold.get("declared") and hold.get("resume_condition_satisfiable") is True:
@@ -667,6 +681,9 @@ def assess(snapshot, now, policy=None):
                     state, "no_future_run_known"),
                 "next_wake": {"kind": "none", "at": None}}
     decision = None
+    if reason == "scheduler_row_missing":
+        decision = ("The IRIS sweep automation exists only as a config file; the scheduler has no row for it, "
+                    "so nothing will fire it. Anthony must decide how IRIS gets a heartbeat.")
     if state == "stopped":
         decision = "No scheduler can wake IRIS; Anthony must decide how IRIS gets a heartbeat."
         if hold.get("declared") and hold.get("resume_condition_satisfiable") is False:
@@ -693,6 +710,7 @@ PLAIN = {
     "driver_not_active": "the IRIS sweep driver exists but is not active",
     "last_success_stale": "the IRIS sweep driver exists but its last success is stale",
     "missed_attempts": "the IRIS sweep driver missed its latest attempt",
+    "scheduler_row_missing": "an IRIS sweep automation file exists but the scheduler store has no row for it",
     "scheduler_store_unavailable": "the Codex scheduler store could not be read",
     "sweep_evidence_unavailable": "no IRIS sweep evidence could be read",
 }
@@ -701,7 +719,8 @@ PLAIN = {
 def render_markdown(report):
     def cell(value):
         return "-" if value is None else str(value).replace("|", "/")
-    lines = ["Initiative: %s since %s — %s" % (report["state"].upper(), report["since"],
+    since = report["since"] or "unknown (no successful sweep observed)"
+    lines = ["Initiative: %s since %s — %s" % (report["state"].upper(), since,
                                                PLAIN.get(report["reason"], report["reason"]))]
     wake = report["idle"]["next_wake"]
     lines.append("Next wake: %s%s (idle %s: %s)" % (

@@ -193,6 +193,42 @@ class InitiativeHealthTests(unittest.TestCase):
         self.f.sweep(NOW - dt.timedelta(hours=2))
         self.assertEqual(self.f.report()["reason"], "driver_not_active")
 
+    def test_config_file_without_scheduler_row_is_not_a_driver(self):
+        # Readable store with only Radar's row; IRIS has an automation.toml but no row.
+        self.f.automations([{"id": health.RADAR_AUTOMATION, "status": "ACTIVE", "kind": "heartbeat",
+                             "rrule": "FREQ=DAILY", "last_run_at": None, "next_run_at": None}])
+        self.f.config_file(health.IRIS_AUTOMATION)
+        self.f.sweep(NOW - dt.timedelta(hours=2))
+        report = self.f.report()
+        self.assertEqual((report["state"], report["reason"]), ("degraded", "scheduler_row_missing"))
+        iris = report["drivers"][0]
+        self.assertEqual((iris["present"], iris["presence"], iris["status"]),
+                         (False, "present_in_config_only", "present_in_config_only"))
+        self.assertFalse(report["idle"]["legitimate"])
+        self.assertIn("scheduler has no row", report["required_decision"])
+        self.assertEqual(self.run_cli("--check")[0], 1)
+
+    def test_paused_driver_with_future_next_run_is_not_legitimate_idle(self):
+        self.f.automations([{"id": health.IRIS_AUTOMATION, "status": "PAUSED", "kind": "heartbeat",
+                             "rrule": "FREQ=DAILY", "last_run_at": None,
+                             "next_run_at": iso(NOW + dt.timedelta(hours=1))}])
+        self.f.sweep(NOW - dt.timedelta(hours=2))
+        report = self.f.report()
+        self.assertEqual((report["state"], report["reason"]), ("degraded", "driver_not_active"))
+        self.assertFalse(report["idle"]["legitimate"])
+        self.assertEqual(report["idle"]["next_wake"], {"kind": "none", "at": None})
+
+    def test_never_succeeded_says_since_unknown(self):
+        self.f.automations([{"id": health.RADAR_AUTOMATION, "status": "ACTIVE", "kind": "heartbeat",
+                             "rrule": "FREQ=DAILY", "last_run_at": None, "next_run_at": None}])
+        self.f.path("sweep_runs_dir").mkdir(parents=True)
+        report = self.f.report()
+        self.assertEqual(report["state"], "stopped")
+        self.assertIsNone(report["since"])
+        first = health.render_markdown(report).splitlines()[0]
+        self.assertTrue(first.startswith("Initiative: STOPPED since unknown (no successful sweep observed) — "), first)
+        self.assertNotIn(iso(NOW), first)
+
     def test_unreadable_sqlite_is_unknown_not_operating(self):
         self.f.config_file(health.IRIS_AUTOMATION)
         self.f.sweep(NOW - dt.timedelta(hours=1))
