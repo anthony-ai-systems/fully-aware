@@ -418,6 +418,19 @@ class FileTests(unittest.TestCase):
                 self.assertEqual(planning["status"], "unavailable")
                 self.assertEqual(planning["rows"], [])
 
+    def test_undocumented_unavailable_priority_payload_still_joins(self):
+        # Only the documented unavailable form is excluded; a bare or foreign
+        # payload claiming unavailability still has to carry the selection.
+        for payload in ({"status": "unavailable", "plan": None},
+                        {"schema": "iris-priority-context/v1", "status": "unavailable",
+                         "reason": "some_other_reason", "checked_at": VERIFIED, "plan": None}):
+            with self.subTest(payload=payload):
+                endpoints = self.selected_endpoints()
+                endpoints.values["/priority.json"] = payload
+                output = self.make_brief(endpoints)
+                self.assertEqual(output["iris"]["selection"]["reason"], "selection_missing")
+                self.assertFalse(output["iris"]["selection"]["current_work_authority"])
+
     def test_unavailable_priority_still_requires_other_selections_to_agree(self):
         _endpoints, fetch = self.priority_unavailable_endpoints("http_404")
         _endpoints.values["/focus.json"]["selection"] = selection_reference(revision=2)

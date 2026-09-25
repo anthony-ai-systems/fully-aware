@@ -330,7 +330,9 @@ def _priority_read_unavailable(observation: Mapping[str, Any]) -> bool:
     data = observation.get("data")
     if observation.get("status") != 200 or not isinstance(data, dict):
         return True
-    return "selection" not in data and data.get("status") == "unavailable" and data.get("plan") is None
+    return ("selection" not in data and data.get("schema") == "iris-priority-context/v1"
+            and data.get("status") == "unavailable" and data.get("plan") is None
+            and data.get("reason") in {"not_configured", "evidence_unavailable"})
 
 
 def _selection_projection(join: Mapping[str, Any], current_work: bool) -> Optional[Dict[str, Any]]:
