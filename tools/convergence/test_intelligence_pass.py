@@ -379,7 +379,7 @@ class CandidateTest(unittest.TestCase):
                 "https://example.org:443/a%20b", "http://example.org:80/a%20b", "https://example.org/a%20b;jsessionid=9",
                 "<https://example.org/a%20b>", "(https://example.org/a%20b).", "HTTPS://WWW.Example.org/A%20B/",
                 "https://example.org/a%20b?utm_source=x#frag", "https://example.org/./a%20b",
-                "https://example.org/x/../a%20b"],
+                "https://example.org/x/../a%20b", "https://example.org//a%20b"],
             "https://en.wikipedia.org/wiki/foo_(bar)": [
                 "https://en.wikipedia.org/wiki/Foo_(bar)", "(https://en.wikipedia.org/wiki/Foo_(bar)).",
                 "<https://en.wikipedia.org/wiki/Foo_%28bar%29>"],
@@ -931,6 +931,35 @@ class ReceiptTest(unittest.TestCase):
                 self.assertEqual([r["status"] for r in value["candidates"]], ["held"])
                 outbox = intel / "outbox"
                 self.assertFalse(outbox.exists() and any(outbox.iterdir()), target)
+
+    def test_outbox_rename_then_failure_is_withdrawn_or_restored(self):
+        real = ip.write_outbox
+
+        def rename_then_fail(directory, proposal):
+            real(directory, proposal)  # the file is in place ...
+            raise OSError("directory fsync failed")  # ... but the writer never returns its path
+        with tempfile.TemporaryDirectory() as tmp:
+            draft_path = Path(tmp) / "draft.json"
+            draft_path.write_text(json.dumps(self.good_draft()))
+            docket_path = Path(tmp) / "docket.json"
+            docket_path.write_text(json.dumps({"events": []}))
+            for earlier in (None, b'{"earlier": "handoff"}\n'):
+                intel = Path(tmp) / "intelligence"
+                shutil.rmtree(intel, ignore_errors=True)
+                if earlier is not None:
+                    proposals = ip.settle(self.good_draft(), now=NOW, corpus=[], docket={"events": []})[1]
+                    target = intel / "outbox" / (proposals[0]["source"]["work_item_id"] + ".json")
+                    target.parent.mkdir(parents=True)
+                    target.write_bytes(earlier)
+                with mock.patch.object(ip, "write_outbox", side_effect=rename_then_fail):
+                    rc, text = self.run_cli("finalize", "--receipt", str(draft_path), "--dir", str(intel),
+                                            "--docket", str(docket_path))
+                self.assertEqual(rc, 5, text)
+                files = sorted(p.name for p in (intel / "outbox").iterdir()) if (intel / "outbox").exists() else []
+                if earlier is None:
+                    self.assertEqual(files, [])
+                else:
+                    self.assertEqual(target.read_bytes(), earlier)
 
     def test_listed_gaps_outrank_complete_coverage_labels(self):
         gapped = receipt("2026-09-25", outcome="no_qualifying_opportunity",

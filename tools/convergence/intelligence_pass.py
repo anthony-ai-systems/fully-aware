@@ -575,6 +575,7 @@ def url_identity(value):
     path = urllib.parse.unquote(path)
     if path:
         path = posixpath.normpath(path)  # /./x and /a/../x name the same resource
+        path = re.sub(r"^/+", "/", path)  # normpath keeps a leading "//"; it is the same path
         path = "" if path in {".", "/"} else path
     return trim_identity(urllib.parse.urlunsplit((scheme, netloc, path, "", "")).lower()) or None
 
@@ -601,6 +602,7 @@ def internal_identity(ref):
         token = stripped
     if "/" in token:
         token = posixpath.normpath(token)  # state/./a.md and state/x/../a.md are one file
+        token = re.sub(r"^/+", "/", token)
         while token.startswith("./"):
             token = token[2:]
     return trim_identity(token) or None
@@ -1687,6 +1689,16 @@ def finalize_command(a, now):
     if a.dir:
         if (Path(a.dir) / (receipt["date"] + ".json")).exists():
             raise ValueError("receipt_exists")  # the day is already recorded; before any outbox write
+        # Snapshot any earlier outbox file this attempt may replace, so a failure can put
+        # it back exactly (or remove this attempt's file) — including after a rename whose
+        # directory fsync then failed, when the writer never returned its path.
+        prior_outbox = {}
+        for proposal in proposals:
+            target = Path(a.dir) / "outbox" / (proposal["source"]["work_item_id"] + ".json")
+            try:
+                prior_outbox[target] = target.read_bytes() if target.is_file() and not target.is_symlink() else None
+            except OSError:
+                prior_outbox[target] = None
         try:
             for proposal in proposals:
                 oid = proposal["source"]["work_item_id"]
@@ -1698,10 +1710,14 @@ def finalize_command(a, now):
         except (OSError, ValueError) as exc:
             # A failed preparation write is a failed pass, recorded like any refusal. Withdraw
             # this attempt's outbox files so nothing is handed off under a failed receipt.
-            for written in result["outbox"]:
+            for target, before in prior_outbox.items():
                 try:
-                    os.unlink(written)
-                except OSError:
+                    if before is None:
+                        if target.exists() or target.is_symlink():
+                            os.unlink(target)
+                    else:
+                        _write_bytes(target, before, replace=True)  # exact earlier bytes
+                except (OSError, ValueError):
                     pass
             refused = clip("preparation_write_failed:" + type(exc).__name__, 200)
             result.update(refused=refused, outbox=[])
