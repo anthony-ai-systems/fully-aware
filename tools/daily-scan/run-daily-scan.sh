@@ -909,16 +909,19 @@ STUBJSON
         elif [ "${plan_rc}" -ne 0 ]; then
             fail_stage stage4 "intelligence_pass.py plan exited ${plan_rc} (see ${INTEL_PLAN})"
         else
-            started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             deep="$(intel_field "${INTEL_PLAN}" reserved.deep_candidates)"
             deep="${deep:-0}"
             gap_note=""
             gap_count="$(intel_field "${INTEL_PLAN}" gap_dates)"
             [ "${gap_count:-0}" != "0" ] && gap_note=", ${gap_count} missed day(s) listed, not re-run"
             log "stage4 -- pass $(intel_field "${INTEL_PLAN}" mode) for $(intel_field "${INTEL_PLAN}" covers_date), perspective $(intel_field "${INTEL_PLAN}" perspective)${gap_note}"
+            corpus_seconds=""
             if [ -z "${INTEL_CORPUS}" ]; then
                 # The novelty corpus is built by default. A failed build is not a
                 # failed pass: finalize records the missing corpus as a coverage gap.
+                # Its time is recorded separately (corpus_build_seconds) and is not
+                # part of the pass's wall-clock allocation.
+                corpus_t0="$(date +%s)"
                 INTEL_CORPUS="${INTEL_DIR}/raw/corpus-${DATE}.json"
                 corpus_args=(corpus --dir "${INTEL_DIR}" --out "${INTEL_CORPUS}")
                 if [ "${STUB}" = "1" ]; then
@@ -932,7 +935,10 @@ STUBJSON
                     log "stage4 WARNING -- novelty corpus build failed (see ${INTEL_CORPUS_SUMMARY}); recorded as a coverage gap"
                     INTEL_CORPUS=""
                 fi
+                corpus_seconds=$(( $(date +%s) - corpus_t0 ))
             fi
+            # The pass's wall clock starts here, after the corpus build.
+            started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             if [ ! -f "${INTEL_PROMPT}" ] || [ ! -f "${INTEL_CHALLENGE_PROMPT}" ]; then
                 intel_failed="missing intelligence prompt(s) under ${PROMPT_DIR}"
             elif [ "${STUB}" != "1" ] && ! command -v codex >/dev/null 2>&1; then
@@ -967,15 +973,26 @@ STUBJSON
                 draft_args+=(--challenge "${idx%.json}:${challenge}")
             done
             [ -n "${intel_failed}" ] && draft_args+=(--failed "${intel_failed}")
+            # When the watchdog fired, the host states why the allocation was exceeded.
             [ -n "${intel_over}" ] && draft_args+=(--allocation-exceeded-reason "${intel_over}")
+            [ -n "${corpus_seconds}" ] && draft_args+=(--corpus-build-seconds "${corpus_seconds}")
             finalize_args=(finalize --receipt "${INTEL_DRAFT}" --dir "${INTEL_DIR}")
             [ -n "${INTEL_CORPUS}" ] && finalize_args+=(--corpus "${INTEL_CORPUS}")
             [ "${STUB}" != "1" ] && finalize_args+=(--docket "${INTEL_DOCKET}")
 
-            if ! "${PY}" "${INTEL_PY}" "${draft_args[@]}" > "${INTEL_DRAFT}" 2>>"${INTEL_RAW}"; then
-                fail_stage stage4 "intelligence_pass.py draft failed (see ${INTEL_DRAFT}); no receipt written"
-            elif ! "${PY}" "${INTEL_PY}" "${finalize_args[@]}" > "${INTEL_RESULT}" 2>>"${INTEL_RAW}"; then
-                fail_stage stage4 "intelligence_pass.py finalize refused or failed (see ${INTEL_RESULT})"
+            # Finalize runs even when the draft step failed: a draft it cannot settle
+            # is a refusal, and a refusal still writes a `failed` receipt (exit 5), so
+            # the day reads as ran-and-failed, never as missed or silent.
+            draft_rc=0
+            "${PY}" "${INTEL_PY}" "${draft_args[@]}" > "${INTEL_DRAFT}" 2>>"${INTEL_RAW}" || draft_rc=$?
+            fin_rc=0
+            "${PY}" "${INTEL_PY}" "${finalize_args[@]}" > "${INTEL_RESULT}" 2>>"${INTEL_RAW}" || fin_rc=$?
+            if [ "${fin_rc}" -eq 5 ]; then
+                fail_stage stage4 "finalize refused ($(intel_field "${INTEL_RESULT}" refused))${intel_failed:+ after: ${intel_failed}}$([ "${draft_rc}" -ne 0 ] && printf ' after draft exited %s' "${draft_rc}") -- recorded as a failed pass receipt $(intel_field "${INTEL_RESULT}" receipt_path)"
+            elif [ "${fin_rc}" -ne 0 ]; then
+                fail_stage stage4 "intelligence_pass.py finalize exited ${fin_rc} (see ${INTEL_RESULT}); no receipt written"
+            elif [ "${draft_rc}" -ne 0 ]; then
+                fail_stage stage4 "intelligence_pass.py draft exited ${draft_rc} (see ${INTEL_DRAFT})"
             elif [ -n "${intel_failed}" ]; then
                 fail_stage stage4 "${intel_failed} -- recorded as a failed pass receipt"
             else

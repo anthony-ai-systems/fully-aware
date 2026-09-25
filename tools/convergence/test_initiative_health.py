@@ -218,6 +218,40 @@ class InitiativeHealthTests(unittest.TestCase):
         self.assertFalse(report["idle"]["legitimate"])
         self.assertEqual(report["idle"]["next_wake"], {"kind": "none", "at": None})
 
+    def test_null_scheduler_status_is_unknown_status_whatever_the_config_says(self):
+        self.f.automations([{"id": health.IRIS_AUTOMATION, "status": None, "kind": "heartbeat",
+                             "rrule": "FREQ=DAILY", "last_run_at": None,
+                             "next_run_at": iso(NOW + dt.timedelta(hours=1))}])
+        self.f.config_file(health.IRIS_AUTOMATION, status="ACTIVE")
+        self.f.sweep(NOW - dt.timedelta(hours=2))
+        report = self.f.report()
+        self.assertEqual((report["state"], report["reason"]), ("degraded", "driver_status_unknown"))
+        iris = report["drivers"][0]
+        self.assertEqual((iris["present"], iris["presence"], iris["status"]), (True, "scheduler_row", "unknown_status"))
+        self.assertFalse(report["idle"]["legitimate"])
+        self.assertEqual(report["idle"]["next_wake"], {"kind": "none", "at": None})
+        self.assertEqual(self.run_cli("--check")[0], 1)
+
+    def test_status_column_missing_is_unknown_status(self):
+        self.f.automations([{"id": health.IRIS_AUTOMATION, "kind": "heartbeat", "rrule": "FREQ=DAILY",
+                             "next_run_at": iso(NOW + dt.timedelta(hours=1))}],
+                           columns=("id", "kind", "rrule", "next_run_at"))
+        self.f.config_file(health.IRIS_AUTOMATION, status="ACTIVE")
+        self.f.sweep(NOW - dt.timedelta(hours=2))
+        report = self.f.report()
+        self.assertEqual((report["state"], report["drivers"][0]["status"]), ("degraded", "unknown_status"))
+        self.assertFalse(report["idle"]["legitimate"])
+
+    def test_scheduler_status_wins_over_config_status(self):
+        self.f.automations([{"id": health.IRIS_AUTOMATION, "status": "PAUSED", "kind": "heartbeat",
+                             "rrule": "FREQ=DAILY", "last_run_at": None,
+                             "next_run_at": iso(NOW + dt.timedelta(hours=1))}])
+        self.f.config_file(health.IRIS_AUTOMATION, status="ACTIVE")
+        self.f.sweep(NOW - dt.timedelta(hours=2))
+        report = self.f.report()
+        self.assertEqual((report["reason"], report["drivers"][0]["status"]), ("driver_not_active", "PAUSED"))
+        self.assertFalse(report["idle"]["legitimate"])
+
     def test_never_succeeded_says_since_unknown(self):
         self.f.automations([{"id": health.RADAR_AUTOMATION, "status": "ACTIVE", "kind": "heartbeat",
                              "rrule": "FREQ=DAILY", "last_run_at": None, "next_run_at": None}])

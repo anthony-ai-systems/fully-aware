@@ -70,7 +70,8 @@ everything you were meant to see.
   example `board:8c7450d0` or `boot-pack:section-3`); anything after the first space
   is description. Give external evidence a `url` whenever the source has one.
   The identifiers and URLs are the evidence identity: a declined idea stays
-  suppressed until that set of identities changes, however it is reworded.
+  suppressed until it cites at least one identifier or URL not cited before,
+  however it is reworded. Dropping or reordering evidence never revives it.
 - `novelty` must say what is materially new compared with what Anthony already
   has, has asked for, or has bookmarked. The runner also applies a crude
   word-overlap check of your `question` and `recommendation` against the novelty
@@ -81,8 +82,9 @@ everything you were meant to see.
   bookmarks or prompts, and it only catches near-duplicate wording; it cannot judge
   materiality. You must.
 - `dedupe_key` is a stable lowercase slug naming the idea, not the day
-  (for example `batch-client-review-exports`). Re-proposing a declined idea with
-  the same evidence is suppressed automatically.
+  (for example `batch-client-review-exports`). Re-proposing a declined idea
+  without new evidence is suppressed automatically; do not dodge that with a new
+  `dedupe_key` for the same idea.
 
 ## Output
 

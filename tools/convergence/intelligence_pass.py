@@ -18,11 +18,13 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 from zoneinfo import ZoneInfo
 
@@ -41,7 +43,7 @@ POLICY = {
     "local_window": "06:15-11:00",
     "timezone": "America/Los_Angeles",
     "novelty_threshold": 0.45,
-    "recovery_lookback_days": 7,
+    "gap_lookback_days": 7,
     "max_next_check_days": 30,
 }
 BUDGET_KEYS = ("wall_minutes", "model_launches", "source_opens", "deep_candidates", "present_max", "local_window")
@@ -68,7 +70,7 @@ CORPUS_KINDS = {"backlog", "prompt", "bookmark", "radar", "docket"}
 NOT_COMPLETED = {"preempted", "failed"}
 RECEIPT_KEYS = {"schema", "date", "mode", "covers_date", "gap_dates", "started_at", "finished_at", "allocation",
                 "used", "allocation_exceeded", "allocation_exceeded_reason", "perspective", "questions", "coverage",
-                "candidates", "outcome", "preempted_by", "recover_by"}
+                "candidates", "outcome", "preempted_by", "recover_by", "corpus_build_seconds", "refusal_reasons"}
 # used key -> (allocation key, multiplier to the used unit)
 ALLOCATION_LIMITS = (("model_launches", "model_launches", 1), ("wall_seconds", "wall_minutes", 60),
                      ("source_opens", "source_opens", 1))
@@ -83,7 +85,7 @@ OPTIONS = (
     ("defer", "Revisit later",
      "Costs nothing now; the idea is rechecked at the next check date."),
     ("decline", "Decline",
-     "Stays suppressed unless its evidence materially changes."),
+     "Stays suppressed until it cites evidence not cited before."),
 )
 
 # Mirrors of the IRIS docket's own text/identity rules (initiative_docket.py). They are
@@ -108,7 +110,12 @@ MAX_JSON = 2 * 1024 * 1024
 # small pure helpers
 # --------------------------------------------------------------------------- #
 def merged(policy):
-    return dict(POLICY, **(policy or {}))
+    policy = dict(policy or {})
+    if "recovery_lookback_days" in policy:
+        # The key's former name is still honoured; the new name wins when both are set.
+        policy.setdefault("gap_lookback_days", policy["recovery_lookback_days"])
+        del policy["recovery_lookback_days"]
+    return dict(POLICY, **policy)
 
 
 def instant(value):
@@ -243,7 +250,7 @@ def gap_days(receipts, today, policy):
     """
     if not receipts:
         return []
-    floor = max(today - dt.timedelta(days=policy["recovery_lookback_days"]), min(receipts))
+    floor = max(today - dt.timedelta(days=policy["gap_lookback_days"]), min(receipts))
     days, day = [], today - dt.timedelta(days=1)
     while day >= floor:
         receipt = receipts.get(day)
@@ -511,23 +518,47 @@ def opportunity_id(dedupe_key):
     return "opportunity-" + hashlib.sha256(dedupe_key.encode("utf-8")).hexdigest()[:24]
 
 
+IDENTITY_TRAIL = ",.;:/"
+URL_LIKE = re.compile(r"https?://", re.I)
+MAX_EVIDENCE_REFS = 5  # the docket packet holds at most five evidence refs
+
+
+def url_identity(value):
+    """A URL without its query string or fragment, lowercased, trailing ``,.;:/`` removed."""
+    value = value.strip()
+    try:
+        parts = urllib.parse.urlsplit(value)
+        value = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    except ValueError:
+        value = re.split(r"[?#]", value, maxsplit=1)[0]
+    return value.lower().rstrip(IDENTITY_TRAIL) or None
+
+
 def internal_identity(ref):
-    """The first whitespace-delimited token of an internal ref, lowercased."""
+    """The first whitespace-delimited token of an internal ref, lowercased, with
+    trailing ``,.;:/`` removed; a URL token also loses its query and fragment."""
     parts = ref.split() if isinstance(ref, str) else []
-    return parts[0].lower() if parts else None
+    if not parts:
+        return None
+    if URL_LIKE.match(parts[0]):
+        return url_identity(parts[0])
+    return parts[0].lower().rstrip(IDENTITY_TRAIL) or None
 
 
 def external_identity(item):
-    """An external item's ``url`` when present, else its source (lowercased,
-    whitespace collapsed, at most 80 characters)."""
+    """An external item's ``url`` when present, else its source. A URL (either one)
+    is normalised by ``url_identity``; a plain source is lowercased, whitespace
+    collapsed, cut to 80 characters, with trailing ``,.;:/`` removed."""
     if not isinstance(item, dict):
         return None
     url = item.get("url")
     if isinstance(url, str) and url.strip():
-        return url.strip()
+        return url_identity(url)
     source = item.get("source")
     if isinstance(source, str) and source.strip():
-        return " ".join(source.lower().split())[:80]
+        if URL_LIKE.match(source.strip()):
+            return url_identity(source)
+        return " ".join(source.lower().split())[:80].rstrip(IDENTITY_TRAIL) or None
     return None
 
 
@@ -538,15 +569,20 @@ def evidence_identities(c):
     return ([x for x in dict.fromkeys(internal) if x], [x for x in dict.fromkeys(external) if x])
 
 
+def evidence_tokens(c):
+    """The docket-safe tokens of every evidence identity (``short_token`` of each),
+    internal first, deduplicated. The first five become ``packet.evidence_refs``."""
+    internal, external = evidence_identities(c)
+    return list(dict.fromkeys(short_token(ref) for ref in internal + external))
+
+
 def evidence_revision(c):
     """sha256 over the SET of evidence identities, never over model-written prose.
 
     Internal evidence counts by the first token of each ref (``board:8c7450d0``),
     external evidence by its ``url`` or normalised source. Counterevidence, claims,
     ref descriptions, observation times and wording are excluded, so rewording the
-    same idea keeps its revision and a declined idea stays suppressed. Code enforces
-    only "the set of evidence identities changed"; whether that change is material
-    stays with the pass, the challenger and Anthony.
+    same idea keeps its revision.
     """
     internal, external = evidence_identities(c)
     return sha({"internal": sorted(internal), "external": sorted(external)})
@@ -560,16 +596,51 @@ def docket_events(value):
     return value
 
 
-def suppression(c, docket, now=None):
+def proposed_identities(events, oid):
+    """{work_revision: (evidence tokens, complete)} from earlier docket proposals of ``oid``.
+
+    The tokens are the proposal's ``packet.evidence_refs`` ids. A packet holds at
+    most five refs, so a proposal with five may have been cut short: it is marked
+    incomplete, and only an evidence ledger entry can complete it.
+    """
+    out = {}
+    for event in events:
+        if not isinstance(event, dict) or event.get("command") != "propose" or not isinstance(event.get("input"), dict):
+            continue
+        data = event["input"]
+        source = data.get("source") if isinstance(data.get("source"), dict) else {}
+        packet = data.get("packet") if isinstance(data.get("packet"), dict) else {}
+        rev, refs = source.get("work_revision"), packet.get("evidence_refs")
+        if source.get("work_item_id") != oid or not isinstance(rev, str) or not isinstance(refs, list):
+            continue
+        ids = frozenset(r["id"] for r in refs if isinstance(r, dict) and isinstance(r.get("id"), str))
+        complete = len(refs) < MAX_EVIDENCE_REFS
+        if rev in out:
+            ids, complete = ids | out[rev][0], complete or out[rev][1]
+        out[rev] = (ids, complete)
+    return out
+
+
+def suppression(c, docket, now=None, ledger=None):
     """Classify a candidate against raw docket events for the same opportunity id.
 
-    Code enforces "the evidence revision changed"; whether the change is material
-    stays with the model and the reviewer.
+    A declined, answered or followed-through opportunity becomes eligible again only
+    when the candidate cites at least one evidence identity that none of those
+    resolved proposals cited. Removing identities, reordering them, rewording, or
+    swapping external evidence for an external gap never re-surfaces it. A resolved
+    proposal's identities come from ``ledger`` ({work_revision: [tokens]}, written
+    by the host beside the outbox) or else its docket ``packet.evidence_refs``; when
+    they are unknown or possibly cut short, the candidate stays suppressed because a
+    new identity cannot be shown. Whether a new identity is MATERIAL stays with the
+    pass, the challenger and Anthony.
     """
     now = instant(now or dt.datetime.now(dt.timezone.utc))
     oid, revision = opportunity_id(c["dedupe_key"]), evidence_revision(c)
+    mine = frozenset(evidence_tokens(c))
+    events = docket_events(docket)
+    proposed = proposed_identities(events, oid)
     resolved, snoozed_until = [], None
-    for event in docket_events(docket):
+    for event in events:
         if not isinstance(event, dict) or not isinstance(event.get("input"), dict):
             continue
         data = event["input"]
@@ -588,10 +659,26 @@ def suppression(c, docket, now=None):
                 continue
             if until > now and (snoozed_until is None or until > snoozed_until):
                 snoozed_until = until
-    base = {"opportunity_id": oid, "evidence_revision": revision,
-            "prior": [{"disposition": d, "same_evidence": r == revision} for d, r in resolved]}
-    if any(r == revision for _, r in resolved):
-        return dict(base, status="suppressed")
+    prior, seen, unknown = [], set(), False
+    for disposition, rev in resolved:
+        stored = ledger.get(rev) if isinstance(ledger, dict) else None
+        if rev == revision:
+            ids, complete = mine, True  # the same identity set
+        elif isinstance(stored, list) and all(isinstance(t, str) for t in stored):
+            ids, complete = frozenset(stored), True
+        else:
+            ids, complete = proposed.get(rev, (frozenset(), False))
+        seen |= ids
+        unknown = unknown or not complete
+        prior.append({"disposition": disposition, "same_evidence": rev == revision, "identities_known": complete})
+    new = sorted(mine - seen) if resolved else []
+    base = {"opportunity_id": oid, "evidence_revision": revision, "prior": prior, "new_identities": new}
+    if any(p["same_evidence"] for p in prior):
+        return dict(base, status="suppressed", reason="same_evidence_as_resolved_opportunity")
+    if resolved and not new:
+        return dict(base, status="suppressed", reason="no_new_evidence_identity")
+    if resolved and unknown:
+        return dict(base, status="suppressed", reason="prior_evidence_identities_unknown")
     if snoozed_until is not None:
         return dict(base, status="snoozed", until=stamp(snoozed_until))
     if resolved:
@@ -656,7 +743,7 @@ def check_propose(p, now):
         _safe(option["label"], 200)
         _safe(option["tradeoff"], 500)
     refs = packet["evidence_refs"]
-    if not isinstance(refs, list) or len(refs) > 5:
+    if not isinstance(refs, list) or len(refs) > MAX_EVIDENCE_REFS:
         raise ValueError("invalid_evidence_refs")
     for ref in refs:
         _reference(ref)
@@ -705,12 +792,7 @@ def to_docket_propose(c, *, now, event_id, verified_at, policy=None):
     now = instant(now)
     oid, revision = opportunity_id(c["dedupe_key"]), evidence_revision(c)
     proof_ref = {"kind": "artifact", "id": short_token(c["proof"]["ref"])}
-    refs = []
-    internal, external = evidence_identities(c)
-    for ref in internal + external:
-        token = short_token(ref)
-        if token not in refs:
-            refs.append(token)
+    refs = evidence_tokens(c)
     check_at = next_check(c, now, policy)
     discovered = now
     try:
@@ -736,9 +818,9 @@ def to_docket_propose(c, *, now, event_id, verified_at, policy=None):
                           "challenge verdict: %s." % (c["perspective"], c["proof"]["kind"], prose(c["effort"]),
                                                       float(c["confidence"]), verdict), 1000),
             "next_owner": "Fully Aware intelligence pass prepares; Anthony decides.",
-            "follow_through": "Rechecked on %s. A decline stays suppressed unless the evidence changes."
+            "follow_through": "Rechecked on %s. A decline stays suppressed until new evidence is cited."
                               % check_at.date().isoformat(),
-            "evidence_refs": [{"kind": "artifact", "id": token} for token in refs[:5]],
+            "evidence_refs": [{"kind": "artifact", "id": token} for token in refs[:MAX_EVIDENCE_REFS]],
         },
         "next_check_at": stamp(check_at),
         "origin": {"kind": "independent_discovery", "question": prose(c["question"]),
@@ -751,6 +833,11 @@ def to_docket_propose(c, *, now, event_id, verified_at, policy=None):
 # --------------------------------------------------------------------------- #
 # receipts
 # --------------------------------------------------------------------------- #
+def _count(value):
+    """A finite, non-negative int or float (never a bool)."""
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
 def finalize_receipt(receipt, policy=None):
     """Validate a pass receipt against its closed shape and accounting rules."""
     policy = merged(policy)
@@ -760,6 +847,8 @@ def finalize_receipt(receipt, policy=None):
     r.setdefault("schema", SCHEMA)
     r.setdefault("gap_dates", [])
     r.setdefault("allocation_exceeded_reason", None)
+    r.setdefault("corpus_build_seconds", None)
+    r.setdefault("refusal_reasons", [])
     r["allocation_exceeded"] = None  # always computed here, never taken from the input
     if set(r) != RECEIPT_KEYS or r["schema"] != SCHEMA:
         raise ValueError("invalid_receipt_fields")
@@ -789,8 +878,16 @@ def finalize_receipt(receipt, policy=None):
         raise ValueError("invalid_allocation")
     used = r["used"]
     if (not isinstance(used, dict) or set(used) != {"wall_seconds", "model_launches", "source_opens"}
-            or any(type(used[k]) not in (int, float) or used[k] < 0 for k in used)):
+            or any(not _count(used[k]) for k in used)):
         raise ValueError("invalid_used")
+    if r["corpus_build_seconds"] is not None and not _count(r["corpus_build_seconds"]):
+        # Timed separately: building the corpus is not part of the pass's wall clock.
+        raise ValueError("invalid_corpus_build_seconds")
+    refusals = r["refusal_reasons"]
+    if not isinstance(refusals, list) or any(not isinstance(x, str) or not prose(x) for x in refusals):
+        raise ValueError("invalid_refusal_reasons")
+    if refusals and r["outcome"] != "failed":
+        raise ValueError("refusal_reasons_require_failed_outcome")
     exceeded = []
     for used_key, alloc_key, unit in ALLOCATION_LIMITS:
         limit = r["allocation"].get(alloc_key)
@@ -803,7 +900,7 @@ def finalize_receipt(receipt, policy=None):
         # Going over budget is allowed only with a stated reason, never silently.
         raise ValueError("allocation_exceeded_without_reason:" + ",".join(exceeded))
     r["allocation_exceeded"] = bool(exceeded)
-    if r["perspective"] not in PERSPECTIVES and not (r["perspective"] is None and r["outcome"] == "preempted"):
+    if r["perspective"] not in PERSPECTIVES and not (r["perspective"] is None and r["outcome"] in NOT_COMPLETED):
         raise ValueError("invalid_perspective")
     if (not isinstance(r["questions"], list) or len(r["questions"]) > 5
             or any(not isinstance(q, str) for q in r["questions"])):
@@ -818,8 +915,9 @@ def finalize_receipt(receipt, policy=None):
         if (not isinstance(row, dict) or set(row) != {"dedupe_key", "opportunity_id", "status", "reasons"}
                 or row["status"] not in STATUSES or not isinstance(row["reasons"], list)):
             raise ValueError("invalid_candidate_row")
-        if row["status"] != "rejected" and (not isinstance(row["dedupe_key"], str)
-                                            or row["opportunity_id"] != opportunity_id(row["dedupe_key"])):
+        anonymous_hold = row["status"] == "held" and row["dedupe_key"] is None and row["opportunity_id"] is None
+        if row["status"] != "rejected" and not anonymous_hold and (
+                not isinstance(row["dedupe_key"], str) or row["opportunity_id"] != opportunity_id(row["dedupe_key"])):
             raise ValueError("candidate_identity_mismatch")
         presented += row["status"] == "presented_to_outbox"
     cap = r["allocation"].get("present_max", policy["present_max"])
@@ -903,6 +1001,43 @@ def write_proof(directory, oid, body):
         raise ValueError("invalid_proof_body")
     proofs = private_dir(Path(private_dir(directory)) / "proofs")
     return _write_bytes(proofs / (oid + ".md"), body.encode("utf-8"), replace=True)
+
+
+def write_ledger(directory, oid, revision, tokens):
+    """Record a presented proposal's FULL evidence token set at ``evidence/<oid>.json``.
+
+    The docket packet keeps at most five evidence refs; this ledger keeps them all,
+    keyed by work revision, so a later decline can be compared identity by identity.
+    """
+    if not isinstance(oid, str) or not OPPORTUNITY.fullmatch(oid):
+        raise ValueError("opportunity_identity_mismatch")
+    if not isinstance(revision, str) or not SHA.fullmatch(revision):
+        raise ValueError("invalid_work_revision")
+    path = private_dir(Path(private_dir(directory)) / "evidence") / (oid + ".json")
+    try:
+        current = read_json_file(path)
+    except (OSError, ValueError):
+        current = {}
+    current = current if isinstance(current, dict) else {}
+    current[revision] = [t for t in tokens if isinstance(t, str)]
+    return _write_json(path, current, replace=True)
+
+
+def load_ledger(directory):
+    """{work_revision: [evidence tokens]} from ``evidence/*.json``; unreadable files are skipped."""
+    base, out = Path(directory) / "evidence", {}
+    if not base.is_dir():
+        return out
+    for path in sorted(base.glob("opportunity-*.json")):
+        try:
+            value = read_json_file(path)
+        except (OSError, ValueError):
+            continue
+        for rev, tokens in (value.items() if isinstance(value, dict) else ()):
+            if (isinstance(rev, str) and SHA.fullmatch(rev) and isinstance(tokens, list)
+                    and all(isinstance(t, str) for t in tokens)):
+                out[rev] = tokens
+    return out
 
 
 def load_history(directory):
@@ -1111,13 +1246,15 @@ def parse_model_json(text):
 
 
 def assemble_draft(plan, output, challenges, *, generator, challenger, started_at, now,
-                   model_launches, failed=None, exceeded_reason=None):
+                   model_launches, failed=None, exceeded_reason=None, corpus_build_seconds=None):
     """Join the plan, the generator's output and the fresh challenges into a draft.
 
     The host, not the model, sets ``generated_by`` and ``challenge.by``; any challenge
     the generator wrote about its own candidate is discarded. ``exceeded_reason`` is
     the host's explanation for running over the allocation (for example a watchdog);
     otherwise the model's own ``allocation_exceeded_reason`` is used, if it gave one.
+    ``started_at`` is taken after the novelty corpus is built; the build is timed
+    separately as ``corpus_build_seconds`` and never counts against the wall budget.
     """
     now, started = instant(now), instant(started_at)
     draft = {"schema": DRAFT_SCHEMA, "date": plan["date"], "mode": plan["mode"],
@@ -1130,7 +1267,8 @@ def assemble_draft(plan, output, challenges, *, generator, challenger, started_a
              and prose(exceeded_reason) else None,
              "perspective": plan["perspective"], "questions": [],
              "coverage": {"internal": "unavailable", "external": "unavailable", "gaps": []},
-             "candidates": [], "outcome": None, "preempted_by": None, "recover_by": None}
+             "candidates": [], "outcome": None, "preempted_by": None, "recover_by": None,
+             "corpus_build_seconds": corpus_build_seconds if _count(corpus_build_seconds) else None}
     value = None
     if failed is None:
         try:
@@ -1177,7 +1315,8 @@ def _row(c, status, reasons):
             "opportunity_id": opportunity_id(key) if ok else None, "status": status, "reasons": reasons}
 
 
-def settle(draft, *, now, corpus=None, corpus_gaps=None, docket=None, docket_problem=None, policy=None):
+def settle(draft, *, now, corpus=None, corpus_gaps=None, docket=None, docket_problem=None, policy=None,
+           ledger=None):
     """Turn a draft into (receipt, proposals) deterministically.
 
     Order: shape/challenge validation -> suppression -> novelty -> saved proof ->
@@ -1186,7 +1325,8 @@ def settle(draft, *, now, corpus=None, corpus_gaps=None, docket=None, docket_pro
     re-presented unseen. A candidate without ``proof_body`` is held, never presented.
     ``corpus=None`` (no corpus built) and any ``corpus_gaps`` lower internal coverage.
     A presented proposal's proof ref is the opportunity id: the host saves the proof
-    at ``proofs/<opportunity_id>.md``.
+    at ``proofs/<opportunity_id>.md``. ``ledger`` ({work_revision: [evidence tokens]})
+    holds the full identity sets of earlier proposals for suppression.
     """
     policy = merged(policy)
     now = instant(now)
@@ -1214,9 +1354,9 @@ def settle(draft, *, now, corpus=None, corpus_gaps=None, docket=None, docket_pro
         if docket_problem:
             rows.append(_row(c, "held", ["suppression_unverifiable"]))
             continue
-        verdict = suppression(c, docket or [], now)
+        verdict = suppression(c, docket or [], now, ledger)
         if verdict["status"] == "suppressed":
-            rows.append(_row(c, "suppressed", ["same_evidence_as_resolved_opportunity"]))
+            rows.append(_row(c, "suppressed", [verdict["reason"]]))
             continue
         if verdict["status"] == "snoozed":
             rows.append(_row(c, "held", ["snoozed_until:" + verdict["until"]]))
@@ -1248,6 +1388,7 @@ def settle(draft, *, now, corpus=None, corpus_gaps=None, docket=None, docket_pro
     receipt = {k: draft.get(k) for k in RECEIPT_KEYS - {"schema", "candidates", "coverage", "outcome",
                                                          "allocation_exceeded"}}
     receipt["gap_dates"] = receipt["gap_dates"] or []
+    receipt["refusal_reasons"] = []
     coverage = dict(draft["coverage"], gaps=gaps)
     if (docket is None or docket_problem or corpus_short) and coverage["internal"] == "complete":
         coverage["internal"] = "partial"  # suppression or novelty was not checked against everything
@@ -1273,7 +1414,84 @@ def preemption_receipt(plan, now):
             "questions": [], "coverage": {"internal": "unavailable", "external": "unavailable",
                                           "gaps": ["preempted_by_incident"]},
             "candidates": [], "outcome": "preempted", "preempted_by": plan["preempted_by"],
-            "recover_by": plan["recover_by"]}
+            "recover_by": plan["recover_by"], "corpus_build_seconds": None, "refusal_reasons": []}
+
+
+def refusal_receipt(value, reason, *, now, policy=None):
+    """The ``failed`` receipt written when finalize refuses a draft or receipt.
+
+    A refusal is never silent: the day is still recorded, so ``plan_pass`` treats it
+    as ran-and-failed (``already_ran_today``, then listed in the next pass's
+    ``gap_dates``) rather than missed. It keeps what can be salvaged from ``value``
+    (allocation, used, perspective, questions, coverage), records the refusal in
+    ``refusal_reasons`` and the coverage gaps, and marks every candidate ``held``:
+    nothing refused is ever presented. When ``used`` exceeds the allocation with no
+    stated reason, the excess is recorded as unexplained rather than refused again.
+    """
+    policy = merged(policy)
+    now = instant(now)
+    v = value if isinstance(value, dict) else {}
+    reason = clip(str(reason) or "unknown_refusal", 300)
+    try:
+        day = as_date(v.get("date"))
+    except ValueError:
+        day = local_date(now, policy)
+    gaps = []
+    for raw in v.get("gap_dates") if isinstance(v.get("gap_dates"), list) else []:
+        try:
+            gap = as_date(raw)
+        except ValueError:
+            continue
+        if gap < day and gap.isoformat() not in gaps:
+            gaps.append(gap.isoformat())
+
+    def moment(key, default):
+        try:
+            return instant(v.get(key))
+        except ValueError:
+            return default
+    finished = moment("finished_at", now)
+    started = min(moment("started_at", finished), finished)
+    alloc = v.get("allocation") if isinstance(v.get("allocation"), dict) else {}
+    raw_used = v.get("used") if isinstance(v.get("used"), dict) else {}
+    used = {k: raw_used.get(k) if _count(raw_used.get(k)) else 0
+            for k in ("wall_seconds", "model_launches", "source_opens")}
+    exceeded = [u for u, a, unit in ALLOCATION_LIMITS
+                if type(alloc.get(a)) in (int, float) and used[u] > alloc[a] * unit]
+    stated = v.get("allocation_exceeded_reason")
+    if isinstance(stated, str) and prose(stated):
+        stated = clip(stated, 500)
+    elif exceeded:
+        stated = "not stated: the allocation was exceeded (%s) and finalize refused the receipt" % ",".join(exceeded)
+    else:
+        stated = None
+    cov = v.get("coverage") if isinstance(v.get("coverage"), dict) else {}
+    cov_gaps = [clip(g, 300) for g in cov.get("gaps") or [] if isinstance(g, str) and prose(g)][:10] \
+        if isinstance(cov.get("gaps"), list) else []
+    rows = []
+    for c in v.get("candidates") if isinstance(v.get("candidates"), list) else []:
+        key = c.get("dedupe_key") if isinstance(c, dict) else None
+        if isinstance(key, str) and len(key) <= 80 and SLUG.fullmatch(key):
+            rows.append({"dedupe_key": key, "opportunity_id": opportunity_id(key), "status": "held",
+                         "reasons": ["receipt_refused"]})
+        else:
+            rows.append({"dedupe_key": None, "opportunity_id": None, "status": "held",
+                         "reasons": ["receipt_refused"]})
+    questions = v.get("questions") if isinstance(v.get("questions"), list) else []
+    receipt = {
+        "schema": SCHEMA, "date": day.isoformat(), "mode": "scheduled_after_gap" if gaps else "scheduled",
+        "covers_date": day.isoformat(), "gap_dates": sorted(gaps), "started_at": stamp(started),
+        "finished_at": stamp(finished), "allocation": alloc, "used": used, "allocation_exceeded_reason": stated,
+        "perspective": v.get("perspective") if v.get("perspective") in PERSPECTIVES else None,
+        "questions": [clip(q, 500) for q in questions if isinstance(q, str) and prose(q)][:5],
+        "coverage": {"internal": cov.get("internal") if cov.get("internal") in COVERAGE else "unavailable",
+                     "external": cov.get("external") if cov.get("external") in COVERAGE else "unavailable",
+                     "gaps": cov_gaps + ["receipt_refused: " + reason]},
+        "candidates": rows, "outcome": "failed", "preempted_by": None, "recover_by": None,
+        "corpus_build_seconds": v.get("corpus_build_seconds") if _count(v.get("corpus_build_seconds")) else None,
+        "refusal_reasons": [reason],
+    }
+    return finalize_receipt(receipt, policy)
 
 
 # --------------------------------------------------------------------------- #
@@ -1302,17 +1520,82 @@ def load_corpus_file(path):
     return value, [g for g in gaps if isinstance(g, str)]
 
 
-def proof_bodies(draft, receipt):
-    """{opportunity_id: proof_body} for the presented candidates (rows follow candidate order)."""
+def presented_candidates(draft, receipt):
+    """{opportunity_id: candidate} for the presented candidates (rows follow candidate order)."""
     out = {}
     for c, row in zip(draft.get("candidates") or [], receipt["candidates"]):
         if row["status"] == "presented_to_outbox":
-            out[row["opportunity_id"]] = c["proof_body"]
+            out[row["opportunity_id"]] = c
     return out
+
+
+def proof_bodies(draft, receipt):
+    """{opportunity_id: proof_body} for the presented candidates."""
+    return {oid: c["proof_body"] for oid, c in presented_candidates(draft, receipt).items()}
 
 
 def emit(value):
     print(json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False))
+
+
+def finalize_command(a, now):
+    """Settle a draft (or check a receipt) and, with ``--dir``, write it.
+
+    With ``--dir`` a refusal is never silent: a ``failed`` receipt recording the
+    refusal is written instead (no proof, outbox or ledger file) and the exit code
+    is 5. Without ``--dir`` it only validates, and a refusal exits 1.
+    """
+    proposals, presented, refused, value = [], {}, None, None
+    try:
+        value = read_json_file(a.receipt)
+        if isinstance(value, dict) and value.get("schema") == DRAFT_SCHEMA:
+            docket, problem = None, None
+            if a.docket:
+                try:
+                    docket = docket_events(read_json_file(a.docket))
+                except FileNotFoundError:
+                    problem = "missing"
+                except (OSError, ValueError):
+                    problem = "unreadable"
+            corpus, corpus_gaps = None, []
+            if a.corpus:
+                try:
+                    corpus, corpus_gaps = load_corpus_file(a.corpus)
+                except FileNotFoundError:
+                    corpus, corpus_gaps = [], ["corpus_file_missing"]
+                except (OSError, ValueError):
+                    corpus, corpus_gaps = [], ["corpus_file_unreadable"]
+            elif a.dir:
+                corpus, corpus_gaps = [], ["corpus_not_built: only earlier outbox files checked"]
+            if corpus is not None and a.dir:
+                pool = [e for e in corpus if isinstance(e, dict)] + outbox_corpus(a.dir)
+                corpus = list({(e.get("id"), e.get("text")): e for e in pool}.values())
+            receipt, proposals = settle(value, now=now, corpus=corpus, corpus_gaps=corpus_gaps, docket=docket,
+                                        docket_problem=problem, ledger=load_ledger(a.dir) if a.dir else None)
+            presented = presented_candidates(value, receipt)
+        else:
+            receipt = finalize_receipt(value)
+    except (OSError, ValueError) as exc:
+        if not a.dir:
+            raise ValueError(str(exc)) from None
+        refused = (str(exc) if isinstance(exc, ValueError) else type(exc).__name__)[:200] or "unreadable_input"
+        receipt, proposals, presented = refusal_receipt(value, refused, now=now), [], {}
+    result = {"outcome": receipt["outcome"], "candidates": receipt["candidates"], "outbox": [], "proofs": []}
+    if refused:
+        result["refused"] = refused
+    if a.dir:
+        if (Path(a.dir) / (receipt["date"] + ".json")).exists():
+            raise ValueError("receipt_exists")  # the day is already recorded; before any outbox write
+        for proposal in proposals:
+            oid = proposal["source"]["work_item_id"]
+            c = presented[oid]
+            # The proof lands first, so an outbox file never names a missing proof.
+            result["proofs"].append(str(write_proof(a.dir, oid, c["proof_body"])))
+            write_ledger(a.dir, oid, proposal["source"]["work_revision"], evidence_tokens(c))
+            result["outbox"].append(str(write_outbox(a.dir, proposal)))
+        result["receipt_path"] = str(write_receipt(a.dir, receipt))
+    emit(result)
+    return 5 if refused else 0
 
 
 def main(argv=None):
@@ -1347,7 +1630,10 @@ def main(argv=None):
     draft.add_argument("--model-launches", type=int, required=True)
     draft.add_argument("--failed", help="record the pass as failed with this reason")
     draft.add_argument("--allocation-exceeded-reason", help="host's reason for running over the allocation")
-    fin = sub.add_parser("finalize", help="settle a draft (or check a receipt) and write it")
+    draft.add_argument("--corpus-build-seconds", type=float,
+                       help="time spent building the corpus (recorded, never counted as pass wall time)")
+    fin = sub.add_parser("finalize", help="settle a draft (or check a receipt) and write it; with --dir a "
+                                          "refusal still writes a failed receipt and exits 5")
     fin.add_argument("--receipt", required=True)
     fin.add_argument("--dir", help="receipt directory; omit to validate only")
     fin.add_argument("--corpus", help="corpus JSON (build_corpus output); omitted = recorded as a gap")
@@ -1434,51 +1720,11 @@ def main(argv=None):
                     failed = "generator_output_missing"
             emit(assemble_draft(plan_value, output, challenges, generator=a.generator, challenger=a.challenger,
                                 started_at=a.started_at, now=now, model_launches=a.model_launches, failed=failed,
-                                exceeded_reason=a.allocation_exceeded_reason))
+                                exceeded_reason=a.allocation_exceeded_reason,
+                                corpus_build_seconds=a.corpus_build_seconds))
             return 0
         if a.command == "finalize":
-            value = read_json_file(a.receipt)
-            proposals, proofs = [], {}
-            if isinstance(value, dict) and value.get("schema") == DRAFT_SCHEMA:
-                docket, problem = None, None
-                if a.docket:
-                    try:
-                        docket = docket_events(read_json_file(a.docket))
-                    except FileNotFoundError:
-                        problem = "missing"
-                    except (OSError, ValueError):
-                        problem = "unreadable"
-                corpus, corpus_gaps = None, []
-                if a.corpus:
-                    try:
-                        corpus, corpus_gaps = load_corpus_file(a.corpus)
-                    except FileNotFoundError:
-                        corpus, corpus_gaps = [], ["corpus_file_missing"]
-                    except (OSError, ValueError):
-                        corpus, corpus_gaps = [], ["corpus_file_unreadable"]
-                elif a.dir:
-                    corpus, corpus_gaps = [], ["corpus_not_built: only earlier outbox files checked"]
-                if corpus is not None and a.dir:
-                    pool = [e for e in corpus if isinstance(e, dict)] + outbox_corpus(a.dir)
-                    corpus = list({(e.get("id"), e.get("text")): e for e in pool}.values())
-                receipt, proposals = settle(value, now=now, corpus=corpus, corpus_gaps=corpus_gaps,
-                                            docket=docket, docket_problem=problem)
-                proofs = proof_bodies(value, receipt)
-            else:
-                receipt = finalize_receipt(value)
-            result = {"outcome": receipt["outcome"], "candidates": receipt["candidates"], "outbox": [],
-                      "proofs": []}
-            if a.dir:
-                if (Path(a.dir) / (receipt["date"] + ".json")).exists():
-                    raise ValueError("receipt_exists")  # before any outbox write
-                for proposal in proposals:
-                    oid = proposal["source"]["work_item_id"]
-                    # The proof lands first, so an outbox file never names a missing proof.
-                    result["proofs"].append(str(write_proof(a.dir, oid, proofs[oid])))
-                    result["outbox"].append(str(write_outbox(a.dir, proposal)))
-                result["receipt_path"] = str(write_receipt(a.dir, receipt))
-            emit(result)
-            return 0
+            return finalize_command(a, now)
     except ValueError as exc:
         emit({"schema": SCHEMA, "refused": str(exc)[:200]})
         return 1

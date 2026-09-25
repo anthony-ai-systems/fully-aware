@@ -479,8 +479,12 @@ def automation_driver(snapshot, automation_id):
         presence = "scheduler_row" if in_db else "present_in_config_only" if in_config else "absent"
     if presence == "present_in_config_only":
         status = "present_in_config_only"
+    elif in_db is not None:
+        # The scheduler row is the only authority on a driver's status. A NULL or
+        # missing status there is unknown; automation.toml never fills the gap.
+        status = in_db.get("status") or "unknown_status"
     else:
-        status = (in_db or {}).get("status") or (in_config or {}).get("status") or ("ABSENT" if present is False else None)
+        status = (in_config or {}).get("status") or ("ABSENT" if present is False else None)
     return {"present": present, "presence": presence, "status": status,
             "last_run_at": (in_db or {}).get("last_run_at"),
             "next_run_at": (in_db or {}).get("next_run_at"), "evidence": evidence}
@@ -655,6 +659,8 @@ def assess(snapshot, now, policy=None):
         state, reason = "stopped", "no_iris_sweep_driver_and_no_recent_success"
     elif not iris["present"]:
         state, reason = "degraded", "no_iris_sweep_driver_but_recent_success"
+    elif iris["status"] == "unknown_status":
+        state, reason = "degraded", "driver_status_unknown"
     elif iris["status"] != "ACTIVE":
         state, reason = "degraded", "driver_not_active"
     elif not recent:
@@ -708,6 +714,7 @@ PLAIN = {
     "no_iris_sweep_driver_and_no_recent_success": "no IRIS sweep driver exists and no sweep succeeded recently",
     "no_iris_sweep_driver_but_recent_success": "no IRIS sweep driver exists, though a sweep succeeded recently",
     "driver_not_active": "the IRIS sweep driver exists but is not active",
+    "driver_status_unknown": "the IRIS sweep driver's scheduler row has no status",
     "last_success_stale": "the IRIS sweep driver exists but its last success is stale",
     "missed_attempts": "the IRIS sweep driver missed its latest attempt",
     "scheduler_row_missing": "an IRIS sweep automation file exists but the scheduler store has no row for it",

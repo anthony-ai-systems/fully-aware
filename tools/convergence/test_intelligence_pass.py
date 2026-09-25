@@ -9,6 +9,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -229,6 +230,17 @@ class AllocationTest(unittest.TestCase):
         self.assertEqual(plan["gap_dates"], ["2026-09-23", "2026-09-24"])
         self.assertEqual(ip.plan_pass([], NOW, backlog_count=0)["mode"], "scheduled")  # first pass ever
 
+    def test_gap_lookback_days_and_its_former_name(self):
+        history = [receipt("2026-09-15", outcome="coverage_gap")]
+        default = ip.plan_pass(history, NOW, backlog_count=0)
+        self.assertEqual(len(default["gap_dates"]), 7)
+        for policy in ({"gap_lookback_days": 2}, {"recovery_lookback_days": 2},
+                       {"gap_lookback_days": 2, "recovery_lookback_days": 5}):
+            plan = ip.plan_pass(history, NOW, backlog_count=0, policy=policy)
+            self.assertEqual(plan["gap_dates"], ["2026-09-23", "2026-09-24"], policy)
+        self.assertNotIn("recovery_lookback_days", ip.merged({"recovery_lookback_days": 3}))
+        self.assertEqual(ip.merged({"recovery_lookback_days": 3})["gap_lookback_days"], 3)
+
     def test_window_bounds(self):
         early = dt.datetime(2026, 9, 25, 12, tzinfo=UTC)  # 05:00 PDT
         late = dt.datetime(2026, 9, 25, 19, tzinfo=UTC)   # 12:00 PDT
@@ -316,6 +328,35 @@ class CandidateTest(unittest.TestCase):
                           + [{"ref": "board:item-999", "observed_at": "2026-09-25T01:00:00Z"}])
         self.assertNotEqual(ip.evidence_revision(added), ip.evidence_revision(candidate()))
 
+    def test_identity_normalisation(self):
+        same = [
+            (ip.internal_identity, "board:8c7450d0,", "board:8c7450d0"),
+            (ip.internal_identity, "board:8c7450d0.", "board:8c7450d0"),
+            (ip.internal_identity, "board:8c7450d0; next", "board:8c7450d0"),
+            (ip.internal_identity, "board:8c7450d0: overdue", "board:8c7450d0"),
+            (ip.internal_identity, "state/daily-scan/", "state/daily-scan"),
+            (ip.internal_identity, "state/daily-scan/, see brief", "state/daily-scan"),
+            (ip.internal_identity, "https://Example.org/Path/?a=1#frag, ok", "https://example.org/path"),
+            (ip.external_identity, ext("x", "https://example.org/a/"), "https://example.org/a"),
+            (ip.external_identity, ext("x", "https://example.org/a?utm_source=feed"), "https://example.org/a"),
+            (ip.external_identity, ext("x", "https://example.org/a#section-2"), "https://example.org/a"),
+            (ip.external_identity, ext("x", "https://example.org/a/?q=1#f"), "https://example.org/a"),
+            (ip.external_identity, ext("https://example.org/a/?ref=rss"), "https://example.org/a"),
+            (ip.external_identity, ext("Some Publisher Weekly."), "some publisher weekly"),
+            (ip.external_identity, ext("Some Publisher Weekly;"), "some publisher weekly"),
+        ]
+        for fn, raw, expected in same:
+            self.assertEqual(fn(raw), expected, raw)
+        self.assertIsNone(ip.internal_identity(",.;"))
+        self.assertNotEqual(ip.external_identity(ext("x", "https://example.org/a/b")),
+                            ip.external_identity(ext("x", "https://example.org/a")))
+        base = candidate(internal_evidence=[ev("board:item-142"), ev("state/notes/")],
+                         external_evidence=[ext("x", "https://example.org/study")])
+        variant = candidate(internal_evidence=[ev("board:item-142, the item"), ev("state/notes; section 2")],
+                            external_evidence=[ext("x", "https://example.org/study/?utm_campaign=a#results")])
+        self.assertEqual(ip.evidence_revision(variant), ip.evidence_revision(base))
+        self.assertEqual(ip.evidence_tokens(variant), ip.evidence_tokens(base))
+
     def test_evidence_identities(self):
         c = candidate(internal_evidence=[{"ref": "Board:8C7450D0 the finder item, next action overdue",
                                           "observed_at": "2026-09-24T18:00:00Z"},
@@ -335,15 +376,44 @@ class CandidateTest(unittest.TestCase):
         self.assertIn("invalid_external_evidence", ip.validate_candidate(bad_url))
 
 
+PROPOSED_AT = dt.datetime(2026, 9, 20, 17, tzinfo=UTC)
+
+
+def proposal_for(c):
+    """The real propose input this module would have handed the docket for ``c``."""
+    return ip.to_docket_propose(c, now=PROPOSED_AT, event_id="e-" + ip.evidence_revision(c)[:8],
+                                verified_at=PROPOSED_AT - dt.timedelta(minutes=1))
+
+
+def resolved_docket(*cs, disposition="declined", refs=None):
+    """Each candidate proposed (its real packet) and then resolved, in order."""
+    key = "initiative-" + "0" * 32
+    events = []
+    for c in cs:
+        proposal = proposal_for(c)
+        if refs is not None:
+            proposal["packet"]["evidence_refs"] = refs
+        events.append(docket_event(len(events) + 1, "propose", proposal))
+        events.append(docket_event(len(events) + 1, "respond", {
+            "event_id": "r%d" % len(events), "action_key": key, "proposal_revision": "0" * 64, "response_ref": {},
+            "disposition": disposition, "option_id": None, "source": proposal["source"]}))
+    return {"schema": "iris-initiative-docket/v1", "generation": len(events), "events": events}
+
+
+def ev(ref):
+    return {"ref": ref, "observed_at": "2026-09-24T18:00:00Z"}
+
+
+def ext(source, url=None):
+    item = {"source": source, "published_or_accessed": "2026-08-01", "claim": "c", "status": "verified"}
+    if url:
+        item["url"] = url
+    return item
+
+
 class SuppressionTest(unittest.TestCase):
     def events(self, c, disposition="declined"):
-        key = "initiative-" + "0" * 32
-        return {"schema": "iris-initiative-docket/v1", "generation": 2, "events": [
-            docket_event(1, "propose", {"event_id": "e1", "action_class": "opportunity_proposal",
-                                        "source": source_for(c), "packet": {}, "next_check_at": "x", "origin": {}}),
-            docket_event(2, "respond", {"event_id": "e2", "action_key": key, "proposal_revision": "0" * 64,
-                                        "response_ref": {}, "disposition": disposition, "option_id": None,
-                                        "source": source_for(c)})]}
+        return resolved_docket(c, disposition=disposition)
 
     def test_same_evidence_decline_suppressed_changed_evidence_eligible(self):
         c = candidate()
@@ -384,6 +454,79 @@ class SuppressionTest(unittest.TestCase):
                                  + [{"ref": "board:item-777 a new related item", "observed_at": "2026-09-25T09:00:00Z"}])
         self.assertEqual(ip.suppression(new_identity, docket, NOW)["status"], "eligible_changed_evidence")
         self.assertEqual(ip.suppression(candidate(dedupe_key="other-idea"), docket, NOW)["status"], "eligible")
+
+    def test_only_a_new_identity_resurfaces_a_declined_opportunity(self):
+        c = candidate()
+        for disposition in ("declined", "answered"):
+            docket = self.events(c, disposition)
+            removed = candidate(internal_evidence=c["internal_evidence"][:1])
+            verdict = ip.suppression(removed, docket, NOW)
+            self.assertEqual((verdict["status"], verdict["reason"]), ("suppressed", "no_new_evidence_identity"))
+            reordered = candidate(internal_evidence=list(reversed(c["internal_evidence"])),
+                                  external_evidence=list(reversed(c["external_evidence"])))
+            self.assertEqual(ip.suppression(reordered, docket, NOW)["reason"], "same_evidence_as_resolved_opportunity")
+            swapped = dict(candidate(external_gap="No external source could be opened today."))
+            del swapped["external_evidence"]
+            self.assertEqual(ip.validate_candidate(swapped), [])
+            verdict = ip.suppression(swapped, docket, NOW)
+            self.assertEqual((verdict["status"], verdict["reason"]), ("suppressed", "no_new_evidence_identity"))
+            # Removing some identities while re-spelling the rest still adds nothing new.
+            respelled = candidate(internal_evidence=[ev("BOARD:item-142, the review item")],
+                                  external_evidence=[ext("https://Example.org/batching-study/?utm=x#top")])
+            self.assertEqual(ip.suppression(respelled, docket, NOW)["reason"], "no_new_evidence_identity")
+            added = candidate(internal_evidence=c["internal_evidence"][:1] + [ev("board:item-900 new")])
+            verdict = ip.suppression(added, docket, NOW)
+            self.assertEqual((verdict["status"], verdict["new_identities"]),
+                             ("eligible_changed_evidence", ["board:item-900"]))
+
+    def test_followed_through_opportunity_needs_a_new_identity_too(self):
+        c = candidate()
+        proposal = proposal_for(c)
+        docket = {"events": [docket_event(1, "propose", proposal),
+                             docket_event(2, "follow-through", {"event_id": "f", "outcome": "recorded",
+                                                                "source": proposal["source"]})]}
+        fewer = candidate(internal_evidence=c["internal_evidence"][:1])
+        self.assertEqual(ip.suppression(fewer, docket, NOW)["status"], "suppressed")
+        more = candidate(external_evidence=c["external_evidence"] + [ext("New Journal")])
+        self.assertEqual(ip.suppression(more, docket, NOW)["status"], "eligible_changed_evidence")
+
+    def test_identity_must_be_new_against_every_resolved_proposal(self):
+        first = candidate(internal_evidence=[ev("board:a"), ev("board:b")], external_evidence=[ext("Source One")])
+        second = candidate(internal_evidence=[ev("board:c"), ev("board:d")], external_evidence=[ext("Source Two")])
+        docket = resolved_docket(first, second)
+        mixed = candidate(internal_evidence=[ev("board:a"), ev("board:c")], external_evidence=[ext("Source Two")])
+        self.assertEqual(ip.suppression(mixed, docket, NOW)["reason"], "no_new_evidence_identity")
+        fresh = candidate(internal_evidence=[ev("board:a"), ev("board:e")], external_evidence=[ext("Source Two")])
+        self.assertEqual(ip.suppression(fresh, docket, NOW)["new_identities"], ["board:e"])
+
+    def test_unknown_or_truncated_prior_identities_stay_suppressed_unless_the_ledger_knows(self):
+        c = candidate()
+        grown = candidate(internal_evidence=c["internal_evidence"] + [ev("board:item-900")])
+        # A resolved proposal whose packet carries no evidence refs: nothing can be shown to be new.
+        unknown = resolved_docket(c, refs=[])
+        unknown["events"][0]["input"]["packet"].pop("evidence_refs")
+        verdict = ip.suppression(grown, unknown, NOW)
+        self.assertEqual((verdict["status"], verdict["reason"]), ("suppressed", "prior_evidence_identities_unknown"))
+        ledger = {ip.evidence_revision(c): ip.evidence_tokens(c)}
+        self.assertEqual(ip.suppression(grown, unknown, NOW, ledger)["status"], "eligible_changed_evidence")
+        # A packet holds at most five refs, so five visible refs may hide a sixth identity.
+        six = candidate(internal_evidence=[ev("board:i%d" % i) for i in range(5)], external_evidence=[ext("Six")])
+        self.assertEqual(len(proposal_for(six)["packet"]["evidence_refs"]), 5)
+        docket = resolved_docket(six)
+        same_six = candidate(internal_evidence=[ev("board:i%d" % i) for i in range(1, 5)],
+                             external_evidence=[ext("six.")])
+        self.assertEqual(ip.suppression(same_six, docket, NOW)["reason"], "prior_evidence_identities_unknown")
+        ledger = {ip.evidence_revision(six): ip.evidence_tokens(six)}
+        self.assertEqual(ip.suppression(same_six, docket, NOW, ledger)["reason"], "no_new_evidence_identity")
+        seventh = candidate(internal_evidence=[ev("board:i0"), ev("board:i9")], external_evidence=[ext("Six")])
+        self.assertEqual(ip.suppression(seventh, docket, NOW, ledger)["status"], "eligible_changed_evidence")
+
+    def test_settle_reports_the_suppression_reason(self):
+        c = candidate()
+        fewer = candidate(internal_evidence=c["internal_evidence"][:1])
+        settled, proposals = ReceiptTest.settle_one(self, fewer, corpus=[], docket=self.events(c))
+        self.assertEqual((settled["candidates"][0]["status"], settled["candidates"][0]["reasons"], proposals),
+                         ("suppressed", ["no_new_evidence_identity"], []))
 
     def test_future_snooze_holds(self):
         c = candidate()
@@ -550,6 +693,105 @@ class ReceiptTest(unittest.TestCase):
         settled, _ = ip.settle(host, now=NOW)
         self.assertEqual((settled["outcome"], settled["allocation_exceeded"]), ("failed", True))
 
+    def run_cli(self, *args):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = ip.main(list(args) + ["--now", iso(NOW)])
+        return rc, out.getvalue()
+
+    def over_budget_draft(self, tmp):
+        plan = ip.plan_pass([], NOW, backlog_count=0)
+        draft = ip.assemble_draft(plan, {"questions": ["a"], "used": {"source_opens": 2},
+                                         "coverage": {"internal": "complete", "external": "complete", "gaps": []},
+                                         "candidates": [candidate(), {"dedupe_key": "Not A Slug"}]},
+                                  {0: {"verdict": "survives", "notes": ""}}, generator="gpt-5.6-sol",
+                                  challenger="claude-fable-5-1", started_at=NOW - dt.timedelta(minutes=40), now=NOW,
+                                  model_launches=2, corpus_build_seconds=7)
+        self.assertIsNone(draft["allocation_exceeded_reason"])
+        path = Path(tmp) / "draft.json"
+        path.write_text(json.dumps(draft))
+        return plan, path
+
+    def test_refused_finalize_still_writes_a_failed_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            intel = Path(tmp) / "intelligence"
+            plan, draft = self.over_budget_draft(tmp)
+            # Validate-only: the refusal is reported and nothing is written.
+            rc, text = self.run_cli("finalize", "--receipt", str(draft))
+            self.assertEqual((rc, json.loads(text)["refused"]), (1, "allocation_exceeded_without_reason:wall_seconds"))
+            rc, text = self.run_cli("finalize", "--receipt", str(draft), "--dir", str(intel), "--corpus", "")
+            self.assertEqual(rc, 5, text)
+            result = json.loads(text)
+            self.assertEqual((result["outcome"], result["outbox"], result["proofs"]), ("failed", [], []))
+            self.assertEqual(result["refused"], "allocation_exceeded_without_reason:wall_seconds")
+            value = json.loads(Path(result["receipt_path"]).read_text())
+            self.assertEqual((value["date"], value["outcome"], value["perspective"]),
+                             ("2026-09-25", "failed", plan["perspective"]))
+            self.assertEqual(value["refusal_reasons"], ["allocation_exceeded_without_reason:wall_seconds"])
+            self.assertIn("receipt_refused: allocation_exceeded_without_reason:wall_seconds", value["coverage"]["gaps"])
+            self.assertEqual(value["allocation"], plan["reserved"])
+            self.assertEqual(value["used"], {"wall_seconds": 2400, "model_launches": 2, "source_opens": 2})
+            self.assertTrue(value["allocation_exceeded"])
+            self.assertTrue(value["allocation_exceeded_reason"].startswith("not stated"))
+            self.assertEqual(value["corpus_build_seconds"], 7)
+            self.assertEqual([(r["dedupe_key"], r["status"], r["reasons"]) for r in value["candidates"]],
+                             [("batch-review-exports", "held", ["receipt_refused"]),
+                              (None, "held", ["receipt_refused"])])
+            self.assertEqual(sorted(p.name for p in intel.iterdir()), ["2026-09-25.json"])  # no outbox, proof, ledger
+            # Recorded as ran-and-failed: no second pass today, and not a missed day.
+            history, _ = ip.load_history(intel)
+            self.assertEqual(ip.plan_pass(history, NOW + dt.timedelta(hours=1), backlog_count=0)["reason"],
+                             "already_ran_today")
+            self.assertEqual(ip.missed_days(history, NOW + dt.timedelta(days=1), "2026-09-25"), [])
+            rc, text = self.run_cli("plan", "--dir", str(intel))
+            self.assertEqual((rc, json.loads(text)["reason"]), (4, "already_ran_today"))
+            # A second refusal the same day does not overwrite the recorded one.
+            rc, text = self.run_cli("finalize", "--receipt", str(draft), "--dir", str(intel))
+            self.assertEqual((rc, json.loads(text)["refused"]), (1, "receipt_exists"))
+
+    def test_unreadable_draft_still_records_the_day(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            intel = Path(tmp) / "intelligence"
+            bad = Path(tmp) / "draft.json"
+            bad.write_text('{"schema": "fa-intelligence-pass/v1", "refused": "draft blew up"}')
+            rc, text = self.run_cli("finalize", "--receipt", str(bad), "--dir", str(intel))
+            self.assertEqual(rc, 5, text)
+            value = json.loads((intel / "2026-09-25.json").read_text())
+            self.assertEqual((value["outcome"], value["mode"], value["perspective"], value["candidates"]),
+                             ("failed", "scheduled", None, []))
+            self.assertEqual(value["refusal_reasons"], ["invalid_receipt_fields"])
+            rc, text = self.run_cli("finalize", "--receipt", str(Path(tmp) / "missing.json"),
+                                    "--dir", str(Path(tmp) / "other"))
+            self.assertEqual((rc, json.loads(text)["refused"]), (5, "FileNotFoundError"))
+
+    def test_refusal_receipt_keeps_gap_dates_and_is_itself_valid(self):
+        draft = {"schema": ip.DRAFT_SCHEMA, "date": "2026-09-25", "mode": "scheduled_after_gap",
+                 "gap_dates": ["2026-09-23", "2026-09-26", "junk"], "perspective": "nonsense",
+                 "used": {"wall_seconds": float("inf"), "model_launches": True, "source_opens": 3},
+                 "allocation": ip.budget(ip.POLICY), "candidates": "not a list"}
+        value = ip.refusal_receipt(draft, "boom", now=NOW)
+        self.assertEqual((value["mode"], value["gap_dates"], value["perspective"]),
+                         ("scheduled_after_gap", ["2026-09-23"], None))
+        self.assertEqual(value["used"], {"wall_seconds": 0, "model_launches": 0, "source_opens": 3})
+        self.assertEqual((value["allocation_exceeded"], value["allocation_exceeded_reason"]), (False, None))
+        with self.assertRaisesRegex(ValueError, "refusal_reasons_require_failed_outcome"):
+            ip.finalize_receipt(receipt("2026-09-25", refusal_reasons=["x"]))
+
+    def test_corpus_build_time_is_recorded_and_not_counted(self):
+        plan = ip.plan_pass([], NOW, backlog_count=0)
+        output = {"questions": ["a"], "used": {"source_opens": 1},
+                  "coverage": {"internal": "complete", "external": "complete", "gaps": []}}
+        # The corpus took 30 minutes; the pass itself (timed from after the build) took 10.
+        draft = ip.assemble_draft(plan, output, {}, generator="g", challenger="c", started_at=NOW,
+                                  now=NOW + dt.timedelta(minutes=10), model_launches=1, corpus_build_seconds=1800)
+        settled, _ = ip.settle(draft, now=NOW, corpus=[], docket={"events": []})
+        self.assertEqual((settled["used"]["wall_seconds"], settled["corpus_build_seconds"]), (600, 1800))
+        self.assertFalse(settled["allocation_exceeded"])
+        self.assertIsNone(ip.finalize_receipt(receipt("2026-09-25"))["corpus_build_seconds"])
+        for bad in (-1, "10", True, float("nan")):
+            with self.assertRaisesRegex(ValueError, "invalid_corpus_build_seconds"):
+                ip.finalize_receipt(receipt("2026-09-25", corpus_build_seconds=bad))
+
     def test_cli_round_trip_feeds_initiative_health(self):
         import initiative_health as health
         with tempfile.TemporaryDirectory() as tmp:
@@ -592,6 +834,9 @@ class ReceiptTest(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(proof.stat().st_mode), 0o600)
             self.assertEqual(proposal["source"]["reference"]["id"], oid)
             self.assertEqual(proposal["packet"]["question"], candidate()["decision_question"])
+            ledger = ip.load_ledger(intel)
+            self.assertEqual(ledger, {proposal["source"]["work_revision"]: ip.evidence_tokens(candidate())})
+            self.assertEqual(stat.S_IMODE((intel / "evidence" / (oid + ".json")).stat().st_mode), 0o600)
             rc, text = run("finalize", "--receipt", str(tmp / "draft.json"), "--dir", str(intel))
             self.assertEqual((rc, json.loads(text)["refused"]), (1, "receipt_exists"))
             seen = health.latest_dated_file(intel, "*.json")
@@ -766,6 +1011,47 @@ class StageFourStubTest(unittest.TestCase):
         calls = (Path(self.tmp) / "calls").read_text() if (Path(self.tmp) / "calls").exists() else ""
         self.assertNotIn("codex", calls)
         self.assertNotIn("claude", calls)
+        again = self.run_scan(DAILY_SCAN_INTELLIGENCE="1")
+        self.assertIn("stage4 SKIPPED -- plan: already_ran_today", again.stdout)
+
+    def python_wrapper(self, body):
+        """A FULLY_AWARE_PYTHON that runs ``body`` (sh) before exec'ing the real python."""
+        path = Path(self.tmp) / "python-wrapper"
+        path.write_text('#!/bin/sh\nREAL="%s"\n%s\nexec "$REAL" "$@"\n' % (sys.executable, body))
+        path.chmod(0o755)
+        return str(path)
+
+    def test_corpus_build_time_is_not_counted_as_pass_wall_time(self):
+        wrapper = self.python_wrapper('[ "$2" = "corpus" ] && sleep 3')
+        proc = self.run_scan(DAILY_SCAN_INTELLIGENCE="1", FULLY_AWARE_PYTHON=wrapper)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("stage4 OK", proc.stdout)
+        value = json.loads(next((Path(self.tmp) / "repo" / "state" / "intelligence-stub").glob("*.json")).read_text())
+        self.assertGreaterEqual(value["corpus_build_seconds"], 3)
+        self.assertLess(value["used"]["wall_seconds"], 3)
+
+    def test_refused_finalize_records_a_failed_receipt_and_blocks_a_second_pass(self):
+        # The draft step reports a pass far over its wall allocation with no reason.
+        wrapper = self.python_wrapper(
+            'if [ "$2" = "draft" ]; then "$REAL" "$@" | "$REAL" -c \'import json,sys\n'
+            'd = json.load(sys.stdin); d["used"]["wall_seconds"] = 99999; d["allocation_exceeded_reason"] = None\n'
+            'print(json.dumps(d))\'; exit $?; fi')
+        proc = self.run_scan(DAILY_SCAN_INTELLIGENCE="1", FULLY_AWARE_PYTHON=wrapper)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("finalize refused (allocation_exceeded_without_reason:wall_seconds)", proc.stdout)
+        self.assertIn("recorded as a failed pass receipt", proc.stdout)
+        self.assertNotIn("stage4 OK", proc.stdout)
+        state = Path(self.tmp) / "repo" / "state"
+        receipts = sorted((state / "intelligence-stub").glob("*.json"))
+        self.assertEqual(len(receipts), 1)
+        value = json.loads(receipts[0].read_text())
+        self.assertEqual((value["outcome"], value["refusal_reasons"], value["allocation_exceeded"]),
+                         ("failed", ["allocation_exceeded_without_reason:wall_seconds"], True))
+        self.assertEqual([(r["dedupe_key"], r["status"]) for r in value["candidates"]],
+                         [("stub-intelligence-rehearsal", "held")])
+        self.assertFalse((state / "intelligence-stub" / "outbox").exists())
+        self.assertFalse((state / "intelligence-stub" / "proofs").exists())
+        self.assertTrue(list((state / "daily-scan").glob("*stage4.FAILED")))
         again = self.run_scan(DAILY_SCAN_INTELLIGENCE="1")
         self.assertIn("stage4 SKIPPED -- plan: already_ran_today", again.stdout)
 
