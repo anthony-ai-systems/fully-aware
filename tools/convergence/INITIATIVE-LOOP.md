@@ -16,7 +16,7 @@ driver, never writes the IRIS docket, and never grants authority.
 |---|---|---|
 | `initiative_health.py` (Part A) | A read-only snapshot of the initiative drivers (the IRIS sweep heartbeat, the Fully Aware daily scan brief, the Radar daily heartbeat, intelligence pass receipts), the last successful sweep, missed attempts, the declared hold and whether it can resume, an event-level docket summary (answered requests with no follow-through, overdue rechecks, open requests), and local-worker throughput. From these it gives the state (`operating`, `degraded`, `stopped` or `unknown`), whether idling is legitimate, what wakes the loop next, and any decision Anthony has to make. | Writing anything. Importing IRIS code: the docket is parsed as raw JSON, so its figures are an event-level summary, not an IRIS replay. Reporting an input it could not read as healthy. |
 | `intelligence_pass.py` (Part B) | Pass identity, the allocation and its accounting, missed-day and recovery rules, perspective rotation, the closed candidate shape, a novelty floor, suppression against earlier docket events, receipts, and the outbox handoff file in the docket's `opportunity_proposal` shape. | Calling a model or the network. Writing the docket, since the docket owner consumes the outbox. Turning an external claim into a fact about Anthony or a ratified preference. |
-| `tools/daily-scan/intelligence-pass-prompt.md` and the optional stage 4 of `run-daily-scan.sh` (Part C) | The model's part: questions, research, judgment, and a fresh independent challenge per candidate. | Running unless `DAILY_SCAN_INTELLIGENCE=1` is set. Changing stages 1 to 3. |
+| `tools/daily-scan/intelligence-pass-prompt.md`, `intelligence-challenge-prompt.md` and the optional stage 4 of `run-daily-scan.sh` (Part C) | The model's part: questions, research, judgment, and a fresh independent challenge per candidate. | Running unless `DAILY_SCAN_INTELLIGENCE=1` is set. Changing stages 1 to 3. |
 | `registers/defects.json` item `INITIATIVE-1` | Keeping the stopped loop in the morning defect summary. | Nothing yet. It is provisional, so its check is a placeholder that is never run. |
 
 State rules for `initiative_health.py`, using `policy.sweep_stale_hours` = 26:
@@ -41,9 +41,19 @@ Idling counts as legitimate only when the IRIS sweep driver is present and has a
 | Opportunities presented per pass | at most 1 |
 | Local window | 06:15–11:00 |
 | Novelty threshold (token-set Jaccard) | 0.45 |
+| Recovery lookback | 7 days |
 | Sweep staleness for initiative health | 26 hours |
 
 A pass is due once per local day whatever the backlog size. An urgent incident preempts the pass, and the preemption is recorded. A missed or preempted day gets at most one recovery pass, which states the date it covers.
+
+How these rules are implemented in `intelligence_pass.py`:
+
+- There is one receipt per local date (`<date>.json`), and it is never overwritten. A preempted day's receipt blocks a second pass that day (`preempted_today`), so the recovery happens the next day.
+- The first pass after a gap of missed, preempted or failed days runs as `recovery`. It is that day's only pass, it covers the latest day in the gap, and it lists the whole gap. Days before a recovery pass are never recovered again, so a five-day outage produces one recovery pass, not five.
+- `before_window` and `window_closed` are logged skips with no receipt. A day whose window closed with no pass becomes a missed day.
+- Candidates go through checks in this order: closed-shape and challenge validation, then suppression against the docket, then the novelty floor, then the `present_max` cap. The host fills in `generated_by` and `challenge.by`, and any challenge the generator wrote about its own candidate is thrown away.
+- If the docket is named but can't be read, every otherwise eligible candidate is `held`, because a declined idea must not be presented again without that check. Internal coverage is also marked `partial`.
+- Earlier outbox files are added to the novelty corpus, leaving out the candidate's own opportunity id. That way yesterday's proposal can't block today's with changed evidence, which suppression handles instead.
 
 ## Activation (all steps are Anthony's)
 
@@ -51,13 +61,13 @@ A pass is due once per local day whatever the backlog size. An urgent incident p
 2. Once `~/code/fully-aware` carries `tools/convergence/initiative_health.py`, change `INITIATIVE-1`'s `verify` to `python3 "$HOME/code/fully-aware/tools/convergence/initiative_health.py" --check` and set `provisional` to false.
 3. Decide how IRIS gets a heartbeat. Nothing here recreates or resumes one.
 4. Approve or change the allocation values above.
-5. Only after that, set `DAILY_SCAN_INTELLIGENCE=1` in the daily-scan LaunchAgent environment. Rehearse first with `DAILY_SCAN_STUB=1`.
+5. Only after that, set `DAILY_SCAN_INTELLIGENCE=1` in the daily-scan LaunchAgent environment. Rehearse first with `DAILY_SCAN_STUB=1 DAILY_SCAN_INTELLIGENCE=1` in a scratch checkout. Stub stage 4 writes only to `state/intelligence-stub/`, but stages 1 to 3 in stub mode still overwrite that checkout's brief. `test_intelligence_pass.StageFourStubTest` runs this rehearsal in a temp copy with fake `codex`, `claude`, `gh` and `launchctl` binaries.
 6. Separately, deploy the IRIS docket change that accepts `opportunity_proposal`, which the IRIS task owns. It must be in place before any outbox file is consumed.
 
 ## Rollback
 
 - Unset `DAILY_SCAN_INTELLIGENCE` so stage 4 logs `SKIPPED (not enabled)`.
-- Delete `~/code/fully-aware/state/intelligence/`, which holds the receipts and outbox. It is gitignored state.
+- Delete `~/code/fully-aware/state/intelligence/` (and `state/intelligence-stub/` if a rehearsal ran), which hold the receipts and outbox. They are gitignored state.
 - Revert the commit. `initiative_health.py` holds no state, so reverting it removes it completely.
 
 ## What is NOT proven
@@ -69,3 +79,7 @@ A pass is due once per local day whatever the backlog size. An urgent incident p
 - That the novelty floor detects material novelty. It is a crude, auditable Jaccard floor, and the model still has to say what is materially new.
 - The allocation values. They are proposals, not measured optima.
 - The intelligence pass end to end. It has only been exercised in stub mode, with no model calls.
+- The `-c web_search="live"` override that stage 4 passes to `codex exec` has not been verified against the installed codex. `DAILY_SCAN_INTEL_CODEX_SEARCH=` (empty) removes it. Without web access, the pass has to report external coverage as a gap.
+- That the outbox is ready to consume as written. `source.verified_at` is the time of the pass, so the consumer has to stamp it again within the docket's 900 s recheck window. The docket also has to have the `opportunity_proposal` change installed.
+- That suppression is robust. The evidence revision hashes the counterevidence text as the spec requires, and that text is written by the model. The same idea described with differently worded counterevidence therefore gets a new revision and counts as `eligible_changed_evidence`. The code enforces that the revision changed. Judging whether the change is material is left to the novelty floor, the model and Anthony.
+- `used.source_opens`. The model reports this number itself, and the code does not measure it.

@@ -66,6 +66,12 @@ can join rather than a report he can only read.
                                -> state/daily-scan/<date>-brief.md
                                   (date-stamped first line, then the headline)
                                -> copied to state/daily-scan/LATEST.md
+    |
+    v
+  stage 4  INTELLIGENCE ...... OPTIONAL, default OFF (DAILY_SCAN_INTELLIGENCE=1)
+                               unset -> one "stage4 SKIPPED (not enabled)" log
+                                  line; no marker, no file, no model call
+                               set   -> see "Stage 4" below          [1500s]
 ```
 
 Every stage has its own watchdog and degrades rather than aborts. The script
@@ -134,6 +140,8 @@ acquirer to write it before calling the lock abandoned.
 | `tools/daily-scan/scan-prompt.md` | stage 1 brief: inputs to read, five strict output sections, read-only rules. The runner appends the collected PR block to it. |
 | `tools/daily-scan/review-prompt.md` | stage 2 brief: kill weak findings, rank survivors, top 3 with WHY, <=400 words. |
 | `tools/daily-scan/summarize-prompt.md` | stage 3 brief: headline / TOP 3 / NEW SINCE YESTERDAY / one next action, <=300 words. |
+| `tools/daily-scan/intelligence-pass-prompt.md` | stage 4 generator procedure (optional stage). |
+| `tools/daily-scan/intelligence-challenge-prompt.md` | stage 4 independent challenger, one call per candidate. |
 | `tools/daily-scan/install-daily-scan-launchagent.sh` | copies the plist to `~/Library/LaunchAgents` and loads it. **Arming is Anthony's, post-merge.** |
 | `launchd/com.anthonyflores.fully-aware.daily-scan.plist` | 06:15 daily schedule. |
 | `state/daily-scan/<date>-scan.md` | raw Codex scan. |
@@ -248,6 +256,31 @@ Overrides (all optional): `DAILY_SCAN_CODEX_MODEL`, `DAILY_SCAN_CODEX_EFFORT`,
 `DAILY_SCAN_{PACK,PR,SCAN,REVIEW,SUM}_TIMEOUT` (seconds), and the retention
 knobs `DAILY_SCAN_RETAIN_DAYS`, `DAILY_SCAN_LOG_MAX_BYTES`,
 `DAILY_SCAN_THREAD_MAX_DAYS`.
+
+## Stage 4: intelligence pass (optional)
+
+Off unless `DAILY_SCAN_INTELLIGENCE=1`. When on, it runs whatever stages 1-3 did,
+and the code/model split is described in `tools/convergence/INITIATIVE-LOOP.md`:
+
+1. `intelligence_pass.py plan` decides whether today's single pass runs (once per
+   local day inside the 06:15-11:00 window, whatever the backlog). A skip is
+   logged and marked `stage4.SKIPPED`; a preemption
+   (`DAILY_SCAN_INTEL_URGENT=<incident-id>`) is also written as a receipt.
+2. One FRESH Codex thread (read-only sandbox; never the rolling scan thread) runs
+   `intelligence-pass-prompt.md` plus the plan, and returns candidates as JSON.
+3. One fresh `claude -p --model claude-fable-5-1 --effort medium --permission-mode plan`
+   call per candidate (at most 2) returns the independent challenge.
+4. `draft` + `finalize` validate, check suppression against the IRIS docket (read
+   only), apply the novelty floor and the present cap, and write
+   `state/intelligence/<date>.json` plus `state/intelligence/outbox/<opportunity-id>.json`.
+
+Steps 2-3 share one watchdog (`DAILY_SCAN_INTEL_TIMEOUT`, default 1500 s). A
+timeout or generator failure still writes a `failed` receipt. Stub mode stubs
+both model calls, ignores the window, skips the docket read, and writes to
+`state/intelligence-stub/` so a rehearsal never consumes the real pass. Other
+knobs: `DAILY_SCAN_INTEL_CHALLENGER_MODEL`, `DAILY_SCAN_INTEL_CHALLENGER_EFFORT`,
+`DAILY_SCAN_INTEL_CORPUS` (novelty corpus JSON), `DAILY_SCAN_INTEL_DOCKET`,
+`DAILY_SCAN_INTEL_CODEX_SEARCH` (empty disables the web-search config override).
 
 ## Arming
 

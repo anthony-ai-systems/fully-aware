@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run-daily-scan.sh -- the Codex-managed daily scan pipeline for Fully Aware.
 #
-# Three model stages behind one scheduled entry point:
+# Three model stages behind one scheduled entry point, plus one optional stage:
 #
 #   stage 0  freshness  -- BOOT-PACK.md older than 60 min? re-run morning-pack.sh
 #   stage 1  scan       -- Codex (gpt-5.6-sol, READ-ONLY sandbox) scans the 7
@@ -10,6 +10,14 @@
 #                          ranks what survives
 #   stage 3  summarize  -- Codex, RESUMING THE SAME THREAD, folds scan + review
 #                          into the daily brief
+#   stage 4  intelligence -- OPTIONAL, default OFF (DAILY_SCAN_INTELLIGENCE=1):
+#                          one bounded intelligence pass -- a FRESH Codex thread
+#                          (read-only) forms questions and candidates, a fresh
+#                          Fable call challenges each candidate, and
+#                          tools/convergence/intelligence_pass.py does the
+#                          accounting, receipt and docket-handoff outbox under
+#                          state/intelligence/. Unset, it logs one SKIPPED line
+#                          and does nothing else.
 #
 # The thread is the point. Stage 1 records the Codex session id in
 # state/daily-scan/thread-id and every later run resumes THAT id, so the scanner
@@ -38,7 +46,10 @@
 #
 # Stub mode stubs ALL THREE model calls and stage 0 as well, so a stub run spends
 # no tokens and does not regenerate the boot pack. It still writes the state/
-# outputs, markers and logs -- that plumbing is the thing being exercised.
+# outputs, markers and logs -- that plumbing is the thing being exercised. With
+# DAILY_SCAN_INTELLIGENCE=1 it stubs stage 4's model calls too, ignores the pass
+# window, does not read the IRIS docket, and writes to state/intelligence-stub/
+# so a rehearsal never consumes the day's real pass.
 
 set -uo pipefail  # NOT -e: a failed stage must degrade, not abort.
 
@@ -76,6 +87,7 @@ PR_TIMEOUT="${DAILY_SCAN_PR_TIMEOUT:-120}"        # pre-stage-1 gh collection: 2
 SCAN_TIMEOUT="${DAILY_SCAN_SCAN_TIMEOUT:-900}"    # stage 1: 15 min
 REVIEW_TIMEOUT="${DAILY_SCAN_REVIEW_TIMEOUT:-600}" # stage 2: 10 min
 SUM_TIMEOUT="${DAILY_SCAN_SUM_TIMEOUT:-600}"      # stage 3: 10 min
+INTEL_TIMEOUT="${DAILY_SCAN_INTEL_TIMEOUT:-1500}" # stage 4 model calls: 25 min (only when enabled)
 
 # Retention.
 RETAIN_DAYS="${DAILY_SCAN_RETAIN_DAYS:-30}"       # dated outputs + raw logs
@@ -739,6 +751,205 @@ else
         cp "${BRIEF_FILE}" "${LATEST_FILE}"
         log "stage3 OK -- brief at ${BRIEF_FILE}; LATEST.md updated"
         log "headline: ${brief_headline}"
+    fi
+fi
+
+# --- stage 4: intelligence pass (optional, default OFF) -----------------
+# Guarded by DAILY_SCAN_INTELLIGENCE=1. Unset -- the default -- this stage logs
+# one "SKIPPED (not enabled)" line and does nothing else: no marker, no file, no
+# python, no model call, so stages 0-3 behave exactly as they did before it
+# existed. Enabled, it runs whatever stages 1-3 did (an intelligence pass is not
+# a summary of the scan) and degrades like every other stage: a failure is
+# written as a `failed` pass receipt plus a stage4.FAILED marker, never an abort.
+#
+# Code owns the accounting (tools/convergence/intelligence_pass.py: plan, draft,
+# finalize); the models own questions, research and judgment. The generator is a
+# FRESH Codex thread, never the rolling scan thread. Each candidate (at most the
+# plan's deep_candidates) gets its own fresh Fable challenge call, and the host --
+# not either model -- stamps who generated and who challenged. The receipt and
+# the outbox (the IRIS docket's opportunity_proposal propose input) are written
+# under state/intelligence/. Nothing here writes the docket; it is read only, for
+# suppression of already-declined ideas.
+if [ "${DAILY_SCAN_INTELLIGENCE:-0}" != "1" ]; then
+    log "stage4 SKIPPED (not enabled) -- set DAILY_SCAN_INTELLIGENCE=1 to run the intelligence pass"
+else
+    log "stage4 START -- intelligence pass"
+    INTEL_PY="${REPO_ROOT}/tools/convergence/intelligence_pass.py"
+    INTEL_PROMPT="${PROMPT_DIR}/intelligence-pass-prompt.md"
+    INTEL_CHALLENGE_PROMPT="${PROMPT_DIR}/intelligence-challenge-prompt.md"
+    INTEL_CHALLENGER_MODEL="${DAILY_SCAN_INTEL_CHALLENGER_MODEL:-claude-fable-5-1}"
+    INTEL_CHALLENGER_EFFORT="${DAILY_SCAN_INTEL_CHALLENGER_EFFORT:-medium}"
+    # Unverified against the installed codex: the config key that turns on the
+    # native web_search tool. Empty disables it; the pass then reports external
+    # coverage as a gap instead of pretending.
+    INTEL_CODEX_SEARCH="${DAILY_SCAN_INTEL_CODEX_SEARCH:-live}"
+    INTEL_CORPUS="${DAILY_SCAN_INTEL_CORPUS:-}"
+    INTEL_DOCKET="${DAILY_SCAN_INTEL_DOCKET:-${HOME}/Library/Application Support/IRIS/orchestrator/initiative/docket.json}"
+    # Stub receipts never share a directory with real ones: a rehearsal must not
+    # consume the day's pass or read as a real receipt in initiative health.
+    if [ "${STUB}" = "1" ]; then
+        INTEL_DIR="${REPO_ROOT}/state/intelligence-stub"
+    else
+        INTEL_DIR="${REPO_ROOT}/state/intelligence"
+    fi
+    INTEL_PLAN="${RAW_DIR}/${DATE}-intel-plan.json"
+    INTEL_INPUT="${RAW_DIR}/${DATE}-intel-input.md"
+    INTEL_OUT="${RAW_DIR}/${DATE}-intel-output.json"
+    INTEL_DRAFT="${RAW_DIR}/${DATE}-intel-draft.json"
+    INTEL_RESULT="${RAW_DIR}/${DATE}-intel-result.json"
+    INTEL_LAUNCHES="${RAW_DIR}/${DATE}-intel-launches"
+    INTEL_RAW="${RAW_DIR}/${DATE}-intel.raw.log"
+    rm -f "${INTEL_PLAN}" "${INTEL_INPUT}" "${INTEL_OUT}" "${INTEL_DRAFT}" "${INTEL_RESULT}" \
+          "${INTEL_LAUNCHES}" "${RAW_DIR}/${DATE}"-intel-candidate-*.json "${RAW_DIR}/${DATE}"-intel-challenge-*
+    : > "${INTEL_LAUNCHES}"
+
+    # intel_field <json-file> <dotted.key> -- a scalar, a list's length, or empty.
+    intel_field() {
+        "${PY}" -c 'import json,sys
+v = json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("."):
+    v = v.get(k) if isinstance(v, dict) else None
+print("" if v is None or isinstance(v, dict) else len(v) if isinstance(v, list) else v)' "$1" "$2" 2>/dev/null
+    }
+
+    # codex_intel <prompt_file> <out_file> <raw_log> -- a FRESH read-only thread.
+    codex_intel() {
+        printf 'launch codex\n' >> "${INTEL_LAUNCHES}"
+        if [ "${STUB}" = "1" ]; then
+            printf 'stub-codex-intelligence\n' > "$3"
+            cat > "$2" <<STUBJSON
+{"questions": ["STUB: which unnamed problem costs the most time?", "STUB: which priority rests on an untested assumption?", "STUB: what adjacent field solved this already?"],
+ "chosen": ["STUB: which unnamed problem costs the most time?"],
+ "coverage": {"internal": "partial", "external": "unavailable", "gaps": ["stub run: no sources opened"]},
+ "used": {"source_opens": 0},
+ "candidates": [{"dedupe_key": "stub-intelligence-rehearsal", "question": "STUB: which unnamed problem costs the most time?",
+   "perspective": "$(intel_field "${INTEL_PLAN}" perspective)", "goal_link": "Stub rehearsal of the stage 4 plumbing.",
+   "novelty": "Stub candidate; nothing here is new.", "internal_evidence": [{"ref": "stub:boot-pack", "observed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"}],
+   "external_gap": "Stub run: no external sources are opened.", "counterevidence": ["Stub output proves plumbing only."],
+   "proof": {"kind": "analysis", "ref": "stub:analysis"}, "recommendation": "Do nothing; this is a stub rehearsal.",
+   "effort": "none", "confidence": 0.1, "recheck_after": "2099-01-01"}]}
+STUBJSON
+            return 0
+        fi
+        local search=()
+        [ -n "${INTEL_CODEX_SEARCH}" ] && search=(-c web_search="${INTEL_CODEX_SEARCH}")
+        IMPRINT_CAPTURE_ORIGIN=automation codex exec \
+            -C "${REPO_ROOT}" \
+            -s read-only \
+            -m "${CODEX_MODEL}" \
+            -c model_reasoning_effort="${CODEX_EFFORT}" \
+            ${search[@]+"${search[@]}"} \
+            -o "$2" \
+            - <"$1" > "$3" 2>&1
+    }
+
+    # fable_challenge <prompt_file> <out_file> <raw_log> -- a FRESH claude call per
+    # candidate, plan permission mode (read-only). Same provenance note as
+    # fable_review: user-level hooks still load.
+    fable_challenge() {
+        printf 'launch claude\n' >> "${INTEL_LAUNCHES}"
+        if [ "${STUB}" = "1" ]; then
+            printf 'stub-fable-challenge\n' > "$3"
+            printf '{"verdict": "survives", "notes": "STUB challenge", "counterevidence": []}\n' > "$2"
+            return 0
+        fi
+        IMPRINT_CAPTURE_ORIGIN=automation claude -p --model "${INTEL_CHALLENGER_MODEL}" \
+            --effort "${INTEL_CHALLENGER_EFFORT}" --permission-mode plan <"$1" >"$2" 2>"$3"
+    }
+
+    # intel_model_calls <deep_candidates> -- runs under ONE watchdog budget. A
+    # failed challenge is not a failed pass: its candidate simply has no
+    # independent challenge and is rejected by the validator.
+    intel_model_calls() {
+        codex_intel "${INTEL_INPUT}" "${INTEL_OUT}" "${INTEL_RAW}" || return $?
+        [ -s "${INTEL_OUT}" ] || return 65
+        local i=0 cand challenge_input
+        while [ "${i}" -lt "$1" ]; do
+            cand="${RAW_DIR}/${DATE}-intel-candidate-${i}.json"
+            if ! "${PY}" "${INTEL_PY}" candidate --output "${INTEL_OUT}" --index "${i}" > "${cand}" 2>>"${INTEL_RAW}"; then
+                rm -f "${cand}"  # exit 3: no candidate at this index
+                break
+            fi
+            challenge_input="${RAW_DIR}/${DATE}-intel-challenge-${i}-input.md"
+            { cat "${INTEL_CHALLENGE_PROMPT}"; printf '\n\n---\n\n## CANDIDATE UNDER CHALLENGE\n\n'; cat "${cand}"; } > "${challenge_input}"
+            fable_challenge "${challenge_input}" "${RAW_DIR}/${DATE}-intel-challenge-${i}.json" \
+                "${RAW_DIR}/${DATE}-intel-challenge-${i}.raw.log" \
+                || printf 'challenge %s exited %s\n' "${i}" "$?" >> "${INTEL_RAW}"
+            i=$((i + 1))
+        done
+        return 0
+    }
+
+    plan_args=(plan --dir "${INTEL_DIR}" --record-preemption)
+    [ -n "${INTEL_CORPUS}" ] && plan_args+=(--corpus "${INTEL_CORPUS}")
+    [ -n "${DAILY_SCAN_INTEL_URGENT:-}" ] && plan_args+=(--urgent "${DAILY_SCAN_INTEL_URGENT}")
+    [ "${STUB}" = "1" ] && plan_args+=(--ignore-window)
+
+    intel_failed=""
+    if [ ! -f "${INTEL_PY}" ]; then
+        fail_stage stage4 "missing ${INTEL_PY}"
+    else
+        "${PY}" "${INTEL_PY}" "${plan_args[@]}" > "${INTEL_PLAN}" 2>>"${INTEL_RAW}"
+        plan_rc=$?
+        if [ "${plan_rc}" -eq 4 ]; then
+            # A skip is a first-class outcome. A preemption is also a receipt
+            # (written by plan itself); the other skips are this log line only.
+            recover_by="$(intel_field "${INTEL_PLAN}" recover_by)"
+            skip_stage stage4 "plan: $(intel_field "${INTEL_PLAN}" reason)${recover_by:+ (recover by ${recover_by})}"
+        elif [ "${plan_rc}" -ne 0 ]; then
+            fail_stage stage4 "intelligence_pass.py plan exited ${plan_rc} (see ${INTEL_PLAN})"
+        else
+            started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            deep="$(intel_field "${INTEL_PLAN}" reserved.deep_candidates)"
+            deep="${deep:-0}"
+            log "stage4 -- pass $(intel_field "${INTEL_PLAN}" mode) for $(intel_field "${INTEL_PLAN}" covers_date), perspective $(intel_field "${INTEL_PLAN}" perspective)"
+            if [ ! -f "${INTEL_PROMPT}" ] || [ ! -f "${INTEL_CHALLENGE_PROMPT}" ]; then
+                intel_failed="missing intelligence prompt(s) under ${PROMPT_DIR}"
+            elif [ "${STUB}" != "1" ] && ! command -v codex >/dev/null 2>&1; then
+                intel_failed="codex not found on PATH"
+            elif [ "${STUB}" != "1" ] && ! command -v claude >/dev/null 2>&1; then
+                intel_failed="claude CLI not on PATH (no independent challenger)"
+            else
+                {
+                    cat "${INTEL_PROMPT}"
+                    printf '\n\n---\n\n## PASS PARAMETERS (%s)\n\n```json\n' "${DATE}"
+                    cat "${INTEL_PLAN}"
+                    printf '```\n\n## INTERNAL EVIDENCE (read-only paths)\n\n'
+                    printf -- '- boot pack: %s\n- today'\''s scan: %s\n- today'\''s review: %s\n- today'\''s brief: %s\n- earlier pass receipts: %s\n' \
+                        "${BOOT_PACK}" "${SCAN_FILE}" "${REVIEW_FILE}" "${BRIEF_FILE}" "${INTEL_DIR}"
+                } > "${INTEL_INPUT}"
+                run_watchdog "${INTEL_TIMEOUT}" stage4 intel_model_calls "${deep}"
+                intel_rc=$?
+                if [ "${intel_rc}" -eq 124 ]; then
+                    intel_failed="model calls hit the ${INTEL_TIMEOUT}s watchdog"
+                elif [ "${intel_rc}" -ne 0 ]; then
+                    intel_failed="generator exited ${intel_rc} (raw log: ${INTEL_RAW})"
+                fi
+            fi
+
+            draft_args=(draft --plan "${INTEL_PLAN}" --output "${INTEL_OUT}" --generator "${CODEX_MODEL}"
+                        --challenger "${INTEL_CHALLENGER_MODEL}" --started-at "${started_at}"
+                        --model-launches "$(wc -l < "${INTEL_LAUNCHES}" | tr -d '[:space:]')")
+            for challenge in "${RAW_DIR}/${DATE}"-intel-challenge-[0-9]*.json; do
+                [ -s "${challenge}" ] || continue
+                idx="${challenge##*-intel-challenge-}"
+                draft_args+=(--challenge "${idx%.json}:${challenge}")
+            done
+            [ -n "${intel_failed}" ] && draft_args+=(--failed "${intel_failed}")
+            finalize_args=(finalize --receipt "${INTEL_DRAFT}" --dir "${INTEL_DIR}")
+            [ -n "${INTEL_CORPUS}" ] && finalize_args+=(--corpus "${INTEL_CORPUS}")
+            [ "${STUB}" != "1" ] && finalize_args+=(--docket "${INTEL_DOCKET}")
+
+            if ! "${PY}" "${INTEL_PY}" "${draft_args[@]}" > "${INTEL_DRAFT}" 2>>"${INTEL_RAW}"; then
+                fail_stage stage4 "intelligence_pass.py draft failed (see ${INTEL_DRAFT}); no receipt written"
+            elif ! "${PY}" "${INTEL_PY}" "${finalize_args[@]}" > "${INTEL_RESULT}" 2>>"${INTEL_RAW}"; then
+                fail_stage stage4 "intelligence_pass.py finalize refused or failed (see ${INTEL_RESULT})"
+            elif [ -n "${intel_failed}" ]; then
+                fail_stage stage4 "${intel_failed} -- recorded as a failed pass receipt"
+            else
+                log "stage4 OK -- outcome $(intel_field "${INTEL_RESULT}" outcome); receipt $(intel_field "${INTEL_RESULT}" receipt_path); outbox files: $(intel_field "${INTEL_RESULT}" outbox)"
+            fi
+        fi
     fi
 fi
 
