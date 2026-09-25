@@ -243,15 +243,18 @@ def _selection_reference(value: Any) -> Tuple[Optional[Dict[str, Any]], Optional
     return reference, None
 
 
-def _selection_join(payloads: Mapping[str, Any]) -> Dict[str, Any]:
+def _selection_join(payloads: Mapping[str, Any], excluded: Tuple[str, ...] = ()) -> Dict[str, Any]:
     """Join the five work-bound payloads when a selected generation is present.
 
     Older IRIS payloads omit ``selection`` entirely.  They keep the existing
     reader behavior.  Once any work-bound payload advertises the field, every
-    required payload must carry the same valid active reference.
+    required payload must carry the same valid active reference.  Names in
+    ``excluded`` (an optional payload whose read supplied no planning data)
+    do not participate; the remaining payloads must still agree.
     """
-    advertised = any(isinstance(payload, dict) and "selection" in payload
-                     for payload in payloads.values())
+    required = tuple(name for name in SELECTION_PAYLOADS if name not in excluded)
+    advertised = any(isinstance(payloads.get(name), dict) and "selection" in payloads[name]
+                     for name in required)
     if not advertised:
         return {"advertised": False, "current": True, "reason": None, "issues": []}
 
@@ -259,7 +262,7 @@ def _selection_join(payloads: Mapping[str, Any]) -> Dict[str, Any]:
     malformed: List[str] = []
     disabled: List[str] = []
     references: Dict[str, Dict[str, Any]] = {}
-    for name in SELECTION_PAYLOADS:
+    for name in required:
         payload = payloads.get(name)
         if not isinstance(payload, dict) or "selection" not in payload:
             missing.append(name)
@@ -312,8 +315,22 @@ def _selection_join(payloads: Mapping[str, Any]) -> Dict[str, Any]:
     if disabled:
         result["disabled"] = disabled
     if reason is None and references:
-        result["reference"] = references[SELECTION_PAYLOADS[0]]
+        result["reference"] = references[required[0]]
     return result
+
+
+def _priority_read_unavailable(observation: Mapping[str, Any]) -> bool:
+    """True when the optional priority read supplied no planning payload.
+
+    A failed, non-200 or source-declared unavailable (for example
+    ``not_configured``) read without a ``selection`` field is left out of the
+    selection join: its rows are cleared by the priority projection without
+    invalidating other evidence.  A present payload still joins as usual.
+    """
+    data = observation.get("data")
+    if observation.get("status") != 200 or not isinstance(data, dict):
+        return True
+    return "selection" not in data and data.get("status") == "unavailable" and data.get("plan") is None
 
 
 def _selection_projection(join: Mapping[str, Any], current_work: bool) -> Optional[Dict[str, Any]]:
@@ -819,7 +836,7 @@ def _observe_iris(now: dt.datetime, opener: Any = None) -> Tuple[Dict[str, Any],
         "health": health.get("data"),
         "focus": focus.get("data"),
         "priority": priority.get("data"),
-    })
+    }, excluded=("priority",) if _priority_read_unavailable(priority) else ())
     selection_current = bool(selection_join.get("current"))
     selection_issue = selection_join.get("reason") if selection_join.get("advertised") and not selection_current else None
     if selection_issue is not None:

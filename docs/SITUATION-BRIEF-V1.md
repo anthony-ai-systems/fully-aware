@@ -40,7 +40,13 @@ payloads advertises `selection`, the board-before and board-after reads plus
 health, focus, and priority must each carry the same closed
 `iris-selection-reference/v1` object with a positive integer revision, a
 32-character lowercase operation ID, `mode: "active"`, and a 64-character
-lowercase manifest hash. Missing, malformed, disabled, or mismatched
+lowercase manifest hash. A priority read that supplies no planning payload
+(failed, non-200, or a source-declared `unavailable` payload such as
+`not_configured` without a `selection` field) is left out of the join: its
+rows are cleared and labelled unavailable while board, health and focus must
+still agree with each other. A present priority payload joins as usual, so a
+mismatched or missing priority reference still fails closed. Missing,
+malformed, disabled, or mismatched
 references make current-work authority unavailable while retaining bounded
 historical focus requests and priority text. A matching reference does not
 override the existing board or health freshness checks. Local-agent activity,

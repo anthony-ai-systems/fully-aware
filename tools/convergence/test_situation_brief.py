@@ -383,6 +383,78 @@ class FileTests(unittest.TestCase):
         self.assertTrue(output["iris"]["board"]["current"])
         self.assertNotIn("binding_note", output["iris"]["priorities"])
 
+    def priority_unavailable_endpoints(self, case):
+        endpoints = self.selected_endpoints()
+        unconfigured = {"schema": "iris-priority-context/v1", "status": "unavailable",
+                        "reason": "not_configured", "checked_at": VERIFIED, "plan": None}
+        overrides = {
+            "http_404": {"status": 404, "data": None, "sha256": None, "bytes": 0},
+            "transport_failure": {"status": None, "data": None, "sha256": None, "bytes": 0},
+            "not_configured": {"data": unconfigured},
+        }[case]
+
+        def fetch(path, **kwargs):
+            observation = endpoints(path, **kwargs)
+            if path == "/priority.json":
+                observation.update(copy.deepcopy(overrides))
+            return observation
+        return endpoints, fetch
+
+    def test_unavailable_priority_read_is_excluded_from_selection_join(self):
+        for case in ("http_404", "transport_failure", "not_configured"):
+            with self.subTest(case=case):
+                _endpoints, fetch = self.priority_unavailable_endpoints(case)
+                output = self.make_brief(fetch)
+                selection = output["iris"]["selection"]
+                self.assertTrue(selection["current"])
+                self.assertTrue(selection["current_work_authority"])
+                self.assertEqual(selection["reference"], selection_reference())
+                self.assertTrue(output["iris"]["board"]["current"])
+                self.assertTrue(output["iris"]["health"]["current"])
+                self.assertTrue(output["iris"]["focus"]["current"])
+                self.assertNotIn("selection_missing", output["iris"]["board"]["issues"])
+                planning = output["iris"]["priorities"]
+                self.assertFalse(planning["current"])
+                self.assertEqual(planning["status"], "unavailable")
+                self.assertEqual(planning["rows"], [])
+
+    def test_unavailable_priority_still_requires_other_selections_to_agree(self):
+        _endpoints, fetch = self.priority_unavailable_endpoints("http_404")
+        _endpoints.values["/focus.json"]["selection"] = selection_reference(revision=2)
+        output = self.make_brief(fetch)
+        self.assertEqual(output["iris"]["selection"]["reason"], "selection_mismatch")
+        self.assertFalse(output["iris"]["selection"]["current_work_authority"])
+        self.assertFalse(output["iris"]["board"]["current"])
+        endpoints, fetch = self.priority_unavailable_endpoints("transport_failure")
+        del endpoints.values["/focus.json"]["selection"]
+        output = self.make_brief(fetch)
+        self.assertEqual(output["iris"]["selection"]["reason"], "selection_missing")
+        self.assertEqual(output["iris"]["selection"]["missing"], ["focus"])
+        self.assertFalse(output["iris"]["board"]["current"])
+
+    def test_present_priority_with_mismatched_selection_still_fails_closed(self):
+        endpoints = self.selected_endpoints()
+        endpoints.values["/priority.json"]["selection"] = selection_reference(revision=2)
+        output = self.make_brief(endpoints)
+        self.assertEqual(output["iris"]["selection"]["reason"], "selection_mismatch")
+        self.assertFalse(output["iris"]["selection"]["current_work_authority"])
+        self.assertFalse(output["iris"]["board"]["current"])
+        self.assertFalse(output["iris"]["priorities"]["work_current"])
+        self.assertEqual(output["iris"]["priorities"]["rows"][0]["title"], "Priority 0")
+
+    def test_legacy_payloads_with_failed_priority_read_keep_legacy_contract(self):
+        endpoints = self.endpoints(**{"/priority.json": priority_payload()})
+
+        def fetch(path, **kwargs):
+            observation = endpoints(path, **kwargs)
+            if path == "/priority.json":
+                observation.update(status=503, data=None, sha256=None, bytes=0)
+            return observation
+        output = self.make_brief(fetch)
+        self.assertNotIn("selection", output["iris"])
+        self.assertTrue(output["iris"]["board"]["current"])
+        self.assertEqual(output["iris"]["priorities"]["rows"], [])
+
     def test_priority_markdown_escapes_markup_without_mangling_plain_ampersands(self):
         payload = priority_payload()
         payload["plan"]["rows"][0]["title"] = "Q&A <script>"
