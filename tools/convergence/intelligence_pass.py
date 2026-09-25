@@ -74,6 +74,7 @@ RECEIPT_KEYS = {"schema", "date", "mode", "covers_date", "gap_dates", "started_a
 # used key -> (allocation key, multiplier to the used unit)
 ALLOCATION_LIMITS = (("model_launches", "model_launches", 1), ("wall_seconds", "wall_minutes", 60),
                      ("source_opens", "source_opens", 1))
+NUMERIC_ALLOCATION = ("wall_minutes", "model_launches", "source_opens", "deep_candidates", "present_max")
 BOARD_URL = "http://127.0.0.1:4180/data/board.json"
 LOOPBACK = re.compile(r"http://(?:127\.0\.0\.1|localhost)(?::\d{1,5})?/")
 MAX_BOARD_BYTES = 8 * 1024 * 1024
@@ -518,37 +519,89 @@ def opportunity_id(dedupe_key):
     return "opportunity-" + hashlib.sha256(dedupe_key.encode("utf-8")).hexdigest()[:24]
 
 
-IDENTITY_TRAIL = ",.;:/"
+IDENTITY_LEAD = "([{<\"'`\u2018\u201c\u00ab"  # wrappers stripped from the front of a ref
+IDENTITY_TRAIL = ",.;:/!?\u2026'\"`\u2019\u201d\u00bb"  # always stripped from the end
+IDENTITY_CLOSERS = {")": "(", "]": "[", "}": "{", ">": "<"}  # stripped from the end when unbalanced
 URL_LIKE = re.compile(r"https?://", re.I)
+PATH_LINE = re.compile(r"(?::\d+(?:[-:]\d+)*)+$")  # ``:12``, ``:12:5``, ``:12-20``
+PATH_LIKE = re.compile(r"(?:/|^~|\.[a-z0-9]{1,8}$)")  # a slash, a home path or a file extension
+DEFAULT_PORT = re.compile(r":(?:80|443)$")
 MAX_EVIDENCE_REFS = 5  # the docket packet holds at most five evidence refs
 
 
-def url_identity(value):
-    """A URL without its query string or fragment, lowercased, trailing ``,.;:/`` removed."""
+def trim_identity(value):
+    """Strip surrounding wrappers (brackets, parentheses, quotes, backticks, angle
+    brackets) and trailing punctuation. A trailing closing bracket is stripped only
+    while it is unbalanced, so ``https://w.org/wiki/foo_(bar)`` keeps its own."""
     value = value.strip()
+    while value and (value[0] in IDENTITY_LEAD or value[0].isspace()):
+        value = value[1:]
+    while value:
+        last = value[-1]
+        if last in IDENTITY_TRAIL or last.isspace():
+            value = value[:-1]
+        elif last in IDENTITY_CLOSERS and value.count(last) > value.count(IDENTITY_CLOSERS[last]):
+            value = value[:-1]
+        else:
+            break
+    return value
+
+
+def first_token(value):
+    """The first whitespace-delimited token after the leading wrappers, trimmed."""
+    parts = trim_identity(value).split() if isinstance(value, str) else []
+    return trim_identity(parts[0]) if parts else ""
+
+
+def url_identity(value):
+    """A URL identity: the first token, unwrapped and trimmed; no query, fragment,
+    ``;params`` or userinfo; ``http`` and ``https`` both read as ``https``; no leading
+    ``www.`` and no default port (``:80``, ``:443``); the path percent-decoded; all
+    lowercased, trailing punctuation and ``/`` removed."""
+    value = first_token(value)
+    if not value:
+        return None
     try:
         parts = urllib.parse.urlsplit(value)
-        value = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
     except ValueError:
-        value = re.split(r"[?#]", value, maxsplit=1)[0]
-    return value.lower().rstrip(IDENTITY_TRAIL) or None
+        return trim_identity(re.split(r"[?#]", value, maxsplit=1)[0].lower()) or None
+    scheme, netloc = parts.scheme.lower(), parts.netloc.lower()
+    path = re.sub(r";[^/]*", "", parts.path)
+    if scheme in {"http", "https"}:
+        scheme = "https"
+        netloc = DEFAULT_PORT.sub("", netloc.rsplit("@", 1)[-1])
+        netloc = netloc[4:] if netloc.startswith("www.") else netloc
+    path = urllib.parse.unquote(path)
+    return trim_identity(urllib.parse.urlunsplit((scheme, netloc, path, "", "")).lower()) or None
 
 
 def internal_identity(ref):
-    """The first whitespace-delimited token of an internal ref, lowercased, with
-    trailing ``,.;:/`` removed; a URL token also loses its query and fragment."""
-    parts = ref.split() if isinstance(ref, str) else []
-    if not parts:
+    """The first whitespace-delimited token of an internal ref, unwrapped and
+    trimmed (see ``trim_identity``), lowercased, without a leading ``./``. A URL
+    token is normalised by ``url_identity``. A path-like token (one with a ``/``, a
+    leading ``~`` or a file extension) also loses a ``#anchor`` and a ``:<line>``
+    suffix; ``board:142`` is not path-like and keeps its ``:142``."""
+    token = first_token(ref)
+    if not token:
         return None
-    if URL_LIKE.match(parts[0]):
-        return url_identity(parts[0])
-    return parts[0].lower().rstrip(IDENTITY_TRAIL) or None
+    if URL_LIKE.match(token):
+        return url_identity(token)
+    token = token.lower()
+    while token.startswith("./"):
+        token = token[2:]
+    base = token.split("#", 1)[0]
+    if "#" in token and PATH_LIKE.search(trim_identity(PATH_LINE.sub("", base))):
+        token = base
+    stripped = PATH_LINE.sub("", token)
+    if stripped != token and PATH_LIKE.search(stripped):
+        token = stripped
+    return trim_identity(token) or None
 
 
 def external_identity(item):
     """An external item's ``url`` when present, else its source. A URL (either one)
-    is normalised by ``url_identity``; a plain source is lowercased, whitespace
-    collapsed, cut to 80 characters, with trailing ``,.;:/`` removed."""
+    is normalised by ``url_identity``; a plain source is unwrapped, lowercased,
+    whitespace collapsed, cut to 80 characters and trimmed (see ``trim_identity``)."""
     if not isinstance(item, dict):
         return None
     url = item.get("url")
@@ -556,9 +609,10 @@ def external_identity(item):
         return url_identity(url)
     source = item.get("source")
     if isinstance(source, str) and source.strip():
-        if URL_LIKE.match(source.strip()):
+        source = trim_identity(source)
+        if URL_LIKE.match(source):
             return url_identity(source)
-        return " ".join(source.lower().split())[:80].rstrip(IDENTITY_TRAIL) or None
+        return trim_identity(" ".join(source.lower().split())[:80]) or None
     return None
 
 
@@ -838,6 +892,21 @@ def _count(value):
     return type(value) in (int, float) and math.isfinite(value) and value >= 0
 
 
+def check_allocation(alloc):
+    """An allocation is a dict whose budget values, where present, are counts.
+
+    A non-numeric ``wall_minutes``, ``model_launches``, ``source_opens``,
+    ``deep_candidates`` or ``present_max`` cannot be compared, so it is a refusal
+    (``allocation_not_numeric``), never a limit silently skipped.
+    """
+    if not isinstance(alloc, dict):
+        raise ValueError("invalid_allocation")
+    bad = [k for k in NUMERIC_ALLOCATION if k in alloc and not _count(alloc[k])]
+    if bad:
+        raise ValueError("allocation_not_numeric:" + ",".join(bad))
+    return alloc
+
+
 def finalize_receipt(receipt, policy=None):
     """Validate a pass receipt against its closed shape and accounting rules."""
     policy = merged(policy)
@@ -874,8 +943,7 @@ def finalize_receipt(receipt, policy=None):
         raise ValueError("preemption_fields_without_preemption")
     if instant(r["finished_at"]) < instant(r["started_at"]):
         raise ValueError("receipt_time_order")
-    if not isinstance(r["allocation"], dict):
-        raise ValueError("invalid_allocation")
+    check_allocation(r["allocation"])
     used = r["used"]
     if (not isinstance(used, dict) or set(used) != {"wall_seconds", "model_launches", "source_opens"}
             or any(not _count(used[k]) for k in used)):
@@ -891,7 +959,7 @@ def finalize_receipt(receipt, policy=None):
     exceeded = []
     for used_key, alloc_key, unit in ALLOCATION_LIMITS:
         limit = r["allocation"].get(alloc_key)
-        if type(limit) in (int, float) and used[used_key] > limit * unit:
+        if limit is not None and used[used_key] > limit * unit:
             exceeded.append(used_key)
     reason = r["allocation_exceeded_reason"]
     if reason is not None and (not isinstance(reason, str) or not prose(reason) or len(reason) > 500):
@@ -1330,7 +1398,14 @@ def settle(draft, *, now, corpus=None, corpus_gaps=None, docket=None, docket_pro
     """
     policy = merged(policy)
     now = instant(now)
-    alloc = draft.get("allocation") or {}
+    if not isinstance(draft, dict):
+        raise ValueError("draft_not_object")
+    alloc = check_allocation({} if draft.get("allocation") is None else draft["allocation"])
+    cov_in = draft.get("coverage")
+    if not isinstance(cov_in, dict) or not isinstance(cov_in.get("gaps"), list):
+        raise ValueError("invalid_coverage")
+    if draft.get("candidates") is not None and not isinstance(draft["candidates"], list):
+        raise ValueError("invalid_candidates")
     deep = alloc.get("deep_candidates", policy["deep_candidates"])
     cap = alloc.get("present_max", policy["present_max"])
     rows, proposals = [], []
@@ -1453,11 +1528,13 @@ def refusal_receipt(value, reason, *, now, policy=None):
     finished = moment("finished_at", now)
     started = min(moment("started_at", finished), finished)
     alloc = v.get("allocation") if isinstance(v.get("allocation"), dict) else {}
+    # Only what can be compared is kept: a non-numeric budget value is dropped here
+    # (the refusal already names it) so the failed receipt itself still validates.
+    alloc = {k: x for k, x in alloc.items() if k not in NUMERIC_ALLOCATION or _count(x)}
     raw_used = v.get("used") if isinstance(v.get("used"), dict) else {}
     used = {k: raw_used.get(k) if _count(raw_used.get(k)) else 0
             for k in ("wall_seconds", "model_launches", "source_opens")}
-    exceeded = [u for u, a, unit in ALLOCATION_LIMITS
-                if type(alloc.get(a)) in (int, float) and used[u] > alloc[a] * unit]
+    exceeded = [u for u, a, unit in ALLOCATION_LIMITS if a in alloc and used[u] > alloc[a] * unit]
     stated = v.get("allocation_exceeded_reason")
     if isinstance(stated, str) and prose(stated):
         stated = clip(stated, 500)
@@ -1484,8 +1561,10 @@ def refusal_receipt(value, reason, *, now, policy=None):
         "finished_at": stamp(finished), "allocation": alloc, "used": used, "allocation_exceeded_reason": stated,
         "perspective": v.get("perspective") if v.get("perspective") in PERSPECTIVES else None,
         "questions": [clip(q, 500) for q in questions if isinstance(q, str) and prose(q)][:5],
-        "coverage": {"internal": cov.get("internal") if cov.get("internal") in COVERAGE else "unavailable",
-                     "external": cov.get("external") if cov.get("external") in COVERAGE else "unavailable",
+        "coverage": {"internal": cov["internal"] if isinstance(cov.get("internal"), str)
+                     and cov["internal"] in COVERAGE else "unavailable",
+                     "external": cov["external"] if isinstance(cov.get("external"), str)
+                     and cov["external"] in COVERAGE else "unavailable",
                      "gaps": cov_gaps + ["receipt_refused: " + reason]},
         "candidates": rows, "outcome": "failed", "preempted_by": None, "recover_by": None,
         "corpus_build_seconds": v.get("corpus_build_seconds") if _count(v.get("corpus_build_seconds")) else None,
@@ -1575,11 +1654,24 @@ def finalize_command(a, now):
             presented = presented_candidates(value, receipt)
         else:
             receipt = finalize_receipt(value)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        # Any failure to settle or check the input is a refusal, never a silent exit.
+        if isinstance(exc, ValueError):
+            refused = str(exc)
+        elif isinstance(exc, OSError):
+            refused = type(exc).__name__
+        else:
+            refused = "draft_not_settleable:" + type(exc).__name__
+        refused = clip(refused, 200) or "unreadable_input"
         if not a.dir:
-            raise ValueError(str(exc)) from None
-        refused = (str(exc) if isinstance(exc, ValueError) else type(exc).__name__)[:200] or "unreadable_input"
-        receipt, proposals, presented = refusal_receipt(value, refused, now=now), [], {}
+            raise ValueError(refused) from None
+        proposals, presented = [], {}
+        try:
+            receipt = refusal_receipt(value, refused, now=now)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            # Salvage failed too: record the day with nothing but its date.
+            date = value.get("date") if isinstance(value, dict) else None
+            receipt = refusal_receipt({"date": date} if isinstance(date, str) else None, refused, now=now)
     result = {"outcome": receipt["outcome"], "candidates": receipt["candidates"], "outbox": [], "proofs": []}
     if refused:
         result["refused"] = refused

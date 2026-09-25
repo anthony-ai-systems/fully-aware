@@ -252,6 +252,33 @@ class InitiativeHealthTests(unittest.TestCase):
         self.assertEqual((report["reason"], report["drivers"][0]["status"]), ("driver_not_active", "PAUSED"))
         self.assertFalse(report["idle"]["legitimate"])
 
+    def hold_with_status(self, status):
+        self.f.automations([{"id": health.IRIS_AUTOMATION, "status": status, "kind": "heartbeat",
+                             "rrule": "FREQ=DAILY", "last_run_at": None, "next_run_at": None}])
+        self.f.sweep(NOW - dt.timedelta(hours=2))
+        self.f.hold(); self.f.thread(archived=False)
+        report = self.f.report()
+        self.assertIs(report["hold"]["resume_condition_satisfiable"], True)
+        return report
+
+    def test_resumable_hold_does_not_make_unknown_status_idle_legitimate(self):
+        report = self.hold_with_status(None)
+        self.assertEqual((report["reason"], report["drivers"][0]["status"]), ("driver_status_unknown", "unknown_status"))
+        self.assertFalse(report["idle"]["legitimate"])
+        self.assertEqual(report["idle"]["next_wake"], {"kind": "none", "at": None})
+        self.assertEqual(self.run_cli("--check")[0], 1)
+
+    def test_resumable_hold_does_not_make_paused_idle_legitimate(self):
+        report = self.hold_with_status("PAUSED")
+        self.assertEqual((report["reason"], report["drivers"][0]["status"]), ("driver_not_active", "PAUSED"))
+        self.assertFalse(report["idle"]["legitimate"])
+        self.assertEqual(report["idle"]["next_wake"], {"kind": "none", "at": None})
+
+    def test_resumable_hold_with_active_driver_is_legitimate_idle(self):
+        report = self.hold_with_status("ACTIVE")
+        self.assertEqual(report["idle"]["reason"], "declared_hold_resumable")
+        self.assertTrue(report["idle"]["legitimate"])
+
     def test_never_succeeded_says_since_unknown(self):
         self.f.automations([{"id": health.RADAR_AUTOMATION, "status": "ACTIVE", "kind": "heartbeat",
                              "rrule": "FREQ=DAILY", "last_run_at": None, "next_run_at": None}])

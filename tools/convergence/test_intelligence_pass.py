@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from contextlib import redirect_stdout
 
 import intelligence_pass as ip
@@ -357,6 +358,68 @@ class CandidateTest(unittest.TestCase):
         self.assertEqual(ip.evidence_revision(variant), ip.evidence_revision(base))
         self.assertEqual(ip.evidence_tokens(variant), ip.evidence_tokens(base))
 
+    def test_identity_normalisation_variants(self):
+        # Every spelling in a row must collapse to the row's identity.
+        internal = {
+            "board:item-142": ["board:item-142", "(board:item-142)", "`board:item-142`", '"board:item-142"',
+                               "'board:item-142'", "[board:item-142]", "{board:item-142}", "<board:item-142>",
+                               "\u201cboard:item-142\u201d", "board:item-142).", "board:item-142!",
+                               "board:item-142?", "board:item-142\u2026", "board:item-142...",
+                               "(board:item-142), see note", "  board:item-142  "],
+            "tools/convergence/intelligence_pass.py": [
+                "./tools/convergence/intelligence_pass.py", "tools/convergence/intelligence_pass.py#anchor",
+                "tools/convergence/intelligence_pass.py:12", "tools/convergence/intelligence_pass.py:12:5",
+                "tools/convergence/intelligence_pass.py:12-20", "./tools/convergence/intelligence_pass.py#L12).",
+                "(tools/convergence/intelligence_pass.py:12)", "`./tools/convergence/intelligence_pass.py`"],
+            "readme.md": ["README.md", "README.md:12", "README.md#setup", "./README.md"],
+            "https://example.org/a b": [
+                "https://example.org/a%20b", "http://example.org/a%20b", "https://www.example.org/a%20b",
+                "https://example.org:443/a%20b", "http://example.org:80/a%20b", "https://example.org/a%20b;jsessionid=9",
+                "<https://example.org/a%20b>", "(https://example.org/a%20b).", "HTTPS://WWW.Example.org/A%20B/",
+                "https://example.org/a%20b?utm_source=x#frag"],
+            "https://en.wikipedia.org/wiki/foo_(bar)": [
+                "https://en.wikipedia.org/wiki/Foo_(bar)", "(https://en.wikipedia.org/wiki/Foo_(bar)).",
+                "<https://en.wikipedia.org/wiki/Foo_%28bar%29>"],
+        }
+        for expected, spellings in internal.items():
+            for raw in spellings:
+                self.assertEqual(ip.internal_identity(raw), expected, raw)
+        external = {
+            "https://example.org/study": [
+                ext("x", "https://example.org/study"), ext("x", "http://example.org/study"),
+                ext("x", "https://www.example.org/study/"), ext("x", "https://example.org:443/study"),
+                ext("x", "http://www.example.org:80/study;v=2?ref=rss#f"), ext("x", "<https://example.org/study>"),
+                ext("x", "https://example.org/%73tudy"), ext("x", "(https://example.org/study)."),
+                ext("<https://www.example.org/study>"), ext("http://example.org/study).")],
+            "some publisher weekly": [
+                ext("Some Publisher Weekly"), ext('"Some Publisher Weekly"'), ext("(Some Publisher Weekly)."),
+                ext("Some  Publisher Weekly!"), ext("`Some Publisher Weekly`"), ext("Some Publisher Weekly\u2026")],
+        }
+        for expected, items in external.items():
+            for item in items:
+                self.assertEqual(ip.external_identity(item), expected, item)
+        # A source-only item keeps the whole normalised source, not its first token.
+        self.assertEqual(ip.external_identity(ext("Some Publisher Weekly")), "some publisher weekly")
+        # Distinct identities stay distinct.
+        distinct = [ip.internal_identity(r) for r in ("board:item-142", "board:item-143", "board:142", "board:143",
+                                                       "board:item#3", "tools/a.py", "tools/b.py")]
+        self.assertEqual(len(set(distinct)), len(distinct), distinct)
+        self.assertEqual(ip.internal_identity("board:142"), "board:142")  # not path-like: no line suffix
+        self.assertNotEqual(ip.external_identity(ext("x", "https://example.org/a/b")),
+                            ip.external_identity(ext("x", "https://example.org/a")))
+        self.assertNotEqual(ip.external_identity(ext("x", "https://example.org:8443/a")),
+                            ip.external_identity(ext("x", "https://example.org/a")))
+        for empty in ("", "()", '""', "`", "<>", "...", "\u2026"):
+            self.assertIsNone(ip.internal_identity(empty), empty)
+        # Respelled evidence keeps the same revision and tokens, so suppression holds.
+        base = candidate(internal_evidence=[ev("board:item-142"), ev("tools/convergence/intelligence_pass.py")],
+                         external_evidence=[ext("x", "https://example.org/study")])
+        respelled = candidate(internal_evidence=[ev("(board:item-142)."),
+                                                 ev("./tools/convergence/intelligence_pass.py:88")],
+                              external_evidence=[ext("x", "<http://www.example.org:443/study;s=1>")])
+        self.assertEqual(ip.evidence_revision(respelled), ip.evidence_revision(base))
+        self.assertEqual(ip.evidence_tokens(respelled), ip.evidence_tokens(base))
+
     def test_evidence_identities(self):
         c = candidate(internal_evidence=[{"ref": "Board:8C7450D0 the finder item, next action overdue",
                                           "observed_at": "2026-09-24T18:00:00Z"},
@@ -676,11 +739,14 @@ class ReceiptTest(unittest.TestCase):
                 ip.finalize_receipt(receipt("2026-09-25", used=used, allocation_exceeded_reason="  "))
             ok = ip.finalize_receipt(receipt("2026-09-25", used=used, allocation_exceeded_reason="watchdog"))
             self.assertTrue(ok["allocation_exceeded"])
-        # Non-numeric allocation values are not compared; the flag is never taken from the input.
-        loose = ip.finalize_receipt(receipt("2026-09-25", allocation={"source_opens": "about twelve"},
-                                            used={"wall_seconds": 9999, "model_launches": 9, "source_opens": 99},
-                                            allocation_exceeded=True))
-        self.assertFalse(loose["allocation_exceeded"])
+        # A non-numeric allocation value cannot be compared, so it is refused, never skipped.
+        for key, bad in (("source_opens", "about twelve"), ("wall_minutes", "25"), ("present_max", "1"),
+                         ("deep_candidates", None), ("model_launches", True), ("wall_minutes", float("nan"))):
+            with self.assertRaisesRegex(ValueError, "^allocation_not_numeric:" + key):
+                ip.finalize_receipt(receipt("2026-09-25", allocation=dict(ip.budget(ip.POLICY), **{key: bad})))
+        # The flag is never taken from the input.
+        honest = ip.finalize_receipt(receipt("2026-09-25", allocation_exceeded=True))
+        self.assertFalse(honest["allocation_exceeded"])
         plan = ip.plan_pass([], NOW, backlog_count=0)
         draft = ip.assemble_draft(plan, {"used": {"source_opens": 40}, "allocation_exceeded_reason": "one long paper",
                                          "coverage": {"internal": "complete", "external": "complete", "gaps": []}},
@@ -689,7 +755,7 @@ class ReceiptTest(unittest.TestCase):
         self.assertTrue(ip.settle(draft, now=NOW, corpus=[], docket={"events": []})[0]["allocation_exceeded"])
         host = ip.assemble_draft(plan, None, {}, generator="g", challenger="c", started_at=NOW,
                                  now=NOW + dt.timedelta(minutes=26), model_launches=1, failed="watchdog",
-                                 exceeded_reason="model calls hit the 1500s watchdog")
+                                 exceeded_reason="model calls hit the 1440s watchdog")
         settled, _ = ip.settle(host, now=NOW)
         self.assertEqual((settled["outcome"], settled["allocation_exceeded"]), ("failed", True))
 
@@ -763,6 +829,80 @@ class ReceiptTest(unittest.TestCase):
             rc, text = self.run_cli("finalize", "--receipt", str(Path(tmp) / "missing.json"),
                                     "--dir", str(Path(tmp) / "other"))
             self.assertEqual((rc, json.loads(text)["refused"]), (5, "FileNotFoundError"))
+
+    def refuse_draft(self, tmp, draft):
+        """Finalize a host-written draft into a fresh dir; it must refuse with a receipt."""
+        intel = Path(tmp) / ("intelligence-%d" % len(list(Path(tmp).iterdir())))
+        path = Path(tmp) / "draft.json"
+        path.write_text(json.dumps(draft))
+        rc, text = self.run_cli("finalize", "--receipt", str(path), "--dir", str(intel))
+        self.assertEqual(rc, 5, text)
+        result = json.loads(text)
+        value = json.loads(Path(result["receipt_path"]).read_text())
+        self.assertEqual((value["outcome"], value["refusal_reasons"]), ("failed", [result["refused"]]))
+        self.assertEqual((result["outbox"], result["proofs"]), ([], []))
+        self.assertIn("receipt_refused: " + result["refused"], value["coverage"]["gaps"])
+        self.assertEqual(ip.finalize_receipt(value)["outcome"], "failed")  # the failed receipt itself validates
+        return result["refused"], value
+
+    def good_draft(self):
+        plan = ip.plan_pass([], NOW, backlog_count=0)
+        return ip.assemble_draft(plan, {"questions": ["a"], "used": {"source_opens": 2},
+                                        "coverage": {"internal": "complete", "external": "complete", "gaps": []},
+                                        "candidates": [candidate()]},
+                                 {0: {"verdict": "survives", "notes": ""}}, generator="g", challenger="c",
+                                 started_at=NOW - dt.timedelta(minutes=5), now=NOW, model_launches=2)
+
+    def test_malformed_host_draft_is_a_refusal_with_a_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cases = [
+                (dict(self.good_draft(), allocation=["not", "a", "dict"]), "invalid_allocation"),
+                (dict(self.good_draft(), allocation="25 minutes"), "invalid_allocation"),
+                ({k: v for k, v in self.good_draft().items() if k != "coverage"}, "invalid_coverage"),
+                (dict(self.good_draft(), coverage=None), "invalid_coverage"),
+                (dict(self.good_draft(), coverage={"internal": ["x"], "external": {}, "gaps": None}),
+                 "invalid_coverage"),
+                ({"schema": ip.DRAFT_SCHEMA}, "invalid_coverage"),
+                (dict(self.good_draft(), allocation=dict(self.good_draft()["allocation"], present_max="1")),
+                 "allocation_not_numeric:present_max"),
+                (dict(self.good_draft(), allocation=dict(self.good_draft()["allocation"], wall_minutes="25")),
+                 "allocation_not_numeric:wall_minutes"),
+                (dict(self.good_draft(), candidates={"dedupe_key": "x"}), "invalid_candidates"),
+            ]
+            for draft, reason in cases:
+                refused, value = self.refuse_draft(tmp, draft)
+                self.assertEqual(refused, reason, draft)
+                self.assertEqual(value["date"], "2026-09-25")
+            # A string budget value is dropped from the salvaged allocation, the rest is kept.
+            draft = dict(self.good_draft(), allocation=dict(self.good_draft()["allocation"], wall_minutes="25"))
+            _, value = self.refuse_draft(tmp, draft)
+            self.assertNotIn("wall_minutes", value["allocation"])
+            self.assertEqual(value["allocation"]["present_max"], 1)
+            self.assertEqual([(r["status"], r["reasons"]) for r in value["candidates"]],
+                             [("held", ["receipt_refused"])])
+
+    def test_unexpected_settle_error_is_still_a_refusal_with_a_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for exc in (TypeError("x"), KeyError("coverage"), AttributeError("x"), ValueError("odd_shape")):
+                with mock.patch.object(ip, "settle", side_effect=exc):
+                    refused, _ = self.refuse_draft(tmp, self.good_draft())
+                expected = "odd_shape" if isinstance(exc, ValueError) else \
+                    "draft_not_settleable:" + type(exc).__name__
+                self.assertEqual(refused, expected)
+            # Even when salvaging the draft fails, the day is recorded.
+            real = ip.refusal_receipt
+            calls = []
+
+            def flaky(value, reason, **kw):
+                calls.append(value)
+                if len(calls) == 1:
+                    raise TypeError("salvage failed")
+                return real(value, reason, **kw)
+            with mock.patch.object(ip, "settle", side_effect=TypeError("x")), \
+                    mock.patch.object(ip, "refusal_receipt", side_effect=flaky):
+                refused, value = self.refuse_draft(tmp, self.good_draft())
+            self.assertEqual((refused, value["date"], calls[-1]), ("draft_not_settleable:TypeError", "2026-09-25",
+                                                                   {"date": "2026-09-25"}))
 
     def test_refusal_receipt_keeps_gap_dates_and_is_itself_valid(self):
         draft = {"schema": ip.DRAFT_SCHEMA, "date": "2026-09-25", "mode": "scheduled_after_gap",
@@ -971,6 +1111,15 @@ class StageFourStubTest(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_watchdog_default_fires_before_the_wall_allocation(self):
+        script = (REPO / "tools" / "daily-scan" / "run-daily-scan.sh").read_text()
+        default = int(re.search(r'INTEL_TIMEOUT="\$\{DAILY_SCAN_INTEL_TIMEOUT:-(\d+)\}"', script).group(1))
+        self.assertEqual(default, 1440)
+        self.assertLess(default, ip.POLICY["wall_minutes"] * 60)
+        # When it fires, the host (not the model) states why the allocation was exceeded.
+        self.assertIn('intel_over="model calls hit the ${INTEL_TIMEOUT}s watchdog"', script)
+        self.assertIn('draft_args+=(--allocation-exceeded-reason "${intel_over}")', script)
 
     def test_unset_flag_only_logs_skipped(self):
         proc = self.run_scan()

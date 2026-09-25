@@ -87,7 +87,10 @@ PR_TIMEOUT="${DAILY_SCAN_PR_TIMEOUT:-120}"        # pre-stage-1 gh collection: 2
 SCAN_TIMEOUT="${DAILY_SCAN_SCAN_TIMEOUT:-900}"    # stage 1: 15 min
 REVIEW_TIMEOUT="${DAILY_SCAN_REVIEW_TIMEOUT:-600}" # stage 2: 10 min
 SUM_TIMEOUT="${DAILY_SCAN_SUM_TIMEOUT:-600}"      # stage 3: 10 min
-INTEL_TIMEOUT="${DAILY_SCAN_INTEL_TIMEOUT:-1500}" # stage 4 model calls: 25 min (only when enabled)
+# Stage 4 model calls: 24 min (only when enabled). Deliberately one minute under
+# the 25-minute wall_minutes allocation, so the watchdog (which supplies an
+# explicit allocation_exceeded_reason) fires before the pass can overrun silently.
+INTEL_TIMEOUT="${DAILY_SCAN_INTEL_TIMEOUT:-1440}"
 
 # Retention.
 RETAIN_DAYS="${DAILY_SCAN_RETAIN_DAYS:-30}"       # dated outputs + raw logs

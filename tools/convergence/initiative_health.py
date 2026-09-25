@@ -673,12 +673,14 @@ def assess(snapshot, now, policy=None):
         since = snapshot["observed_at"] if state == "unknown" else stamp(last_success)
     next_run = when(iris["next_run_at"])
     # Only an ACTIVE driver with a scheduler row can make idling legitimate; a paused
-    # driver's next_run_at is not a wake.
-    if (state in {"operating", "degraded"} and iris["present"] and iris["status"] == "ACTIVE"
-            and next_run and next_run > now):
+    # driver's next_run_at is not a wake, and a declared hold does not stand in for a
+    # driver whose status is unknown_status, PAUSED or anything else not ACTIVE.
+    iris_active = bool(iris["present"]) and iris["status"] == "ACTIVE"
+    if state in {"operating", "degraded"} and iris_active and next_run and next_run > now:
         idle = {"legitimate": True, "reason": "driver_scheduled",
                 "next_wake": {"kind": "iris_sweep_heartbeat", "at": stamp(next_run)}}
-    elif state != "unknown" and hold.get("declared") and hold.get("resume_condition_satisfiable") is True:
+    elif (state != "unknown" and iris_active and hold.get("declared")
+          and hold.get("resume_condition_satisfiable") is True):
         idle = {"legitimate": True, "reason": "declared_hold_resumable",
                 "next_wake": {"kind": "hold_resume", "at": None}}
     else:
