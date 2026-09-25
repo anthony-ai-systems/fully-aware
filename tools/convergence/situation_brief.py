@@ -27,12 +27,12 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, ProxyHand
 
 try:
     from .work_view import build_view, load_input
-    from .priority_context import project_priority
+    from .priority_context import _aware as _priority_timestamp, project_priority
     from .sweep_attempt import read_attempt
     from .sweep_route import read_route
 except ImportError:  # Direct execution from tools/convergence.
     from work_view import build_view, load_input
-    from priority_context import project_priority
+    from priority_context import _aware as _priority_timestamp, project_priority
     from sweep_attempt import read_attempt
     from sweep_route import read_route
 
@@ -344,8 +344,12 @@ def _priority_read_unavailable(observation: Mapping[str, Any], now: dt.datetime)
             and data["plan"] is None and isinstance(reason, str)
             and reason in {"not_configured", "evidence_unavailable"}):
         return False
-    checked, issue = _parse_time(data["checked_at"])
-    return issue is None and checked is not None and checked <= now
+    try:
+        # The priority validator's own timestamp rule, so the two cannot drift.
+        checked, _text = _priority_timestamp(data["checked_at"])
+    except ValueError:  # the validator's private _Invalid is a ValueError: malformed
+        return False
+    return checked <= now
 
 
 def _selection_projection(join: Mapping[str, Any], current_work: bool) -> Optional[Dict[str, Any]]:

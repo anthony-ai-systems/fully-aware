@@ -432,6 +432,8 @@ class FileTests(unittest.TestCase):
                         {k: v for k, v in envelope.items() if k != "checked_at"},
                         dict(envelope, checked_at=[]), dict(envelope, checked_at="not a time"),
                         dict(envelope, checked_at="2999-01-01T00:00:00Z"),       # future check
+                        dict(envelope, checked_at=" 2026-09-20T17:59:00Z "),      # padded
+                        dict(envelope, checked_at="2026-09-20T17:59:00." + "0" * 60 + "Z"),  # overlength
                         dict(envelope, rows=[])):                              # unexpected field
             with self.subTest(payload=payload):
                 endpoints = self.selected_endpoints()
