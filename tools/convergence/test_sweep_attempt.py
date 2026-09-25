@@ -18,7 +18,8 @@ class AttemptTests(unittest.TestCase):
         self.root=Path(self.tmp.name).resolve(); self.run=self.root/'run-a'; self.run.mkdir(mode=0o700)
         self.receipt={'schema':'iris-sweep-late-closure/v1','automation_id':a.AUTOMATION,
                       'trigger_at':TRIGGER,'late_closure_at':CLOSED,'original_start_monotonic':'not_recorded',
-                      'work_admission':'refused; no fresh work','owner':'IRIS existing task ' + a.OWNER}
+                      'work_admission':'refused; no fresh work',
+                      'owner':'IRIS existing task 01a0cf00-be7a-7263-ac37-4d175f09b546'}
         self.source=self.run/'late-closure.json'; self.save(self.source,self.receipt)
     def save(self,path,value):
         path.write_bytes(c.encode(value)); path.chmod(0o600)
@@ -28,6 +29,59 @@ class AttemptTests(unittest.TestCase):
         pointer=self.create(); result=a.read_attempt(pointer['path'],pointer['sha256'],root=self.root,now=NOW)
         self.assertEqual(result['status'],'missed_before_start'); self.assertGreater(result['trigger_to_close_seconds'],6000)
         self.assertEqual(result['source_freshness'],'not_established'); self.assertEqual(result['authority'],'none')
+
+    def legacy_attempt(self):
+        pointer = self.create()
+        target = Path(pointer['path']); value = json.loads(target.read_text())
+        value['owner_thread_id'] = '01a08366-bd65-72a3-b7a8-ae0e5ab5bb20'
+        self.receipt['owner'] = 'IRIS existing task ' + value['owner_thread_id']
+        self.save(self.source, self.receipt)
+        value['receipt']['sha256'] = c.sha(self.source.read_bytes())
+        self.save(target, value)
+        return target, value
+
+    def test_new_attempt_uses_current_owner_and_read_is_not_execution(self):
+        pointer = self.create()
+        self.assertEqual(json.loads(Path(pointer['path']).read_text())['owner_thread_id'],
+                         '01a0cf00-be7a-7263-ac37-4d175f09b546')
+        self.assertEqual(a.read_attempt(pointer['path'], pointer['sha256'], root=self.root, now=NOW)['authority'], 'none')
+
+    def test_legacy_attempt_remains_readable_without_rewriting(self):
+        target, _ = self.legacy_attempt()
+        before = (target.read_bytes(), self.source.read_bytes())
+        result = a.read_attempt(str(target), c.sha(before[0]), root=self.root, now=NOW)
+        self.assertEqual(result['status'], 'missed_before_start')
+        self.assertEqual((target.read_bytes(), self.source.read_bytes()), before)
+
+    def test_relabelled_legacy_receipt_refuses_in_both_directions(self):
+        target, value = self.legacy_attempt()
+        # An envelope cannot adopt another owner's late closure, in either direction.
+        for envelope_owner, receipt_owner in (
+                ('01a08366-bd65-72a3-b7a8-ae0e5ab5bb20', '01a0cf00-be7a-7263-ac37-4d175f09b546'),
+                ('01a0cf00-be7a-7263-ac37-4d175f09b546', '01a08366-bd65-72a3-b7a8-ae0e5ab5bb20')):
+            value['owner_thread_id'] = envelope_owner
+            self.receipt['owner'] = 'IRIS existing task ' + receipt_owner
+            self.save(self.source, self.receipt)
+            value['receipt']['sha256'] = c.sha(self.source.read_bytes())
+            self.save(target, value)
+            self.assertEqual(a.read_attempt(str(target), c.sha(target.read_bytes()), root=self.root, now=NOW)['availability'], 'unavailable')
+
+    def test_retired_owner_cannot_claim_trigger_at_or_after_retirement(self):
+        target, value = self.legacy_attempt()
+        for trigger in ('2026-09-23T16:08:12Z', '2026-09-23T16:08:13Z'):
+            value.update(trigger_at=trigger, closed_at='2026-09-23T17:00:00Z', recorded_at='2026-09-23T17:01:00Z')
+            value['intended_slot'] = {'local_date':'2026-09-23','hour':9,'timezone':'America/Los_Angeles'}
+            self.receipt.update(trigger_at=trigger, late_closure_at=value['closed_at'])
+            self.save(self.source, self.receipt); value['receipt']['sha256'] = c.sha(self.source.read_bytes())
+            with self.assertRaisesRegex(ValueError, 'retired_attempt_owner'):
+                a.validate(value, target, root=self.root, now=dt.datetime(2026,9,23,18,tzinfo=dt.timezone.utc))
+
+    def test_creator_does_not_relabel_a_legacy_receipt(self):
+        self.receipt['owner'] = 'IRIS existing task 01a08366-bd65-72a3-b7a8-ae0e5ab5bb20'
+        self.save(self.source, self.receipt)
+        with self.assertRaisesRegex(ValueError, 'receipt_owner_mismatch'):
+            self.create()
+        self.assertFalse((self.run/'attempt.json').exists())
     def test_conflicting_original_owner_refused(self):
         self.receipt["owner"] = "another owner"; self.save(self.source, self.receipt)
         with self.assertRaises(ValueError): self.create()

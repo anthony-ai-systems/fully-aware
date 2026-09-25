@@ -643,7 +643,7 @@ def assess(snapshot, now, policy=None):
         {"driver": "intelligence_pass",
          "present": bool(intel.get("latest_date")) if intel["availability"] == "available" else False,
          "status": ("receipt_observed" if intel.get("latest_date") else "no_receipts") if intel["availability"] == "available"
-         else "not_installed", "last_success_at": intel.get("latest_date"), "next_run_at": None,
+         else "no_receipt_observed", "last_success_at": intel.get("latest_date"), "next_run_at": None,
          "evidence": ["receipt_dir:" + intel.get("reason", "read")]},
     ]
     hold = hold_summary(snapshot["holds"], iris["present"])
@@ -738,7 +738,7 @@ def render_markdown(report):
     lines.append("Required decision: %s" % (report["required_decision"] or "none"))
     hold = report["hold"]
     if hold.get("declared"):
-        lines.append("Hold: %s %s since %s; target thread %s; resume condition satisfiable: %s (%s)" % (
+        lines.append("Recorded hold (historical receipt): %s %s since %s; target thread %s; resume condition satisfiable: %s (%s)" % (
             cell(hold["automation_id"]), cell(hold["status"]), cell(hold["recorded_at"]), hold["target_thread"],
             {True: "yes", False: "no", None: "unknown"}[hold["resume_condition_satisfiable"]],
             ", ".join(hold["reasons"])))
