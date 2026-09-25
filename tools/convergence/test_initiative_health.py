@@ -394,6 +394,15 @@ class InitiativeHealthTests(unittest.TestCase):
         self.assertTrue(10 <= len(lines) <= 20, len(lines))
         self.assertIn("Next wake: none", text)
         self.assertIn("| iris_sweep_heartbeat | no | ABSENT |", text)
+        self.assertIn("Recorded hold (historical receipt):", text)
+
+    def test_absent_intelligence_receipt_does_not_claim_uninstalled(self):
+        # An armed installation has no receipt until its first natural run.
+        report = self.f.report()
+        driver = next(row for row in report['drivers'] if row['driver'] == 'intelligence_pass')
+        self.assertEqual(driver['status'], 'no_receipt_observed')
+        self.assertIsNone(driver['last_success_at'])
+        self.assertNotIn('not_installed', health.render_markdown(report))
 
     def run_cli(self, *args):
         config = Path(self.tmp.name) / "config.json"
