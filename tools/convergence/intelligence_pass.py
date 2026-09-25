@@ -20,6 +20,7 @@ import hashlib
 import json
 import math
 import os
+import posixpath
 from pathlib import Path
 import re
 import sys
@@ -572,6 +573,9 @@ def url_identity(value):
         netloc = DEFAULT_PORT.sub("", netloc.rsplit("@", 1)[-1])
         netloc = netloc[4:] if netloc.startswith("www.") else netloc
     path = urllib.parse.unquote(path)
+    if path:
+        path = posixpath.normpath(path)  # /./x and /a/../x name the same resource
+        path = "" if path in {".", "/"} else path
     return trim_identity(urllib.parse.urlunsplit((scheme, netloc, path, "", "")).lower()) or None
 
 
@@ -595,6 +599,10 @@ def internal_identity(ref):
     stripped = PATH_LINE.sub("", token)
     if stripped != token and PATH_LIKE.search(stripped):
         token = stripped
+    if "/" in token:
+        token = posixpath.normpath(token)  # state/./a.md and state/x/../a.md are one file
+        while token.startswith("./"):
+            token = token[2:]
     return trim_identity(token) or None
 
 
@@ -993,7 +1001,8 @@ def finalize_receipt(receipt, policy=None):
         raise ValueError("present_max_exceeded")
     if (r["outcome"] == "opportunities_prepared") != (presented > 0):
         raise ValueError("outcome_does_not_match_candidates")
-    if r["outcome"] == "no_qualifying_opportunity" and (cov["internal"] != "complete" or cov["external"] != "complete"):
+    if r["outcome"] == "no_qualifying_opportunity" and (cov["internal"] != "complete" or cov["external"] != "complete"
+                                                         or cov.get("gaps")):
         # Incomplete coverage cannot support "nothing worth doing"; say what was not seen.
         raise ValueError("no_qualifying_opportunity_requires_complete_coverage")
     return r
@@ -1473,8 +1482,8 @@ def settle(draft, *, now, corpus=None, corpus_gaps=None, docket=None, docket_pro
         receipt["outcome"] = draft["outcome"]
     elif proposals:
         receipt["outcome"] = "opportunities_prepared"
-    elif cov["internal"] != "complete" or cov["external"] != "complete":
-        receipt["outcome"] = "coverage_gap"
+    elif cov["internal"] != "complete" or cov["external"] != "complete" or cov.get("gaps"):
+        receipt["outcome"] = "coverage_gap"  # a listed gap outranks a "complete" label
     else:
         receipt["outcome"] = draft.get("outcome") or "no_qualifying_opportunity"
     return finalize_receipt(receipt, policy), proposals
@@ -1678,13 +1687,26 @@ def finalize_command(a, now):
     if a.dir:
         if (Path(a.dir) / (receipt["date"] + ".json")).exists():
             raise ValueError("receipt_exists")  # the day is already recorded; before any outbox write
-        for proposal in proposals:
-            oid = proposal["source"]["work_item_id"]
-            c = presented[oid]
-            # The proof lands first, so an outbox file never names a missing proof.
-            result["proofs"].append(str(write_proof(a.dir, oid, c["proof_body"])))
-            write_ledger(a.dir, oid, proposal["source"]["work_revision"], evidence_tokens(c))
-            result["outbox"].append(str(write_outbox(a.dir, proposal)))
+        try:
+            for proposal in proposals:
+                oid = proposal["source"]["work_item_id"]
+                c = presented[oid]
+                # The proof lands first, so an outbox file never names a missing proof.
+                result["proofs"].append(str(write_proof(a.dir, oid, c["proof_body"])))
+                write_ledger(a.dir, oid, proposal["source"]["work_revision"], evidence_tokens(c))
+                result["outbox"].append(str(write_outbox(a.dir, proposal)))
+        except (OSError, ValueError) as exc:
+            # A failed preparation write is a failed pass, recorded like any refusal. Withdraw
+            # this attempt's outbox files so nothing is handed off under a failed receipt.
+            for written in result["outbox"]:
+                try:
+                    os.unlink(written)
+                except OSError:
+                    pass
+            refused = clip("preparation_write_failed:" + type(exc).__name__, 200)
+            result.update(refused=refused, outbox=[])
+            receipt = refusal_receipt(value, refused, now=now)
+            result.update(outcome=receipt["outcome"], candidates=receipt["candidates"])
         result["receipt_path"] = str(write_receipt(a.dir, receipt))
     emit(result)
     return 5 if refused else 0

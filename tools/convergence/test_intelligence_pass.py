@@ -372,11 +372,14 @@ class CandidateTest(unittest.TestCase):
                 "tools/convergence/intelligence_pass.py:12-20", "./tools/convergence/intelligence_pass.py#L12).",
                 "(tools/convergence/intelligence_pass.py:12)", "`./tools/convergence/intelligence_pass.py`"],
             "readme.md": ["README.md", "README.md:12", "README.md#setup", "./README.md"],
+            "state/daily-scan/file.md": ["state/daily-scan/file.md", "state/daily-scan/./file.md",
+                                         "./state/daily-scan/../daily-scan/file.md", "state//daily-scan/file.md"],
             "https://example.org/a b": [
                 "https://example.org/a%20b", "http://example.org/a%20b", "https://www.example.org/a%20b",
                 "https://example.org:443/a%20b", "http://example.org:80/a%20b", "https://example.org/a%20b;jsessionid=9",
                 "<https://example.org/a%20b>", "(https://example.org/a%20b).", "HTTPS://WWW.Example.org/A%20B/",
-                "https://example.org/a%20b?utm_source=x#frag"],
+                "https://example.org/a%20b?utm_source=x#frag", "https://example.org/./a%20b",
+                "https://example.org/x/../a%20b"],
             "https://en.wikipedia.org/wiki/foo_(bar)": [
                 "https://en.wikipedia.org/wiki/Foo_(bar)", "(https://en.wikipedia.org/wiki/Foo_(bar)).",
                 "<https://en.wikipedia.org/wiki/Foo_%28bar%29>"],
@@ -903,6 +906,51 @@ class ReceiptTest(unittest.TestCase):
                 refused, value = self.refuse_draft(tmp, self.good_draft())
             self.assertEqual((refused, value["date"], calls[-1]), ("draft_not_settleable:TypeError", "2026-09-25",
                                                                    {"date": "2026-09-25"}))
+
+    def test_failed_preparation_write_still_records_a_failed_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            draft_path = Path(tmp) / "draft.json"
+            draft_path.write_text(json.dumps(self.good_draft()))
+            docket_path = Path(tmp) / "docket.json"
+            docket_path.write_text(json.dumps({"events": []}))
+            intel = Path(tmp) / "intelligence"
+            # Control: with working storage the candidate is handed off.
+            rc, text = self.run_cli("finalize", "--receipt", str(draft_path), "--dir", str(intel),
+                                    "--docket", str(docket_path))
+            self.assertEqual((rc, len(json.loads(text)["outbox"])), (0, 1), text)
+            for target in ("write_proof", "write_ledger", "write_outbox"):
+                shutil.rmtree(intel)
+                with mock.patch.object(ip, target, side_effect=OSError("disk full")):
+                    rc, text = self.run_cli("finalize", "--receipt", str(draft_path), "--dir", str(intel),
+                                            "--docket", str(docket_path))
+                self.assertEqual(rc, 5, text)
+                result = json.loads(text)
+                self.assertEqual((result["refused"], result["outbox"]), ("preparation_write_failed:OSError", []))
+                value = json.loads(Path(result["receipt_path"]).read_text())
+                self.assertEqual(value["outcome"], "failed")
+                self.assertEqual([r["status"] for r in value["candidates"]], ["held"])
+                outbox = intel / "outbox"
+                self.assertFalse(outbox.exists() and any(outbox.iterdir()), target)
+
+    def test_listed_gaps_outrank_complete_coverage_labels(self):
+        gapped = receipt("2026-09-25", outcome="no_qualifying_opportunity",
+                         coverage={"internal": "complete", "external": "complete",
+                                   "gaps": ["Required external source could not be opened"]})
+        with self.assertRaisesRegex(ValueError, "requires_complete_coverage"):
+            ip.finalize_receipt(gapped)
+        plan = ip.plan_pass([], NOW, backlog_count=0)
+
+        def settle(gaps, used):
+            draft = ip.assemble_draft(plan, {"questions": ["a"], "used": used,
+                                             "coverage": {"internal": "complete", "external": "complete",
+                                                          "gaps": gaps}, "candidates": []},
+                                      {}, generator="g", challenger="c", started_at=NOW - dt.timedelta(minutes=5),
+                                      now=NOW, model_launches=1)
+            return ip.settle(draft, now=NOW, corpus=[], docket={"events": []})[0]["outcome"]
+        self.assertEqual(settle([], {"source_opens": 2}), "no_qualifying_opportunity")  # control
+        self.assertEqual(settle(["Required external source could not be opened"], {"source_opens": 2}),
+                         "coverage_gap")
+        self.assertEqual(settle([], {}), "coverage_gap")  # unreported source opens are a gap too
 
     def test_refusal_receipt_keeps_gap_dates_and_is_itself_valid(self):
         draft = {"schema": ip.DRAFT_SCHEMA, "date": "2026-09-25", "mode": "scheduled_after_gap",
