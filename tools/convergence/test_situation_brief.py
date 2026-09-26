@@ -894,6 +894,46 @@ class FileTests(unittest.TestCase):
 
 
 class TransportTests(unittest.TestCase):
+    def test_stale_health_retains_only_selection_and_never_health_authority(self):
+        reference = selection_reference()
+        payload = dict(health(), selection=reference)
+        raw = json.dumps(payload).encode()
+        error = HTTPError(brief.IRIS_BASE + "/healthz", 503, "stale", {}, io.BytesIO(raw))
+        result = brief.fetch_endpoint("/healthz", now=NOW, opener=self.Opener(error=error))
+        self.assertEqual(result["status"], 503)
+        self.assertEqual(result["issue"], "http_error")
+        self.assertEqual(result["data"], {"selection": reference})
+        self.assertFalse(brief._health_current(result["data"], board(), NOW)[0])
+        values = {"/data/board.json": dict(board(), selection=reference),
+                  "/healthz": payload, "/focus.json": dict(focus(), selection=reference),
+                  "/local-agent.json": local_agent(),
+                  "/priority.json": dict(priority_payload(), selection=reference)}
+        endpoints = Endpoints(values)
+        def fetch(path, **kwargs):
+            return result if path == "/healthz" else endpoints(path, **kwargs)
+        with mock.patch.object(brief, "fetch_endpoint", side_effect=fetch):
+            iris, _ = brief._observe_iris(NOW)
+        self.assertTrue(iris["selection"]["identity_consistent"])
+        self.assertFalse(iris["selection"]["current_work_authority"])
+        self.assertFalse(iris["health"]["current"])
+        self.assertFalse(iris["board"]["current"])
+
+    def test_error_selection_is_bounded_typed_and_specific_to_health_503(self):
+        good = json.dumps({"selection": selection_reference()}).encode()
+        invalid = dict(selection_reference(), revision=True)
+        for path, code, raw in (
+            ("/healthz", 503, b'{"selection":null,"selection":null}'),
+            ("/healthz", 503, json.dumps({"selection": invalid}).encode()),
+            ("/healthz", 503, b'x' * (brief.HTTP_MAX_BYTES + 1)),
+            ("/healthz", 503, b'not json'),
+            ("/healthz", 500, good),
+            ("/priority.json", 503, good),
+        ):
+            with self.subTest(path=path, code=code, size=len(raw)):
+                error = HTTPError(brief.IRIS_BASE + path, code, "failure", {}, io.BytesIO(raw))
+                result = brief.fetch_endpoint(path, now=NOW, opener=self.Opener(error=error))
+                self.assertIsNone(result["data"])
+
     class Response:
         def __init__(self, raw, status=200, headers=None):
             self.raw = raw
