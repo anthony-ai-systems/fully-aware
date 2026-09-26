@@ -412,6 +412,35 @@ def fetch_endpoint(path: str, *, now: Optional[dt.datetime] = None, opener: Any 
         if 300 <= int(error.code) < 400:
             return {"path": path, "status": int(error.code), "data": None, "sha256": None,
                     "bytes": 0, "observed_at": observed, "issue": "redirect_refused"}
+        # A stale selected board deliberately returns health 503. Retain only
+        # its identity for the cross-reader join, never its work/health claims.
+        # Dropping this identity would prevent the coordinator from replacing
+        # a stale generation. Freshness and effect admission remain separate.
+        if path == "/healthz" and int(error.code) == 503:
+            try:
+                def unique(items):
+                    result = {}
+                    for key, value in items:
+                        if key in result:
+                            raise ValueError("duplicate_key")
+                        result[key] = value
+                    return result
+                with error:
+                    error_raw = error.read(HTTP_MAX_BYTES + 1)
+                if len(error_raw) > HTTP_MAX_BYTES:
+                    raise ValueError("response_oversize")
+                payload = json.loads(error_raw.decode("utf-8"), object_pairs_hook=unique)
+                if not isinstance(payload, dict) or "selection" not in payload:
+                    raise ValueError("selection_missing")
+                reference, issue = _selection_reference(payload["selection"])
+                if payload["selection"] is not None and issue not in (None, "selection_disabled"):
+                    raise ValueError("selection_invalid")
+                return {"path": path, "status": 503,
+                        "data": {"selection": reference},
+                        "sha256": hashlib.sha256(error_raw).hexdigest(), "bytes": len(error_raw),
+                        "observed_at": _stamp(_now(now)), "issue": "http_error"}
+            except (OSError, ValueError, TypeError, RecursionError, HTTPException):
+                pass
         return {"path": path, "status": int(error.code), "data": None, "sha256": None,
                 "bytes": 0, "observed_at": observed, "issue": "http_error"}
     except (URLError, OSError, TimeoutError, ValueError, HTTPException):
