@@ -139,4 +139,59 @@ class AttemptTests(unittest.TestCase):
         self.receipt['original_start_monotonic']='unknown'; self.save(self.source,self.receipt)
         p=self.create(); self.assertEqual(a.read_attempt(p['path'],p['sha256'],root=self.root,now=NOW)['status'],'unknown')
 
+    def hourly(self, trigger, local_date, hour):
+        instant = c.instant(trigger)
+        closed = instant + dt.timedelta(minutes=5)
+        self.source = self.run / 'outcome.json'
+        self.receipt = {'schema':'iris-sweep-outcome/v1', 'run_id':self.run.name,
+                        'trigger_at':trigger, 'started_at':trigger,
+                        'ended_at':closed.isoformat(), 'status':'partial'}
+        self.save(self.source, self.receipt)
+        return a.create(str(self.run), str(self.source), c.sha(self.source.read_bytes()),
+                        local_date, hour, root=self.root, now=closed)
+
+    def test_new_night_and_midnight_slots_are_recordable(self):
+        for trigger, day, hour in [('2026-09-28T06:00:41Z','2026-09-27',23),
+                                   ('2026-09-28T07:00:41Z','2026-09-28',0)]:
+            with self.subTest(hour=hour):
+                target = self.run / 'attempt.json'
+                if target.exists(): target.unlink()
+                pointer = self.hourly(trigger, day, hour)
+                value = json.loads(Path(pointer['path']).read_text())
+                self.assertEqual(value['intended_slot']['hour'], hour)
+                self.assertEqual(value['status'], 'outcome_recorded')
+
+    def test_hourly_authority_does_not_relabel_old_unscheduled_attempts(self):
+        with self.assertRaisesRegex(ValueError, 'invalid_schedule_slot'):
+            self.hourly('2026-09-27T06:00:41Z', '2026-09-26', 23)
+
+    def test_cutover_in_middle_of_hour_does_not_backdate_a_scheduled_trigger(self):
+        with self.assertRaisesRegex(ValueError, 'trigger_outside_declared_slot'):
+            self.hourly(a.HOURLY_ENABLED_AT.isoformat(), '2026-09-27', 22)
+
+    def test_exact_quarter_hour_boundary_remains_accepted(self):
+        self.hourly('2026-09-28T06:15:00Z', '2026-09-27', 23)
+
+    def test_retired_owner_does_not_gain_hourly_slots(self):
+        pointer = self.hourly('2026-09-28T06:00:41Z', '2026-09-27', 23)
+        target = Path(pointer['path']); value = json.loads(target.read_text())
+        value['owner_thread_id'] = a.LEGACY_OWNER
+        with self.assertRaisesRegex(ValueError, 'invalid_schedule_slot'):
+            a.validate(value, target, root=self.root, now=c.instant('2026-09-28T07:00:00Z'))
+
+    def test_both_repeated_autumn_hours_retain_the_actual_offset(self):
+        for trigger in ('2026-11-01T08:00:41Z', '2026-11-01T09:00:41Z'):
+            target = self.run / 'attempt.json'
+            if target.exists(): target.unlink()
+            self.hourly(trigger, '2026-11-01', 1)
+
+    def test_wrong_day_hour_or_outside_quarter_hour_still_refuses(self):
+        for trigger, day, hour in [('2026-09-28T06:00:41Z','2026-09-28',23),
+                                   ('2026-09-28T06:00:41Z','2026-09-27',22),
+                                   ('2026-09-28T06:15:01Z','2026-09-27',23),
+                                   ('2026-09-28T06:00:41Z','2026-09-27',24),
+                                   ('2026-09-28T06:00:41Z','2026-09-27',True)]:
+            with self.subTest(trigger=trigger, day=day, hour=hour), self.assertRaises(ValueError):
+                self.hourly(trigger, day, hour)
+
 if __name__=='__main__': unittest.main()

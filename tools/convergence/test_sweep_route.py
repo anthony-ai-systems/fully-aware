@@ -62,6 +62,13 @@ class RouteTests(unittest.TestCase):
         self.assertFalse(value["expected_schedule"])
         self.assertNotIn("PRIVATE", json.dumps(value))
 
+    def test_old_three_pass_cadence_is_visible_as_no_longer_expected(self):
+        self.path.write_text(config(schedule='FREQ=DAILY;BYHOUR=9,13,17;BYMINUTE=0;BYSECOND=0'))
+        value = self.read()
+        self.assertEqual(value['availability'], 'available')
+        self.assertFalse(value['expected_schedule'])
+        self.assertFalse(value['execution_verified'])
+
     def test_wrong_identity_invalid_toml_and_unknown_status_fail_closed(self):
         for text in (config("OTHER"), config().replace('version = 1', 'version = true'),
                      config().replace(route.AUTOMATION, 'other'), 'invalid toml',
