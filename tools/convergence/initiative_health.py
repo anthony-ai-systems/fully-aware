@@ -35,6 +35,9 @@ WORKER_SCHEMA = "clayton-local-receipt/v1"
 MISSED_ATTEMPTS = {"missed_before_start", "unknown"}
 FAILED_OUTCOMES = {"failed", "error", "refused", "aborted", "cancelled", "blocked"}
 POLICY = {"sweep_stale_hours": 26, "worker_window_days": 7}
+# Diagnostic only: the existing sweep_clock.TOTAL remains the execution bound.
+# A recent directory can mean awaiting an outcome, never verified running/success.
+SWEEP_PENDING_SECONDS = 900
 MAX_JSON = 2 * 1024 * 1024
 MAX_WORKER_RUNS = 1000
 RUN_NAME = re.compile(r"(\d{8}T\d{6}Z)")
@@ -491,7 +494,7 @@ def automation_driver(snapshot, automation_id):
 
 
 def sweep_success(snapshot, now):
-    """Latest successful outcome and whether a missed attempt followed it."""
+    """Latest outcome, explicit failures and an unverified pending observation."""
     sweeps = snapshot["sweeps"]
     outcomes, evidence = [], []
     pointer = sweeps["pointer"]
@@ -512,17 +515,30 @@ def sweep_success(snapshot, now):
         if outcome and outcome["availability"] == "available" and outcome["success"]:
             outcomes.append(when(outcome["ended_at"]))
     last = max(outcomes) if outcomes else None
-    missed = []
+    missed, pending = [], None
     attempt = pointer.get("latest_attempt") if pointer["availability"] == "available" else None
     if attempt and attempt["availability"] == "available" and attempt["status"] in MISSED_ATTEMPTS:
         if last is None or when(attempt["trigger_at"]) > last:
             missed.append({"run_id": attempt["run_id"], "status": attempt["status"], "trigger_at": attempt["trigger_at"]})
-    if newest and newest.get("started_at") and not newest.get("outcome"):
+    if newest and newest.get("started_at"):
         started = when(newest["started_at"])
         if (last is None or started > last) and not any(m["run_id"] == newest["run_id"] for m in missed):
-            missed.append({"run_id": newest["run_id"], "status": "no_outcome_recorded", "trigger_at": newest["started_at"]})
+            outcome = newest.get("outcome")
+            age = (now - started).total_seconds()
+            if (outcome is None and not newest.get("late_closure")
+                    and 0 <= age < SWEEP_PENDING_SECONDS):
+                pending = {"run_id": newest["run_id"], "status": "awaiting_outcome",
+                           "trigger_at": newest["started_at"],
+                           "deadline_at": stamp(started + dt.timedelta(seconds=SWEEP_PENDING_SECONDS)),
+                           "time_basis": "run_directory_timestamp",
+                           "running_verified": False, "completion": "unverified"}
+            elif outcome is None or outcome.get("availability") != "available" or not outcome.get("success"):
+                status = ("no_outcome_recorded" if outcome is None else
+                          "outcome_unavailable" if outcome.get("availability") != "available" else outcome["status"])
+                missed.append({"run_id": newest["run_id"], "status": status,
+                               "trigger_at": newest["started_at"]})
     known = pointer["availability"] == "available" or runs["availability"] == "available"
-    return last, missed, evidence, known
+    return last, missed, evidence, known, pending
 
 
 def docket_summary(docket, now):
@@ -623,7 +639,7 @@ def assess(snapshot, now, policy=None):
     stale_after = dt.timedelta(hours=policy["sweep_stale_hours"])
     iris = automation_driver(snapshot, IRIS_AUTOMATION)
     radar = automation_driver(snapshot, RADAR_AUTOMATION)
-    last_success, missed, sweep_evidence, sweep_known = sweep_success(snapshot, now)
+    last_success, missed, sweep_evidence, sweep_known, pending = sweep_success(snapshot, now)
     recent = last_success is not None and now - last_success <= stale_after
     iris_row = {"driver": "iris_sweep_heartbeat", "automation_id": IRIS_AUTOMATION, "present": iris["present"],
                 "presence": iris["presence"], "status": iris["status"], "last_success_at": stamp(last_success),
@@ -699,7 +715,8 @@ def assess(snapshot, now, policy=None):
     docket = docket_summary(snapshot["docket"], now)
     return {
         "schema": SCHEMA, "observed_at": snapshot["observed_at"], "state": state, "reason": reason,
-        "since": since, "policy": policy, "drivers": drivers, "missed_attempts": missed, "hold": hold,
+        "since": since, "policy": policy, "drivers": drivers, "missed_attempts": missed,
+        "pending_attempt": pending, "hold": hold,
         "follow_through_gaps": docket.get("follow_through_gaps", []),
         "overdue_rechecks": docket.get("overdue_rechecks"), "open_requests": docket.get("open_requests"),
         "docket": {k: v for k, v in docket.items() if k != "follow_through_gaps"},
@@ -746,6 +763,10 @@ def render_markdown(report):
         lines.append("Hold: none declared (%s)" % hold["reason"])
     for miss in report["missed_attempts"][:2]:
         lines.append("Missed attempt: %s %s at %s" % (miss["run_id"], miss["status"], miss["trigger_at"]))
+    pending = report.get("pending_attempt")
+    if pending:
+        lines.append("Awaiting outcome: %s; receipt window ends about %s (running and completion unverified)" % (
+            pending["run_id"], pending["deadline_at"]))
     docket = report["docket"]
     if docket["availability"] == "available":
         gaps = report["follow_through_gaps"]
