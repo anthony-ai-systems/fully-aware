@@ -783,7 +783,43 @@ class FileTests(unittest.TestCase):
         self.assertIn("missed_before_start", brief.render_markdown(output))
         self.assertLessEqual(len(brief.render_markdown(output)), brief.MAX_OUTPUT_CHARS)
 
-    def assert_large_history(self, priority, incoherent=False, latest_path=None):
+    def test_hourly_route_and_attempt_preserve_priorities_with_maximal_changes(self):
+        latest = latest_outcome()
+        latest["material_change"] = {key: "C" * 400 for key in ("board", "calendar", "focus")}
+        latest["next_action"] = "N" * 400
+        latest["coverage"] = {"source-%d" % i: {"state": "S" * 200} for i in range(8)}
+        latest_path = self.write_json("hourly-latest.json", latest)
+        attempt = {"availability": "available", "sha256": "a" * 64,
+                   "run_id": "r" * 80, "status": "completed", "trigger_at": VERIFIED,
+                   "closed_at": VERIFIED, "recorded_at": VERIFIED,
+                   "intended_slot": {"local_date": "2026-09-20", "hour": 9,
+                                     "timezone": "America/Los_Angeles"},
+                   "trigger_to_close_seconds": 60, "age_seconds": 60,
+                   "authority": "none", "source_freshness": "not_established",
+                   "human_delivery": "unverified"}
+        route = {"availability": "available", "configured_status": "active",
+                 "expected_owner": True, "expected_schedule": True,
+                 "reason": "expected_local_configuration", "execution_verified": False,
+                 "authority": "none", "limits": ["configuration is not execution or delivery"]}
+        for incoherent in (False, True):
+            with self.subTest(incoherent=incoherent), \
+                    mock.patch.object(brief, "read_attempt", return_value=copy.deepcopy(attempt)), \
+                    mock.patch.object(brief, "read_route", return_value=copy.deepcopy(route)):
+                output = self.assert_large_history(maximal_priority_payload(),
+                                                 incoherent=incoherent,
+                                                 latest_path=str(latest_path),
+                                                 sweep_automation="synthetic-automation.toml",
+                                                 min_digest_chars=200)
+                self.assertEqual(output["latest_attempt"], attempt)
+                self.assertEqual(output["scheduled_route"], route)
+                self.assertEqual(output["iris"]["board"]["current"], not incoherent)
+                self.assertEqual([row["key"] for row in output["latest_sweep"]["material_changes"]],
+                                 ["board", "calendar", "focus"])
+                self.assertEqual(output["latest_sweep"]["delivery"], "unverified")
+                self.assertLessEqual(len(brief.render_markdown(output)), brief.MAX_OUTPUT_CHARS)
+
+    def assert_large_history(self, priority, incoherent=False, latest_path=None,
+                             sweep_automation=None, min_digest_chars=1000):
         packet = focus()
         row = packet["requests"][0]
         packet["counts"].update(reconciliation=0, history=3)
@@ -814,11 +850,12 @@ class FileTests(unittest.TestCase):
             endpoints.after = board(proof_hash="d" * 64)
         with mock.patch.object(brief, "fetch_endpoint", side_effect=endpoints):
             output = brief.build_brief(str(boot_path), str(plans_path), str(outcome), now=NOW,
-                                       latest_sweep_outcome=latest_path)
+                                       latest_sweep_outcome=latest_path,
+                                       sweep_automation=sweep_automation)
         self.assertLessEqual(len(json.dumps(output, ensure_ascii=False, separators=(",", ":"))), brief.MAX_OUTPUT_CHARS)
         self.assertNotEqual(output.get("status"), "bounded_unavailable")
         excerpt = output["sweep_digest"]["untrusted_advisory_text"]
-        self.assertGreaterEqual(len(excerpt), 1000)
+        self.assertGreaterEqual(len(excerpt), min_digest_chars)
         self.assertEqual(output["sweep_digest"]["omitted_chars"], len(text) - len(excerpt))
         projected = output["iris"]["focus"]
         self.assertEqual(projected["requests"][0]["key"], "answered-current")

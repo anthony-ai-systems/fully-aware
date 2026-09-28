@@ -1512,6 +1512,34 @@ def _shrink(brief: Dict[str, Any]) -> Dict[str, Any]:
             "latest sweep ended_at dates the observation only, not material source freshness; no completion or delivery is inferred",
         ]
 
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(digest, dict):
+        # The older advisory narrative is optional when newer priorities,
+        # changes, attempt and schedule evidence exhaust the shared budget.
+        text = digest.get("untrusted_advisory_text")
+        if isinstance(text, str) and len(text) > 200:
+            digest["untrusted_advisory_text"] = text[:200]
+            digest["omitted_chars"] = digest.get("omitted_chars", 0) + len(text) - 200
+            add_limit("older digest excerpt reduced further; source clock and omitted character count retained")
+
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(iris, dict):
+        board = iris.get("board")
+        if isinstance(board, dict):
+            # The validated board projection retains its current/coherence
+            # result and issues; these are duplicate transport observations.
+            omitted = sum(key in board for key in ("before", "after"))
+            for key in ("before", "after"):
+                board.pop(key, None)
+            if omitted:
+                board["transport_observations_omitted"] = omitted
+
+    if encoded() > MAX_OUTPUT_CHARS and isinstance(work, dict):
+        lanes = work.get("selected_lanes")
+        if isinstance(lanes, list) and lanes:
+            # Source freshness remains in work.sources. Preserve all current
+            # priority identities and the decision before this last lane row.
+            work["selected_lanes_omitted"] = work.get("selected_lanes_omitted", 0) + len(lanes)
+            work["selected_lanes"] = []
+
     if encoded() > MAX_OUTPUT_CHARS:
         return {
             "schema": SCHEMA,

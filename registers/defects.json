@@ -1,6 +1,6 @@
 {
   "schema": "defect-register/v1",
-  "updated": "2026-09-25",
+  "updated": "2026-09-28",
   "purpose": "The single list of what is broken across Anthony's estate. Every item carries a shell command that exits 0 when the defect is gone. Status is never stored here; it is computed each morning into state/defects-status.json and rendered at the top of the boot pack.",
   "rules": {
     "severity": {
@@ -778,6 +778,26 @@
       "not_before": null,
       "pr_check": null,
       "added": "2026-09-25"
+    },
+    {
+      "id": "BRIEF-1",
+      "severity": "P1",
+      "system": "shared situation briefing output budget",
+      "owner": "session",
+      "fix_scope": "local",
+      "size": "S",
+      "since": "2026-09-28",
+      "symptom": "Valid hourly attempt, route and recent-change evidence can exhaust the output budget and hide the entire current briefing.",
+      "verify": "python3 -c 'import hashlib,json,os,pathlib,subprocess,sys; p=pathlib.Path.home()/\"Documents/ChatGPT/fully-aware-system/outputs/20260923-rebuild/selection-reader-release.json\"; r=json.loads(p.read_text()); w=pathlib.Path(r[\"worktree\"]); assert r[\"status\"]==\"accepted_local_reader\"; assert all(hashlib.sha256((w/f).read_bytes()).hexdigest()==h for f,h in r[\"files\"].items()); sys.exit(subprocess.call([sys.executable,\"-m\",\"unittest\",\"test_situation_brief.FileTests.test_hourly_route_and_attempt_preserve_priorities_with_maximal_changes\",\"-q\"],cwd=w,env=dict(os.environ,PYTHONPATH=str(w/\"tools/convergence\"))))'",
+      "fix_hint": "Release the reviewed reader that retains current priority and decision identities by trimming optional digest, duplicate transport and lane detail. Verification checks the installed manifest hashes and runs the complete mixed-source budget regression against that installed checkout; it is not source freshness or delivery acceptance.",
+      "accepted": null,
+      "source": "fully-aware-convergence shared-brief-output-budget; reproduced live and with synthetic current and incoherent board fixtures",
+      "provisional": false,
+      "repo": null,
+      "remote": null,
+      "not_before": null,
+      "pr_check": null,
+      "added": "2026-09-28"
     }
   ]
 }
