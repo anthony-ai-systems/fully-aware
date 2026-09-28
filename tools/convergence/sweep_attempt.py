@@ -14,6 +14,9 @@ AUTOMATION = 'iris-proactive-work-sweep'
 OWNER = '01a0cf00-be7a-7263-ac37-4d175f09b546'
 LEGACY_OWNER = '01a08366-bd65-72a3-b7a8-ae0e5ab5bb20'
 LEGACY_RETIRED_AT = dt.datetime(2026, 9, 23, 16, 8, 12, tzinfo=dt.timezone.utc)
+# Native configuration readback when Anthony's hourly ruling was installed.
+# Preserve the old slots for historical attempts rather than rewriting history.
+HOURLY_ENABLED_AT = dt.datetime(2026, 9, 28, 5, 27, 57, 222000, tzinfo=dt.timezone.utc)
 ROOT = Path('/Users/anthonyflores/Library/Application Support/IRIS/orchestrator/sweep-runs')
 SCHEMA = 'iris-sweep-attempt/v1'
 KEYS = {'schema', 'automation_id', 'owner_thread_id', 'run_id', 'trigger_at', 'intended_slot',
@@ -56,20 +59,25 @@ def validate(value, envelope_path, *, root=ROOT, now=None):
     if (value['run_id'] != path.parent.name or value['automation_id'] != AUTOMATION
             or owner not in (OWNER, LEGACY_OWNER)):
         raise ValueError('attempt_identity_mismatch')
+    trigger = clock.instant(value['trigger_at']); closed = clock.instant(value['closed_at'])
+    allowed_hours = range(24) if owner == OWNER and trigger >= HOURLY_ENABLED_AT else (9, 13, 17)
     slot = value['intended_slot']
     if (not isinstance(slot, dict) or set(slot) != {'local_date', 'hour', 'timezone'}
             or slot['timezone'] != 'America/Los_Angeles' or type(slot['hour']) is not int
-            or slot['hour'] not in (9, 13, 17)):
+            or slot['hour'] not in allowed_hours):
         raise ValueError('invalid_schedule_slot')
     day = dt.date.fromisoformat(slot['local_date'])
     if day.isoformat() != slot['local_date']: raise ValueError('invalid_schedule_date')
-    scheduled = dt.datetime.combine(day, dt.time(slot['hour']), ZoneInfo(slot['timezone']))
-    trigger = clock.instant(value['trigger_at']); closed = clock.instant(value['closed_at'])
+    local_trigger = trigger.astimezone(ZoneInfo(slot['timezone']))
+    # Derive the boundary from the actual trigger so the repeated autumn hour
+    # retains its UTC offset/fold instead of being mistaken for the first hour.
+    scheduled = local_trigger.replace(minute=0, second=0, microsecond=0).astimezone(dt.timezone.utc)
     # Retained attempts keep their original owner; retirement never rewrites history.
     if owner == LEGACY_OWNER and trigger >= LEGACY_RETIRED_AT:
         raise ValueError('retired_attempt_owner')
     recorded = clock.instant(value['recorded_at'])
-    if not 0 <= (trigger - scheduled).total_seconds() <= 900:
+    if (local_trigger.date() != day or local_trigger.hour != slot['hour']
+            or not 0 <= (trigger - scheduled).total_seconds() <= 900):
         raise ValueError('trigger_outside_declared_slot')
     if not trigger <= closed <= recorded <= now: raise ValueError('attempt_time_order')
     ref = value['receipt']
@@ -124,7 +132,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--run-dir', required=True); p.add_argument('--receipt', required=True)
     p.add_argument('--receipt-sha256', required=True); p.add_argument('--local-date', required=True)
-    p.add_argument('--hour', type=int, choices=(9, 13, 17), required=True)
+    p.add_argument('--hour', type=int, choices=range(24), required=True)
     a = p.parse_args()
     try:
         result = create(a.run_dir, a.receipt, a.receipt_sha256, a.local_date, a.hour)
