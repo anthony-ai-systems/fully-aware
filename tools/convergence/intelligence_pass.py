@@ -366,6 +366,30 @@ def _date_or_timestamp_ok(value):
         return _timestamp_ok(value)
 
 
+PARTIAL_DATE = re.compile(r"\d{4}(?:-(?:0[1-9]|1[0-2]))?\Z")
+DATE_LABEL = re.compile(r"(?:published|accessed)\s+", re.I)
+
+
+def _published_or_accessed_ok(value):
+    """A source date: a full date or aware timestamp, or a year / year-month.
+
+    Older papers often carry only a year or month, and the generator writes them
+    that way ("2015", "2010-05"), sometimes with the access date as well
+    ("2011-10; accessed 2026-09-29"). Each ';'-separated part must be a valid
+    date. The field is only validated, never parsed further or sent to the docket.
+    """
+    if not isinstance(value, str) or not value.strip() or len(value) > 64:
+        return False
+    for part in value.split(";"):
+        part = part.strip()
+        label = DATE_LABEL.match(part)
+        if label:
+            part = part[label.end():]
+        if not (PARTIAL_DATE.fullmatch(part) or _date_or_timestamp_ok(part)):
+            return False
+    return True
+
+
 def _url_ok(value):
     return (isinstance(value, str) and 0 < len(value) <= 2000 and value == value.strip()
             and re.match(r"https?://\S+\Z", value) is not None)
@@ -418,7 +442,7 @@ def validate_candidate(c):
                         or set(item) - {"url"} != EXTERNAL_KEYS
                         or ("url" in item and not _url_ok(item["url"]))
                         or not isinstance(item["source"], str) or not item["source"].strip()
-                        or not _date_or_timestamp_ok(item["published_or_accessed"])
+                        or not _published_or_accessed_ok(item["published_or_accessed"])
                         or not isinstance(item["claim"], str) or not prose(item["claim"])
                         or item["status"] not in {"verified", "unverified"}):
                     reasons.append("invalid_external_evidence")

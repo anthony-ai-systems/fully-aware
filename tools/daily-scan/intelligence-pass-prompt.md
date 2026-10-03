@@ -127,5 +127,9 @@ Your final message must be one JSON object and nothing else:
 }
 ```
 
+`published_or_accessed` is a date: `YYYY-MM-DD`, or `YYYY-MM` / `YYYY` when the
+source gives no day, optionally followed by `; accessed YYYY-MM-DD`. Never write
+month names or other formats: one malformed evidence item rejects the whole candidate.
+
 Use `external_gap` (a one-line reason) instead of `external_evidence` only when no
 external source could be consulted. `candidates` may be empty. At most 2 candidates.
