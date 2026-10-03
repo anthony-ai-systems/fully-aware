@@ -441,6 +441,20 @@ class CandidateTest(unittest.TestCase):
                                                 "claim": "x", "status": "verified"}])
         self.assertIn("invalid_external_evidence", ip.validate_candidate(bad_url))
 
+    def test_external_evidence_partial_source_dates(self):
+        # The exact forms the generator wrote during the 2026-09-26..10-02 trial,
+        # each of which rejected an otherwise eligible candidate.
+        def with_date(value):
+            return candidate(external_evidence=[{"source": "Journal", "url": "https://example.org/paper",
+                                                 "published_or_accessed": value, "claim": "x", "status": "verified"}])
+        for good in ("2015", "1991", "2010-05", "2011-03", "2011-10; accessed 2026-09-29",
+                     "2015-02; accessed 2026-09-29", "2026-09-28", "2026-09-28T13:20:32Z",
+                     "published 2015; accessed 2026-09-29"):
+            self.assertNotIn("invalid_external_evidence", ip.validate_candidate(with_date(good)), good)
+        for bad in ("", "  ", "September 2015", "2015-13", "2015-00", "15", "2015/05", "2015;", "accessed",
+                    "2011-10; sometime", "2026-09-28T13:20:32", "x" * 65):
+            self.assertIn("invalid_external_evidence", ip.validate_candidate(with_date(bad)), bad)
+
 
 PROPOSED_AT = dt.datetime(2026, 9, 20, 17, tzinfo=UTC)
 
